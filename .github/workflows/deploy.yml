@@ -11,13 +11,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend
+        run: |
+          npm --prefix web ci
+          npm --prefix web run build
+
       - name: Copy app + engine to server
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.host }}
           username: ${{ secrets.user }}
           key: ${{ secrets.ssh_key }}
-          source: "server.js,package.json,engine/**"
+          source: "server.js,package.json,engine/**,web/dist/**"
           target: "/srv/hypnosis-studio/"
 
       - name: Restart service and smoke test
@@ -31,3 +42,4 @@ jobs:
             sleep 2
             sudo /bin/systemctl is-active hypnosis-studio
             curl -sf -o /dev/null -w "smoke: HTTP %{http_code}\n" http://127.0.0.1:4100/
+            curl -sf http://127.0.0.1:4100/api/health
