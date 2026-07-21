@@ -252,4 +252,27 @@ const server = http.createServer(async (req, res) => {
   serveStatic(req, res, url);
 });
 
+// On boot (and then every 60 s), fail any job whose status is stuck at
+// "rendering" — e.g. the service was restarted mid-render (OOM kill on prod
+// proved this path). updatedAt is refreshed by the worker at every stage, so
+// a stale timestamp means the worker is gone.
+function sweepStaleJobs() {
+  const STALE_MS = 2 * 60 * 1000;
+  let dirs;
+  try { dirs = fs.readdirSync(RENDERS, { withFileTypes: true }); } catch { return; }
+  for (const d of dirs) {
+    if (!d.isDirectory()) continue;
+    const p = path.join(RENDERS, d.name, 'status.json');
+    const st = readJsonSafe(p);
+    if (!st || st.state !== 'rendering') continue;
+    const age = Date.now() - new Date(st.updatedAt || 0).getTime();
+    if (age > STALE_MS) {
+      writeStatus(d.name, { ...st, state: 'failed', error: 'service restarted during render — please start a new one' });
+      console.log('swept stale job', d.name);
+    }
+  }
+}
+sweepStaleJobs();
+setInterval(sweepStaleJobs, 60 * 1000).unref();
+
 server.listen(PORT, '127.0.0.1', () => console.log('hypnosis-studio on 127.0.0.1:' + PORT));

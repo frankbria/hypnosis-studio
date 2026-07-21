@@ -11,6 +11,14 @@ v2 changes (user feedback):
   the previous segment's tail, so the Brian<->whisper timbre change crossfades.
 - Longer format supported via total_s (track 3 = 900 s).
 
+v3 (prod memory safety, sonically equivalent):
+- Pad energy flattening smooths the 1-Hz correction series with the 5 s kernel
+  and applies it chunked (was: fftconvolve on the full-rate curve -> multi-GB
+  complex128 FFT; OOM-killed on the 4 GB prod box).
+- Voice gain curve applied in 60 s chunks; big buffers freed as soon as done.
+- Isochronic bed synthesized in 60 s chunks (two-pass: exact global RMS
+  normalization preserved) instead of six full-length temporaries.
+
 Pipeline: flatten pad -> voice submix on smooth envelope -> carrier notch ->
 isochronic bed (theta-alpha arc) -> fade -> -20 dB RMS -> soft clip -> QA.
 """
@@ -19,7 +27,7 @@ import os
 import sys
 import numpy as np
 import soundfile as sf
-from scipy.signal import butter, hilbert, sosfiltfilt, welch, fftconvolve
+from scipy.signal import butter, hilbert, sosfiltfilt, welch
 
 TRACK = sys.argv[1] if len(sys.argv) > 1 else "golden_thread"
 TITLE = sys.argv[2] if len(sys.argv) > 2 else "The Golden Thread - Self Hypnosis (MONO one-ear)"
@@ -33,6 +41,7 @@ DTYPE = np.float32 if os.environ.get("HYPNO_DTYPE") == "float32" else np.float64
 SKIP_QA = os.environ.get("HYPNO_SKIP_QA") == "1"
 
 SR = 44100
+CH = 60 * SR  # chunk size for full-rate curve operations
 
 # ---------- load segments & build voice timeline ----------
 segs = json.load(open(f"{TRACK}_tts_segments.json"))["segments"]
@@ -87,10 +96,13 @@ nwin = len(pad) // w
 win_rms = np.array([np.sqrt(np.mean(pad[i * w:(i + 1) * w] ** 2)) for i in range(nwin)])
 win_rms = np.maximum(win_rms, 1e-9)
 corr = np.clip(10 ** (-23 / 20) / win_rms, 10 ** (-8 / 20), 10 ** (8 / 20))
-corr_t = np.repeat(corr, w)[: len(pad)]
-k = np.hanning(5 * SR); k /= k.sum()
-corr_t = fftconvolve(corr_t, k, mode="same")
-pad *= corr_t
+# smooth at 1 Hz with the same 5 s window, then apply chunked via interpolation
+k = np.hanning(5); k /= k.sum()
+corr = np.convolve(corr, k, mode="same")
+for c0 in range(0, len(pad), CH):
+    c1 = min(c0 + CH, len(pad))
+    ct = np.interp(np.arange(c0, c1) / SR, np.arange(len(corr)) + 0.5, corr)
+    pad[c0:c1] *= ct.astype(DTYPE, copy=False)
 pad_rms = np.sqrt(np.mean(pad ** 2))
 print(f"pad flattened: {len(pad)/SR/60:.2f} min, RMS {20*np.log10(pad_rms):.1f} dB")
 
@@ -102,6 +114,7 @@ for sid, t0, t1, _ in positions:
     y *= pad_rms / rms  # unity: at 0 dB relative to pad
     i0 = int(t0 * SR)
     voice[i0: i0 + len(y)] += y
+del waves
 
 GAIN_BP = [
     (0.0, 0.0),                 # soft open (user feedback: start softer)
@@ -114,10 +127,12 @@ GAIN_BP = [
     (voice_end, 6.0),
 ]
 bp_t = np.array([p[0] for p in GAIN_BP]); bp_g = np.array([p[1] for p in GAIN_BP])
-t_all = np.arange(len(voice)) / SR
-gain_curve = 10 ** (np.interp(t_all, bp_t, bp_g) / 20)
-voice *= gain_curve
+for c0 in range(0, len(voice), CH):
+    c1 = min(c0 + CH, len(voice))
+    g = 10 ** (np.interp(np.arange(c0, c1) / SR, bp_t, bp_g) / 20)
+    voice[c0:c1] *= g.astype(DTYPE, copy=False)
 mix = pad + voice
+del voice
 print("voice placed on smooth envelope: 0 -> +3 -> +6 -> sink -14 -> +6 dB")
 
 # ---------- isochronic bed ----------
@@ -136,9 +151,9 @@ sos_notch = butter(2, [(CARRIER - 10) / (SR / 2), (CARRIER + 10) / (SR / 2)],
                    btype="bandstop", output="sos")
 pad = sosfiltfilt(sos_notch, pad)
 mix = sosfiltfilt(sos_notch, mix)
+del pad
 
 n = len(mix)
-tt = np.arange(n) / SR
 wander_mid = SUG_START + (SUG_END - SUG_START) * 0.6
 TRAJ = [
     (0, 0.0), (30, 5.0),
@@ -151,17 +166,34 @@ TRAJ = [
     (TOTAL_S - 5, 0.0),
 ]
 bp_t = np.array([p[0] for p in TRAJ]); bp_r = np.array([p[1] for p in TRAJ])
-rate = np.interp(tt, bp_t, bp_r)
-phase_acc = np.cumsum(rate) / SR
-gate = 0.5 * (1 - np.cos(2 * np.pi * phase_acc)) ** 1.5
-gate[rate <= 0.01] = 0.0
-bed = np.sin(2 * np.pi * CARRIER * tt) * gate
-bed *= pad_rms * 10 ** (-29 / 20) / (np.sqrt(np.mean(bed ** 2)) + 1e-12)
-mix += bed
+
+
+def bed_chunks():
+    """Yield (c0, c1, bed_chunk) with the phase accumulator carried across chunks."""
+    ph = 0.0
+    for c0 in range(0, n, CH):
+        c1 = min(c0 + CH, n)
+        t = np.arange(c0, c1) / SR
+        rate = np.interp(t, bp_t, bp_r)
+        phseg = ph + np.concatenate(([0.0], np.cumsum(rate)[:-1] / SR))
+        gate = 0.5 * (1 - np.cos(2 * np.pi * phseg)) ** 1.5
+        gate[rate <= 0.01] = 0.0
+        yield c0, c1, (np.sin(2 * np.pi * CARRIER * t) * gate).astype(DTYPE, copy=False)
+        ph = phseg[-1] + rate[-1] / SR
+
+
+# pass 1: exact global bed power for the normalization constant
+ss = 0.0
+for _, _, bc in bed_chunks():
+    ss += float(np.sum(bc * bc))
+bed_scale = pad_rms * 10 ** (-29 / 20) / (np.sqrt(ss / n) + 1e-12)
+# pass 2: add the scaled bed into the mix
+for c0, c1, bc in bed_chunks():
+    mix[c0:c1] += (bed_scale * bc).astype(DTYPE, copy=False)
 
 # ---------- master ----------
 fade_n = 30 * SR
-mix[-fade_n:] *= np.cos(np.linspace(0, np.pi / 2, fade_n)) ** 2
+mix[-fade_n:] *= (np.cos(np.linspace(0, np.pi / 2, fade_n)) ** 2).astype(DTYPE, copy=False)
 mix *= (10 ** (-20 / 20)) / (np.sqrt(np.mean(mix ** 2)) + 1e-12)
 over = np.abs(mix) > 0.9
 if over.any():
