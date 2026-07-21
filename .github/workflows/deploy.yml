@@ -7,24 +7,25 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - uses: actions/checkout@v4
 
       - name: Copy app + engine to server
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.PROD_HOST }}
-          username: ${{ secrets.PROD_USER }}
-          key: ${{ secrets.PROD_SSH_KEY }}
+          host: ${{ secrets.host }}
+          username: ${{ secrets.user }}
+          key: ${{ secrets.ssh_key }}
           source: "server.js,package.json,engine/**"
           target: "/srv/hypnosis-studio/"
 
       - name: Restart service and smoke test
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.PROD_HOST }}
-          username: ${{ secrets.PROD_USER }}
-          key: ${{ secrets.PROD_SSH_KEY }}
+          host: ${{ secrets.host }}
+          username: ${{ secrets.user }}
+          key: ${{ secrets.ssh_key }}
           script: |
             sudo /bin/systemctl restart hypnosis-studio
             sleep 2
