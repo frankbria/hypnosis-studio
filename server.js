@@ -218,8 +218,13 @@ const server = http.createServer(async (req, res) => {
     if (!st) return sendJson(res, 404, { error: 'unknown job' });
     if (st.state !== 'ready') return sendJson(res, 409, { error: 'not ready' });
     const manifest = readJsonSafe(path.join(jobDir(id), 'manifest.json'));
-    const allowed = manifest && manifest.track
-      ? [manifest.track.mp3, manifest.track.wav].filter(Boolean)
+    // Multi-track manifests list every mastered file under tracks[]; tolerate
+    // the legacy single-track {track:{mp3,wav}} shape without crashing.
+    const allowed = manifest
+      ? (Array.isArray(manifest.tracks) ? manifest.tracks : [manifest.track])
+          .filter(Boolean)
+          .flatMap((t) => [t.mp3, t.wav])
+          .filter(Boolean)
       : [];
     if (!allowed.includes(name)) return sendJson(res, 404, { error: 'unknown file' });
     const filePath = path.join(jobDir(id), name);

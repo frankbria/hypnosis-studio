@@ -1,0 +1,23 @@
+{
+  "track": "The Open Gate IV - Integration",
+  "voice_direction": "mature male, warm, low, unhurried, near-monotone, intimate; speed ~0.85; let ellipses breathe",
+  "segments": [
+    {"id": "D1", "phase": "disclaimer", "pause_after_s": 2.0, "text": "This program is hypnotic in nature... and is created for relaxation, and personal growth. Never listen in a moving vehicle... or at any time when you need your full, awakened attention."},
+    {"id": "P1", "phase": "pain_frame", "pause_after_s": 3.0, "text": "This is the integration track... a few quiet minutes... for the daytime you. No deep trance today... just a settling... a remembering. Sit comfortably... eyes soft."},
+    {"id": "I1", "phase": "induction", "pause_after_s": 3.0, "text": "Take one slow breath in... and let it go. Another... deeper... and as it leaves... your shoulders drop... your eyes grow soft."},
+    {"id": "I2", "phase": "induction", "pause_after_s": 3.0, "text": "You know the way now. The dew-soft path... the old warm wall... the open gate... one breath away. Step inside."},
+    {"id": "X1", "phase": "deepening", "pause_after_s": 4.0, "text": "Inside... first light on the roses... dew on the path. And there... a small smooth stone... cooled by the morning. Pick it up. This stone is the whole garden... folded into your palm."},
+    {"id": "S1", "phase": "suggestion", "pause_after_s": 4.0, "text": "Whenever you see morning light... on a wall... a window... you remember the garden... and it all returns... in an instant."},
+    {"id": "S2", "phase": "suggestion", "pause_after_s": 4.0, "text": "Whenever your hand finds something small and smooth... a coin... a stone... you remember the token... and the gate opens... behind your eyes."},
+    {"id": "S3", "phase": "suggestion", "pause_after_s": 4.0, "text": "Whenever something good is offered... a kindness... a compliment... you say yes... before the old habit answers."},
+    {"id": "S4", "phase": "suggestion", "pause_after_s": 4.0, "text": "Whenever an opening appears... an invitation still warm... your body leans toward it... as it leaned toward the road."},
+    {"id": "S5", "phase": "suggestion", "pause_after_s": 4.0, "text": "When you start to decline what you want... the garden keeps no ledger... simply... receive."},
+    {"id": "S6", "phase": "suggestion", "pause_after_s": 4.0, "text": "Perhaps you walk a little sooner... say the yes a little faster... while the light is good."},
+    {"id": "S7", "phase": "suggestion", "pause_after_s": 4.0, "text": "Each morning... one breath... and the dew path is beneath your feet again."},
+    {"id": "S8", "phase": "suggestion", "pause_after_s": 4.0, "text": "Good things were always arriving. Now... you open."},
+    {"id": "S9", "phase": "suggestion", "pause_after_s": 4.0, "text": "You are not becoming someone else... only remembering... the gardener... the traveler... the one the gate opens for."},
+    {"id": "R1", "phase": "resurface", "pause_after_s": 2.0, "text": "And now... place the stone back on the path. Feel the chair beneath you... the day... waiting."},
+    {"id": "R2", "phase": "resurface", "pause_after_s": 2.0, "text": "Take one deeper breath... arrive... clear... awake... quietly open."},
+    {"id": "R3", "phase": "resurface", "pause_after_s": 0.0, "text": "And when you are ready... open your eyes... and step back into your day... carrying the garden with you. For you are... the gardener and the traveler... and the gate... was never locked."}
+  ]
+}

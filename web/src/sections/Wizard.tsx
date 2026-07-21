@@ -111,7 +111,10 @@ function StepHeader({
 // ─── Generation (real API + demo fallback) ──────────────────────────────────
 
 export interface ReadyTrack {
+  n: number
+  id: string
   title: string
+  phase: string
   durationSec: number
   mp3: string
   wav: string
@@ -120,7 +123,7 @@ export interface ReadyTrack {
 export interface JobResult {
   jobId: string
   demo: boolean
-  track?: ReadyTrack
+  tracks?: ReadyTrack[]
 }
 
 interface GenerationError {
@@ -198,7 +201,7 @@ function GeneratingStep({
           if (s.state === 'ready') {
             setProgress(100)
             setVisibleStages(GENERATION_STAGES.length)
-            onDoneRef.current({ jobId, demo: false, track: s.track })
+            onDoneRef.current({ jobId, demo: false, tracks: s.tracks })
             return
           }
           if (s.state === 'failed') {
@@ -321,7 +324,7 @@ function GeneratingStep({
       <StepHeader
         eyebrow="Creating your program"
         title="Give the studio a moment."
-        copy="Script, voices, and entrainment bed — staged below as each pass completes. This takes a few minutes. You can safely wait here."
+        copy="Script, voices, and entrainment bed — staged below as each pass completes. All four tracks render in one session; this takes ~15-20 minutes. You can safely wait here."
       />
       <Progress
         value={progress}
@@ -714,8 +717,8 @@ export default function Wizard({ onExit }: WizardProps) {
           {step === 4 && goal && voiceSet && jobResult && (
             <section>
               {(() => {
-                const realTrack = jobResult.demo ? undefined : jobResult.track
-                if (!realTrack) {
+                const realTracks = jobResult.demo ? undefined : jobResult.tracks
+                if (!realTracks || realTracks.length === 0) {
                   // Demo fallback (API unreachable — e.g. static preview)
                   return (
                     <>
@@ -770,7 +773,7 @@ export default function Wizard({ onExit }: WizardProps) {
                     </>
                   )
                 }
-                // Real render
+                // Real render — all four tracks
                 const fileUrl = (name: string) =>
                   `/api/jobs/${jobResult.jobId}/files/${encodeURIComponent(name)}`
                 return (
@@ -778,92 +781,62 @@ export default function Wizard({ onExit }: WizardProps) {
                     <StepHeader
                       eyebrow="Your program"
                       title="Your program is ready."
-                      copy={`Track I, voiced by ${voiceSet.narrator.name} with ${voiceSet.whisper.name} underneath. Tracks II–IV join it at launch.`}
+                      copy={`Four tracks, voiced by ${voiceSet.narrator.name} with ${voiceSet.whisper.name} underneath. Listen in order — each track builds on the last.`}
                     />
                     <div className="mx-auto grid max-w-4xl gap-4 sm:grid-cols-2">
-                      {tracks.map((track, i) => {
-                        if (i === 0) {
-                          return (
-                            <div
-                              key={track.numeral}
-                              className="rounded-2xl border border-violet-300/30 bg-violet-300/5 p-7"
+                      {realTracks.map((track) => (
+                        <div
+                          key={track.id}
+                          className="rounded-2xl border border-violet-300/30 bg-violet-300/5 p-7"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <Badge
+                              variant="outline"
+                              className="rounded-full border-violet-300/30 px-3 py-1 text-[10px] font-normal uppercase tracking-[0.2em] text-violet-200/80"
                             >
-                              <div className="flex items-center justify-between gap-3">
-                                <Badge
-                                  variant="outline"
-                                  className="rounded-full border-violet-300/30 px-3 py-1 text-[10px] font-normal uppercase tracking-[0.2em] text-violet-200/80"
-                                >
-                                  {track.phase}
-                                </Badge>
-                                <span className="flex items-center gap-1.5 text-xs text-white/40">
-                                  <Clock className="size-3" />
-                                  {fmtDuration(realTrack.durationSec)}
-                                </span>
-                              </div>
-                              <h3 className="mt-5 text-sm font-medium leading-snug text-white/90">
-                                {realTrack.title}
-                              </h3>
-                              {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-                              <audio
-                                controls
-                                preload="none"
-                                src={fileUrl(realTrack.mp3)}
-                                className="mt-5 w-full"
-                              />
-                              <div className="mt-5 flex gap-2 border-t border-white/5 pt-5">
-                                <Button
-                                  asChild
-                                  size="sm"
-                                  variant="outline"
-                                  className="border-white/15 bg-transparent text-white/75 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white"
-                                >
-                                  <a href={fileUrl(realTrack.mp3)} download={realTrack.mp3}>
-                                    <Download className="size-4" />
-                                    Download MP3
-                                  </a>
-                                </Button>
-                                <Button
-                                  asChild
-                                  size="sm"
-                                  variant="outline"
-                                  className="border-white/15 bg-transparent text-white/75 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white"
-                                >
-                                  <a href={fileUrl(realTrack.wav)} download={realTrack.wav}>
-                                    <Download className="size-4" />
-                                    Download WAV
-                                  </a>
-                                </Button>
-                              </div>
-                            </div>
-                          )
-                        }
-                        return (
-                          <div
-                            key={track.numeral}
-                            className="rounded-2xl border border-white/10 bg-white/[0.03] p-7 opacity-70"
-                          >
-                            <div className="flex items-center justify-between gap-3">
-                              <Badge
-                                variant="outline"
-                                className="rounded-full border-white/15 px-3 py-1 text-[10px] font-normal uppercase tracking-[0.2em] text-white/40"
-                              >
-                                {track.phase}
-                              </Badge>
-                              <span className="flex items-center gap-1.5 text-xs text-white/40">
-                                <Clock className="size-3" />
-                                {track.duration}
-                              </span>
-                            </div>
-                            <h3 className="mt-5 text-sm font-medium leading-snug text-white/60">
-                              {track.title}
-                            </h3>
-                            <p className="mt-6 border-t border-white/5 pt-5 text-xs text-white/35">
-                              In production — included with your full program at
-                              launch.
-                            </p>
+                              {track.phase}
+                            </Badge>
+                            <span className="flex items-center gap-1.5 text-xs text-white/40">
+                              <Clock className="size-3" />
+                              {fmtDuration(track.durationSec)}
+                            </span>
                           </div>
-                        )
-                      })}
+                          <h3 className="mt-5 text-sm font-medium leading-snug text-white/90">
+                            {track.title}
+                          </h3>
+                          {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+                          <audio
+                            controls
+                            preload="none"
+                            src={fileUrl(track.mp3)}
+                            className="mt-5 w-full"
+                          />
+                          <div className="mt-5 flex gap-2 border-t border-white/5 pt-5">
+                            <Button
+                              asChild
+                              size="sm"
+                              variant="outline"
+                              className="border-white/15 bg-transparent text-white/75 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white"
+                            >
+                              <a href={fileUrl(track.mp3)} download={track.mp3}>
+                                <Download className="size-4" />
+                                Download MP3
+                              </a>
+                            </Button>
+                            <Button
+                              asChild
+                              size="sm"
+                              variant="outline"
+                              className="border-white/15 bg-transparent text-white/75 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white"
+                            >
+                              <a href={fileUrl(track.wav)} download={track.wav}>
+                                <Download className="size-4" />
+                                Download WAV
+                              </a>
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                     <p className="mt-8 text-center text-xs text-white/35">
                       Save your files — this link lives as long as the studio

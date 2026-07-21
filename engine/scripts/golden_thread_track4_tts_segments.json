@@ -1,0 +1,23 @@
+{
+  "track": "The Golden Thread IV - Integration",
+  "voice_direction": "mature male, warm, low, unhurried, near-monotone, intimate; speed ~0.85; let ellipses breathe",
+  "segments": [
+    {"id": "D1", "phase": "disclaimer", "pause_after_s": 2.0, "text": "This program is hypnotic in nature... and is created for relaxation, and personal growth. Never listen in a moving vehicle... or at any time when you need your full, awakened attention."},
+    {"id": "P1", "phase": "pain_frame", "pause_after_s": 3.0, "text": "This is the integration track... a few quiet minutes, for the daytime you. No deep trance today... just a settling... and a remembering. Sit or lie down somewhere comfortable... let your eyes grow soft... and let these few minutes belong entirely... to you."},
+    {"id": "I1", "phase": "induction", "pause_after_s": 3.0, "text": "Take one slow breath in... and let it go. And another... deeper this time... and as it leaves... feel your shoulders drop... just a little... and your gaze... grow soft."},
+    {"id": "I2", "phase": "induction", "pause_after_s": 3.0, "text": "You know the way now. The worn stone steps... the torchlit passages... the thread glinting at your feet... it is always there... only one breath away. Take that breath... and step inside."},
+    {"id": "X1", "phase": "deepening", "pause_after_s": 4.0, "text": "Inside... everything is as you left it. The warm stone... the drifting gold... the torches burning low and steady... waiting. And there... on the ledge beside the first turning... lies a small object... a token. A short length of golden thread... wound around a smooth dark stone... still warm from the torchlight. Pick it up... feel its weight in your palm. This token... is the whole labyrinth... folded... into the palm of your hand."},
+    {"id": "S1", "phase": "suggestion", "pause_after_s": 4.0, "text": "In the days to come... whenever you see something golden catch the light... a coin... a ring... sunlight on a windowsill... you will remember... the thread... and the whole labyrinth will return to you... in an instant."},
+    {"id": "S2", "phase": "suggestion", "pause_after_s": 4.0, "text": "And whenever you touch something small in your pocket... a key... a coin... a smooth stone... you will feel the token in your palm... your shoulders will drop... and your seeing... will soften."},
+    {"id": "S3", "phase": "suggestion", "pause_after_s": 4.0, "text": "Whenever you take one slow breath... before a meeting... before a message... before a choice... you will find the torchlight... waiting... behind your eyes."},
+    {"id": "S4", "phase": "suggestion", "pause_after_s": 4.0, "text": "When the day blurs and rushes... you will remember the dark middle... and instead of forcing... you will take the next small step. Patience first. The thread holds."},
+    {"id": "S5", "phase": "suggestion", "pause_after_s": 4.0, "text": "And when something glints at the edge of your attention... a remark... a headline... a stranger's suggestion... you will turn toward it. Noticing is your nature now. It is simply... how your eyes work."},
+    {"id": "S6", "phase": "suggestion", "pause_after_s": 4.0, "text": "When a door cracks open in your day... you will feel the thread grow warm in your hand... and you will step through... without needing... to see the whole maze."},
+    {"id": "S7", "phase": "suggestion", "pause_after_s": 4.0, "text": "Each evening... without effort... the day's glints settle into place. You will wake... and notice things... you did not know... you had seen."},
+    {"id": "S8", "phase": "suggestion", "pause_after_s": 4.0, "text": "Perhaps you will follow one small thread each day... a little more often now. And you will notice... they were never small at all. They were doors."},
+    {"id": "S9", "phase": "suggestion", "pause_after_s": 4.0, "text": "And through it all... you are not becoming someone else. You are remembering... what you already are. The noticing... the following... the staying. It is your nature."},
+    {"id": "R1", "phase": "resurface", "pause_after_s": 2.0, "text": "And now... place the token back upon the ledge... where it will wait for you. Feel the chair beneath you... the room around you... the day... waiting."},
+    {"id": "R2", "phase": "resurface", "pause_after_s": 2.0, "text": "Take one deeper breath... and as you let it go... feel yourself arriving... clear... awake... quietly lit... from inside."},
+    {"id": "R3", "phase": "resurface", "pause_after_s": 0.0, "text": "And when you are ready... open your eyes... and step back into your day... carrying the thread with you. For you are... the thread-follower... and the whole world... is your labyrinth."}
+  ]
+}

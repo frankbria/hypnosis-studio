@@ -1,0 +1,23 @@
+{
+  "track": "The Inner Studio IV - Integration",
+  "voice_direction": "mature male, warm, low, unhurried, near-monotone, intimate; speed ~0.85; let ellipses breathe",
+  "segments": [
+    {"id": "D1", "phase": "disclaimer", "text": "This program is hypnotic in nature... and is created for relaxation, and personal growth. Never listen in a moving vehicle... or at any time when you need your full, awakened attention.", "pause_after_s": 2.0},
+    {"id": "P1", "phase": "pain_frame", "text": "This is the integration track... a few quiet minutes, for the daytime you. No deep trance today... just a settling... and a remembering. Sit or lie down somewhere comfortable... keep your eyes soft... and let these few minutes belong entirely... to you.", "pause_after_s": 3.0},
+    {"id": "I1", "phase": "induction", "text": "Take one slow breath in... and let it go. And another... deeper this time... and as it leaves... feel your shoulders drop... just a little... and your eyes grow soft.", "pause_after_s": 3.0},
+    {"id": "I2", "phase": "induction", "text": "You know the way now. The tall door... the white dust... the last light in the high windows... it is always there... only one breath away. Take that breath... and step inside.", "pause_after_s": 3.0},
+    {"id": "X1", "phase": "deepening", "text": "Inside... everything is as you left it. The patient figures... the covered canvases... the chisels laid in their rows... waiting. And near your feet... there is a small chip of white marble... smooth at the edges... from a stone you once carved. Pick it up... feel its weight in your hand... cool... then warming. This small stone... is the whole studio... folded into the palm of your hand.", "pause_after_s": 4.0},
+    {"id": "S1", "phase": "suggestion", "text": "In the days to come... whenever you hold something small and smooth... a pen... a stone... the warm curve of a cup... you will remember... the marble chip... and the whole studio will return to you... in an instant.", "pause_after_s": 4.0},
+    {"id": "S2", "phase": "suggestion", "text": "And whenever you take one slow breath... before beginning a task... before opening the notebook... you will find the light of the tall windows... waiting behind your eyes.", "pause_after_s": 4.0},
+    {"id": "S3", "phase": "suggestion", "text": "Whenever you see dust drifting in sunlight... you will remember... the studio is open... and your work... is glad to see you.", "pause_after_s": 4.0},
+    {"id": "S4", "phase": "suggestion", "text": "When you pass an unfinished thing... a covered canvas of your life... you will feel neither guilt... nor hurry. Only the quiet pull... of one stroke... waiting to be made.", "pause_after_s": 4.0},
+    {"id": "S5", "phase": "suggestion", "text": "And when the critic's voice rises in the day... you will hear it... grow sleepy... as your hand... simply begins.", "pause_after_s": 4.0},
+    {"id": "S6", "phase": "suggestion", "text": "Whenever your hand touches your tools... your keys... your keyboard... your brush... it will remember... the chisel... and how surely it knew the way.", "pause_after_s": 4.0},
+    {"id": "S7", "phase": "suggestion", "text": "You may notice yourself finishing small things... a little more often now. Quietly. Without ceremony. It is simply... how your hands work... now.", "pause_after_s": 4.0},
+    {"id": "S8", "phase": "suggestion", "text": "Each evening... without effort... the studio tidies itself... and you wake... knowing... which stroke comes first.", "pause_after_s": 4.0},
+    {"id": "S9", "phase": "suggestion", "text": "And through it all... you are not becoming someone else. You are remembering... what you already are. The making... the returning... the finishing. It is your nature.", "pause_after_s": 4.0},
+    {"id": "R1", "phase": "resurface", "text": "And now... place the marble chip in your pocket... where it will travel with you. Feel the chair beneath you... the room around you... the day... waiting.", "pause_after_s": 2.0},
+    {"id": "R2", "phase": "resurface", "text": "Take one deeper breath... and as you let it go... feel yourself arriving... clear... awake... quietly lit from inside.", "pause_after_s": 2.0},
+    {"id": "R3", "phase": "resurface", "text": "And when you are ready... open your eyes... and step back into your day... carrying the studio with you. For you are... the sculptor of your days... and the world... is waiting... for your work.", "pause_after_s": 0.0}
+  ]
+}

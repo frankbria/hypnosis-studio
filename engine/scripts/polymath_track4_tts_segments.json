@@ -1,0 +1,102 @@
+{
+  "track": "The Polymath Mind IV - Integration",
+  "voice_direction": "mature male, warm, low, unhurried, near-monotone, intimate; speed ~0.85; let ellipses breathe",
+  "segments": [
+    {
+      "id": "D1",
+      "phase": "disclaimer",
+      "text": "This program is hypnotic in nature... and is created for relaxation, and personal growth. Never listen in a moving vehicle... or at any time when you need your full, awakened attention.",
+      "pause_after_s": 2.0
+    },
+    {
+      "id": "P1",
+      "phase": "pain_frame",
+      "text": "This is the integration track... a few quiet minutes, for the daytime you. No deep trance today... just a settling... and a remembering. Sit or lie down somewhere comfortable... keep your eyes soft... and let these few minutes belong entirely... to you.",
+      "pause_after_s": 3.0
+    },
+    {
+      "id": "I1",
+      "phase": "induction",
+      "text": "Take one slow breath in... and let it go. And another... deeper this time... and as it leaves... feel your shoulders drop... just a little... and your eyes grow soft.",
+      "pause_after_s": 3.0
+    },
+    {
+      "id": "I2",
+      "phase": "induction",
+      "text": "You know the way now. The workshop... the atelier... the quiet room with the high windows... it is always there... only one breath away. Take that breath... and step inside.",
+      "pause_after_s": 3.0
+    },
+    {
+      "id": "X1",
+      "phase": "deepening",
+      "text": "Inside... everything is as you left it. The wide table... the open notebooks... the threads of gold hanging in the light... waiting. And in the middle of the table... there is a small wooden object... a token. Pick it up... feel its weight in your hand... smooth... and warm. This token... is the whole workshop... folded into the palm of your hand.",
+      "pause_after_s": 4.0
+    },
+    {
+      "id": "S1",
+      "phase": "suggestion",
+      "text": "In the days to come... whenever you see something small and well made... a smooth pen... a worn coin... the grain of a wooden table... you will remember... the token... and the whole workshop will return to you... in an instant.",
+      "pause_after_s": 4.0
+    },
+    {
+      "id": "S2",
+      "phase": "suggestion",
+      "text": "And whenever you take one slow breath... before a conversation... before a page... before a decision... you will find the light of the high windows... waiting behind your eyes.",
+      "pause_after_s": 4.0
+    },
+    {
+      "id": "S3",
+      "phase": "suggestion",
+      "text": "You may notice yourself asking... what does this connect to... in meetings... in articles... in passing remarks. The threads spin themselves now. It is simply... how your mind works.",
+      "pause_after_s": 4.0
+    },
+    {
+      "id": "S4",
+      "phase": "suggestion",
+      "text": "When you meet a field you do not know... you will feel neither fear... nor the need to perform. Only the quiet pull of the thread. Curiosity first. Judgment later.",
+      "pause_after_s": 4.0
+    },
+    {
+      "id": "S5",
+      "phase": "suggestion",
+      "text": "And you will protect one small hour... the way the workshop door closes. Not because anyone tells you to. Because it is yours... and you know what grows there.",
+      "pause_after_s": 4.0
+    },
+    {
+      "id": "S6",
+      "phase": "suggestion",
+      "text": "Each night... without effort... the librarian does her quiet work. You will wake... and know things... you did not know you knew.",
+      "pause_after_s": 4.0
+    },
+    {
+      "id": "S7",
+      "phase": "suggestion",
+      "text": "Perhaps you will speak your strange combinations aloud... a little more often now. And notice... they are not strange at all. They are yours.",
+      "pause_after_s": 4.0
+    },
+    {
+      "id": "S8",
+      "phase": "suggestion",
+      "text": "And through it all... you are not becoming someone else. You are remembering... what you already are. The learning... the connecting... the becoming. It is your nature.",
+      "pause_after_s": 4.0
+    },
+    {
+      "id": "R1",
+      "phase": "resurface",
+      "text": "And now... place the token back on the table... where it will wait for you. Feel the chair beneath you... the room around you... the day... waiting.",
+      "pause_after_s": 2.0
+    },
+    {
+      "id": "R2",
+      "phase": "resurface",
+      "text": "Take one deeper breath... and as you let it go... feel yourself arriving... clear... awake... quietly lit from inside.",
+      "pause_after_s": 2.0
+    },
+    {
+      "id": "R3",
+      "phase": "resurface",
+      "text": "And when you are ready... open your eyes... and step back into your day... carrying the workshop with you. For you are... the Renaissance mind... and the whole world... is your workshop.",
+      "pause_after_s": 0.0
+    }
+  ]
+}
