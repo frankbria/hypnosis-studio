@@ -85,12 +85,16 @@ SUG_START = [p for p in positions if p[3] == "suggestion"][0][1]
 RES_START = [p for p in positions if p[3] == "resurface"][0][1]
 
 voice_end = positions[-1][2]
-print(f"voice program: {voice_end/60:.2f} min; outro {(TOTAL_S-voice_end)/60:.2f} min")
+# Adaptive total: TOTAL_S is a minimum. If the voice program (+ minimum music
+# outro) is longer, extend so the final segments never overflow the buffers.
+MIN_OUTRO_S = 75.0
+ACTUAL_S = float(int(max(float(TOTAL_S), voice_end + MIN_OUTRO_S) + 0.999))
+print(f"voice program: {voice_end/60:.2f} min; outro {(ACTUAL_S-voice_end)/60:.2f} min (target {TOTAL_S}s, actual {ACTUAL_S:.0f}s)")
 
 # ---------- load pad, flatten energy ----------
 pad, sr = sf.read(PAD_FILE, dtype=DTYPE)
-assert len(pad) >= TOTAL_S * SR, f"pad too short: {len(pad)/SR:.0f}s"
-pad = pad[: TOTAL_S * SR]
+assert len(pad) >= ACTUAL_S * SR, f"pad too short: {len(pad)/SR:.0f}s < {ACTUAL_S:.0f}s"
+pad = pad[: int(ACTUAL_S * SR)]
 w = 1 * SR
 nwin = len(pad) // w
 win_rms = np.array([np.sqrt(np.mean(pad[i * w:(i + 1) * w] ** 2)) for i in range(nwin)])
@@ -162,8 +166,8 @@ TRAJ = [
     (wander_mid, 9.0),
     (SUG_END, 7.0),
     (RES_START + 10, 10.0),
-    (TOTAL_S - 60, 10.0),
-    (TOTAL_S - 5, 0.0),
+    (ACTUAL_S - 60, 10.0),
+    (ACTUAL_S - 5, 0.0),
 ]
 bp_t = np.array([p[0] for p in TRAJ]); bp_r = np.array([p[1] for p in TRAJ])
 
@@ -207,7 +211,7 @@ print(f"written: {TITLE}.wav/.mp3  overall RMS {rms_all:.1f} dB (catalog ref ~-2
 # ---------- QA ----------
 if not SKIP_QA:
     print("\n-- QA: per-minute RMS profile (smooth ramp expected 0:00-3:00) --")
-    for t0 in range(0, TOTAL_S, 60):
+    for t0 in range(0, int(ACTUAL_S), 60):
         seg = mix[t0 * SR:(t0 + 60) * SR]
         r = 20 * np.log10(np.sqrt(np.mean(seg ** 2)) + 1e-12)
         print(f"  {t0//60:>2d}:00-{t0//60+1:>2d}:00  {r:6.1f} dB")
@@ -225,7 +229,7 @@ if not SKIP_QA:
 
     print("-- QA: bed pulse (tight +/-4 Hz window around carrier) --")
     env_check(CARRIER - 4, CARRIER + 4, SUG_START + 5, min(SUG_END, SUG_START + 240), "suggestion (expect 6.5-9 Hz)")
-    env_check(CARRIER - 4, CARRIER + 4, TOTAL_S - 240, TOTAL_S - 60, "outro, no voice (expect clean 10 Hz)")
+    env_check(CARRIER - 4, CARRIER + 4, ACTUAL_S - 240, ACTUAL_S - 60, "outro, no voice (expect clean 10 Hz)")
 
     print("-- QA: boosted whisper transcript (sunken middle +14 dB) --")
     boost = mix[int(SUG_START * SR): int(SUG_END * SR)] * 10 ** (14 / 20)
