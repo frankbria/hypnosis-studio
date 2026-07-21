@@ -8,7 +8,7 @@ Stages (reported via status.json in outdir):
     scripting -> voicing -> whisper-layer -> entrainment-bed -> mastering-qa
 
 Every job renders ALL four tracks of the goal (I Foundation, II Deepening,
-III Mastery, IV Integration). Tracks 1-3 run 900 s, track 4 runs 420 s; all
+III Mastery, IV Integration). Tracks 1-3 run 780 s, track 4 runs 420 s; all
 goal pads are 960 s, so one pad serves every track.
 
 status.json is written atomically (tmp file + os.replace) at every transition.
@@ -67,10 +67,11 @@ TITLES = {
 
 # 4-track program registry. script_suffix selects engine/scripts/<goal><suffix>_tts_segments.json;
 # tracks 2-4 reuse the goal's pad (pads are 960 s >= every TOTAL_S).
+# Tracks 1-3 run 780 s (densified scripts: ~80-88% voiced content, ~2 min music tail).
 TRACKS = [
-    {"n": 1, "script_suffix": "",        "total_s": 900, "phase": "Foundation"},
-    {"n": 2, "script_suffix": "_track2", "total_s": 900, "phase": "Deepening"},
-    {"n": 3, "script_suffix": "_track3", "total_s": 900, "phase": "Mastery"},
+    {"n": 1, "script_suffix": "",        "total_s": 780, "phase": "Foundation"},
+    {"n": 2, "script_suffix": "_track2", "total_s": 780, "phase": "Deepening"},
+    {"n": 3, "script_suffix": "_track3", "total_s": 780, "phase": "Mastery"},
     {"n": 4, "script_suffix": "_track4", "total_s": 420, "phase": "Integration"},
 ]
 
