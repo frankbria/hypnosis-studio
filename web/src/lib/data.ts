@@ -18,6 +18,10 @@ export interface Goal {
   icon: LucideIcon
   /** Thematic names used for tracks II and III */
   themes: [string, string]
+  /** Whether this goal can actually be rendered today */
+  available: boolean
+  /** Goal key expected by the render API, when different from id */
+  apiGoal?: string
 }
 
 export const GOALS: Goal[] = [
@@ -29,6 +33,8 @@ export const GOALS: Goal[] = [
       'Train the mind to absorb deeply, connect widely, and recall on demand — learning as a way of being, not a task.',
     icon: Brain,
     themes: ['The Deep Library', 'The Whispering Index'],
+    available: true,
+    apiGoal: 'polymath',
   },
   {
     id: 'golden-thread',
@@ -38,6 +44,8 @@ export const GOALS: Goal[] = [
       'One clear line from intention to completion. Distraction loosens its grip; the thread holds.',
     icon: InfinityIcon,
     themes: ['The Loom of Attention', 'The Unbroken Line'],
+    available: true,
+    apiGoal: 'golden_thread',
   },
   {
     id: 'inner-studio',
@@ -47,6 +55,8 @@ export const GOALS: Goal[] = [
       'A quiet room inside you where the work makes itself. Enter, and the flow is already waiting.',
     icon: Palette,
     themes: ['The Quiet Atelier', 'The Flowing Hand'],
+    available: true,
+    apiGoal: 'inner_studio',
   },
   {
     id: 'open-gate',
@@ -56,6 +66,8 @@ export const GOALS: Goal[] = [
       'Opportunity rarely knocks twice — but it always whispers first. Learn to hear it, and to move.',
     icon: DoorOpen,
     themes: ['The Widening Field', 'The Threshold Walk'],
+    available: true,
+    apiGoal: 'open_gate',
   },
   {
     id: 'deep-confidence',
@@ -65,6 +77,7 @@ export const GOALS: Goal[] = [
       'Not bravado — bedrock. A calm that pressure cannot reach, rehearsed until it is simply yours.',
     icon: Mountain,
     themes: ['The Bedrock', 'The Still Center'],
+    available: false,
   },
   {
     id: 'custom',
@@ -74,6 +87,7 @@ export const GOALS: Goal[] = [
       'Name the change you want, in your own words. The script is written around it — and only it.',
     icon: PenLine,
     themes: ['The Turning', 'The Deep Water'],
+    available: false,
   },
 ]
 

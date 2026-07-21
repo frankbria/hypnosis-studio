@@ -15,23 +15,26 @@ import soundfile as sf
 import av
 from scipy.signal import lfilter, fftconvolve
 
-TRACK = sys.argv[1] if len(sys.argv) > 1 else "golden_thread"
-
 KEY = None
-for line in open(".env.local"):
-    if line.startswith("ELEVENLABS_API_KEY="):
-        KEY = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
-assert KEY
 
 BRIAN = "nPczCjzI2devNBz1zQrb"
 FRANK = "RsoSo7Gg7GyAtGoPBiqb"
 
-RAW = f"{TRACK}_segments_raw"
-OUT = f"{TRACK}_segments"
-os.makedirs(RAW, exist_ok=True)
-os.makedirs(OUT, exist_ok=True)
 
-segs = json.load(open(f"{TRACK}_tts_segments.json"))["segments"]
+def load_key() -> str:
+    """Resolve the ElevenLabs key: env var first, else .env.local in cwd."""
+    global KEY
+    if KEY:
+        return KEY
+    env_key = os.environ.get("ELEVENLABS_API_KEY")
+    if env_key:
+        KEY = env_key
+        return KEY
+    for line in open(".env.local"):
+        if line.startswith("ELEVENLABS_API_KEY="):
+            KEY = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+    assert KEY, "ELEVENLABS_API_KEY not set and no .env.local entry found"
+    return KEY
 
 
 def register_for(seg: dict):
@@ -96,14 +99,24 @@ def treat(y: np.ndarray, sr: int) -> np.ndarray:
     return out
 
 
-if __name__ == "__main__":
+def main():
+    track = sys.argv[1] if len(sys.argv) > 1 else "golden_thread"
+    load_key()
+
+    raw = f"{track}_segments_raw"
+    out = f"{track}_segments"
+    os.makedirs(raw, exist_ok=True)
+    os.makedirs(out, exist_ok=True)
+
+    segs = json.load(open(f"{track}_tts_segments.json"))["segments"]
+
     total_chars = 0
     for seg in segs:
         vid, tag = register_for(seg)
         text = tag + seg["text"]
         total_chars += len(text)
-        raw_path = f"{RAW}/{seg['id']}.mp3"
-        out_path = f"{OUT}/{seg['id']}.wav"
+        raw_path = f"{raw}/{seg['id']}.mp3"
+        out_path = f"{out}/{seg['id']}.wav"
         if os.path.exists(out_path):
             print(f"skip {seg['id']} (exists)")
             continue
@@ -116,3 +129,7 @@ if __name__ == "__main__":
         print(f"OK   {seg['id']}  ({'whisper' if vid == FRANK else 'soft'}, {len(y)/sr:.1f}s)")
         time.sleep(0.5)
     print(f"\ntotal chars sent (approx): {total_chars}")
+
+
+if __name__ == "__main__":
+    main()

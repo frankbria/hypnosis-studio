@@ -15,6 +15,7 @@ Pipeline: flatten pad -> voice submix on smooth envelope -> carrier notch ->
 isochronic bed (theta-alpha arc) -> fade -> -20 dB RMS -> soft clip -> QA.
 """
 import json
+import os
 import sys
 import numpy as np
 import soundfile as sf
@@ -27,6 +28,10 @@ KEYWORDS = (sys.argv[4].split(",") if len(sys.argv) > 4
             else ["golden", "thread", "labyrinth", "door", "notice"])
 TOTAL_S = int(sys.argv[5]) if len(sys.argv) > 5 else 780
 
+# env flags (defaults preserve original behavior)
+DTYPE = np.float32 if os.environ.get("HYPNO_DTYPE") == "float32" else np.float64
+SKIP_QA = os.environ.get("HYPNO_SKIP_QA") == "1"
+
 SR = 44100
 
 # ---------- load segments & build voice timeline ----------
@@ -34,7 +39,7 @@ segs = json.load(open(f"{TRACK}_tts_segments.json"))["segments"]
 
 waves = {}
 for seg in segs:
-    y, sr = sf.read(f"{TRACK}_segments/{seg['id']}.wav", dtype="float64")
+    y, sr = sf.read(f"{TRACK}_segments/{seg['id']}.wav", dtype=DTYPE)
     assert sr == SR
     waves[seg["id"]] = y
 
@@ -74,7 +79,7 @@ voice_end = positions[-1][2]
 print(f"voice program: {voice_end/60:.2f} min; outro {(TOTAL_S-voice_end)/60:.2f} min")
 
 # ---------- load pad, flatten energy ----------
-pad, sr = sf.read(PAD_FILE, dtype="float64")
+pad, sr = sf.read(PAD_FILE, dtype=DTYPE)
 assert len(pad) >= TOTAL_S * SR, f"pad too short: {len(pad)/SR:.0f}s"
 pad = pad[: TOTAL_S * SR]
 w = 1 * SR
@@ -168,37 +173,38 @@ rms_all = 20 * np.log10(np.sqrt(np.mean(mix ** 2)))
 print(f"written: {TITLE}.wav/.mp3  overall RMS {rms_all:.1f} dB (catalog ref ~-20)")
 
 # ---------- QA ----------
-print("\n-- QA: per-minute RMS profile (smooth ramp expected 0:00-3:00) --")
-for t0 in range(0, TOTAL_S, 60):
-    seg = mix[t0 * SR:(t0 + 60) * SR]
-    r = 20 * np.log10(np.sqrt(np.mean(seg ** 2)) + 1e-12)
-    print(f"  {t0//60:>2d}:00-{t0//60+1:>2d}:00  {r:6.1f} dB")
+if not SKIP_QA:
+    print("\n-- QA: per-minute RMS profile (smooth ramp expected 0:00-3:00) --")
+    for t0 in range(0, TOTAL_S, 60):
+        seg = mix[t0 * SR:(t0 + 60) * SR]
+        r = 20 * np.log10(np.sqrt(np.mean(seg ** 2)) + 1e-12)
+        print(f"  {t0//60:>2d}:00-{t0//60+1:>2d}:00  {r:6.1f} dB")
 
+    def env_check(lo, hi, t0, t1, label):
+        seg = mix[int(t0 * SR):int(t1 * SR)]
+        s = butter(4, [lo / (SR / 2), hi / (SR / 2)], btype="band", output="sos")
+        env = np.abs(hilbert(sosfiltfilt(s, seg)))[::441]
+        env -= env.mean()
+        spec = np.abs(np.fft.rfft(env * np.hanning(len(env))))
+        fr = np.fft.rfftfreq(len(env), 1 / (SR / 441))
+        m = (fr >= 0.5) & (fr <= 15)
+        i = np.argmax(spec[m])
+        print(f"  {label}: dominant pulse {fr[m][i]:.2f} Hz")
 
-def env_check(lo, hi, t0, t1, label):
-    seg = mix[int(t0 * SR):int(t1 * SR)]
-    s = butter(4, [lo / (SR / 2), hi / (SR / 2)], btype="band", output="sos")
-    env = np.abs(hilbert(sosfiltfilt(s, seg)))[::441]
-    env -= env.mean()
-    spec = np.abs(np.fft.rfft(env * np.hanning(len(env))))
-    fr = np.fft.rfftfreq(len(env), 1 / (SR / 441))
-    m = (fr >= 0.5) & (fr <= 15)
-    i = np.argmax(spec[m])
-    print(f"  {label}: dominant pulse {fr[m][i]:.2f} Hz")
+    print("-- QA: bed pulse (tight +/-4 Hz window around carrier) --")
+    env_check(CARRIER - 4, CARRIER + 4, SUG_START + 5, min(SUG_END, SUG_START + 240), "suggestion (expect 6.5-9 Hz)")
+    env_check(CARRIER - 4, CARRIER + 4, TOTAL_S - 240, TOTAL_S - 60, "outro, no voice (expect clean 10 Hz)")
 
-
-print("-- QA: bed pulse (tight +/-4 Hz window around carrier) --")
-env_check(CARRIER - 4, CARRIER + 4, SUG_START + 5, min(SUG_END, SUG_START + 240), "suggestion (expect 6.5-9 Hz)")
-env_check(CARRIER - 4, CARRIER + 4, TOTAL_S - 240, TOTAL_S - 60, "outro, no voice (expect clean 10 Hz)")
-
-print("-- QA: boosted whisper transcript (sunken middle +14 dB) --")
-boost = mix[int(SUG_START * SR): int(SUG_END * SR)] * 10 ** (14 / 20)
-boost = np.clip(boost, -1, 1)
-sf.write(f"qa_whisper_boost_{TRACK}.wav", boost, SR, subtype="PCM_16")
-from faster_whisper import WhisperModel
-model = WhisperModel("base", device="cpu", compute_type="int8")
-segs_t, _ = model.transcribe(f"qa_whisper_boost_{TRACK}.wav", language="en")
-text = " ".join(s.text for s in segs_t)
-print("  transcript:", text[:600])
-hits = sum(1 for w in KEYWORDS if w in text.lower())
-print(f"  keyword hits: {hits}/{len(KEYWORDS)}")
+    print("-- QA: boosted whisper transcript (sunken middle +14 dB) --")
+    boost = mix[int(SUG_START * SR): int(SUG_END * SR)] * 10 ** (14 / 20)
+    boost = np.clip(boost, -1, 1)
+    sf.write(f"qa_whisper_boost_{TRACK}.wav", boost, SR, subtype="PCM_16")
+    from faster_whisper import WhisperModel
+    model = WhisperModel("base", device="cpu", compute_type="int8")
+    segs_t, _ = model.transcribe(f"qa_whisper_boost_{TRACK}.wav", language="en")
+    text = " ".join(s.text for s in segs_t)
+    print("  transcript:", text[:600])
+    hits = sum(1 for w in KEYWORDS if w in text.lower())
+    print(f"  keyword hits: {hits}/{len(KEYWORDS)}")
+else:
+    print("\n-- QA skipped (HYPNO_SKIP_QA=1) --")

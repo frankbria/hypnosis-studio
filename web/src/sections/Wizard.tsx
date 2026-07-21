@@ -5,6 +5,7 @@ import {
   Check,
   CheckCircle2,
   Clock,
+  Download,
   Loader2,
   Lock,
   RotateCcw,
@@ -13,6 +14,8 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
 import { Textarea } from '@/components/ui/textarea'
 import { AudioPreviewButton } from '@/components/AudioPreviewButton'
@@ -30,6 +33,9 @@ import type { VoiceSet } from '@/lib/data'
 import { cn } from '@/lib/utils'
 
 const STEP_LABELS = ['Goal', 'Voice', 'Review', 'Create', 'Program'] as const
+
+const fmtDuration = (sec: number) =>
+  `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, '0')}`
 
 interface WizardProps {
   onExit: () => void
@@ -102,47 +108,220 @@ function StepHeader({
   )
 }
 
-// ─── Generating step ─────────────────────────────────────────────────────────
+// ─── Generation (real API + demo fallback) ──────────────────────────────────
 
-function GeneratingStep({ onDone }: { onDone: () => void }) {
+export interface ReadyTrack {
+  title: string
+  durationSec: number
+  mp3: string
+  wav: string
+}
+
+export interface JobResult {
+  jobId: string
+  demo: boolean
+  track?: ReadyTrack
+}
+
+interface GenerationError {
+  message: string
+  retryable: boolean
+}
+
+const STAGE_INDEX: Record<string, number> = {
+  scripting: 0,
+  voicing: 1,
+  'whisper-layer': 2,
+  'entrainment-bed': 3,
+  'mastering-qa': 4,
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+function GeneratingStep({
+  apiGoal,
+  voiceSetId,
+  custom,
+  accessCode,
+  onDone,
+  onBadCode,
+  onStartOver,
+}: {
+  apiGoal: string
+  voiceSetId: VoiceSet['id']
+  custom: string
+  accessCode: string
+  onDone: (result: JobResult) => void
+  onBadCode: () => void
+  onStartOver: () => void
+}) {
   const [visibleStages, setVisibleStages] = useState(1)
   const [progress, setProgress] = useState(0)
+  const [error, setError] = useState<GenerationError | null>(null)
+  const [runId, setRunId] = useState(0)
   const onDoneRef = useRef(onDone)
   onDoneRef.current = onDone
+  const onBadCodeRef = useRef(onBadCode)
+  onBadCodeRef.current = onBadCode
 
   useEffect(() => {
-    const startedAt = Date.now()
-    const stageMs = GENERATION_TOTAL_MS / GENERATION_STAGES.length
-    const timers: number[] = []
-    GENERATION_STAGES.forEach((_, i) => {
-      if (i > 0) {
-        timers.push(window.setTimeout(() => setVisibleStages(i + 1), i * stageMs))
+    let cancelled = false
+
+    // Static-preview fallback: stage the old mock flow when the API is unreachable.
+    async function mockFlow() {
+      const stageMs = GENERATION_TOTAL_MS / GENERATION_STAGES.length
+      const start = Date.now()
+      while (!cancelled) {
+        const elapsed = Date.now() - start
+        setProgress(Math.min(100, (elapsed / GENERATION_TOTAL_MS) * 100))
+        setVisibleStages(
+          Math.min(GENERATION_STAGES.length, Math.floor(elapsed / stageMs) + 1),
+        )
+        if (elapsed >= GENERATION_TOTAL_MS + 500) {
+          onDoneRef.current({ jobId: 'demo', demo: true })
+          return
+        }
+        await sleep(120)
       }
-    })
-    const tick = window.setInterval(() => {
-      setProgress(
-        Math.min(100, ((Date.now() - startedAt) / GENERATION_TOTAL_MS) * 100),
-      )
-    }, 90)
-    const doneTimer = window.setTimeout(
-      () => onDoneRef.current(),
-      GENERATION_TOTAL_MS + 500,
-    )
-    return () => {
-      timers.forEach((t) => window.clearTimeout(t))
-      window.clearInterval(tick)
-      window.clearTimeout(doneTimer)
     }
-  }, [])
+
+    async function poll(jobId: string) {
+      let failures = 0
+      while (!cancelled) {
+        await sleep(3000)
+        if (cancelled) return
+        try {
+          const r = await fetch(`/api/jobs/${jobId}`)
+          if (!r.ok) throw new Error(`status ${r.status}`)
+          failures = 0
+          const s = await r.json()
+          if (s.state === 'ready') {
+            setProgress(100)
+            setVisibleStages(GENERATION_STAGES.length)
+            onDoneRef.current({ jobId, demo: false, track: s.track })
+            return
+          }
+          if (s.state === 'failed') {
+            setError({
+              message: s.error
+                ? `The render didn't finish: ${s.error}`
+                : "The render didn't finish. Nothing was charged — please try again.",
+              retryable: true,
+            })
+            return
+          }
+          const idx = STAGE_INDEX[s.stage] ?? 0
+          setVisibleStages(idx + 1)
+          setProgress(Math.round((s.progress ?? 0) * 100))
+        } catch {
+          failures += 1
+          if (failures >= 10) {
+            setError({
+              message: 'Lost contact with the studio — check your connection, then retry.',
+              retryable: true,
+            })
+            return
+          }
+        }
+      }
+    }
+
+    async function run() {
+      setError(null)
+      setProgress(0)
+      setVisibleStages(1)
+      let res: Response
+      try {
+        res = await fetch('/api/programs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ goal: apiGoal, voiceSet: voiceSetId, custom, accessCode }),
+        })
+      } catch {
+        // API not reachable at all (static preview) — demo mode.
+        await mockFlow()
+        return
+      }
+      if (res.status === 403) {
+        onBadCodeRef.current()
+        return
+      }
+      if (res.status === 409) {
+        setError({
+          message: 'Another render is in progress — try again in a few minutes.',
+          retryable: true,
+        })
+        return
+      }
+      if (res.status === 422) {
+        setError({
+          message: "That program isn't in production yet — choose one of the four available goals.",
+          retryable: false,
+        })
+        return
+      }
+      if (res.status === 429) {
+        setError({
+          message: "The studio's daily render limit is reached — please try again tomorrow.",
+          retryable: false,
+        })
+        return
+      }
+      if (res.status !== 202) {
+        // Unexpected response (e.g. static host returning 404) — demo mode.
+        await mockFlow()
+        return
+      }
+      const { jobId } = await res.json()
+      await poll(jobId)
+    }
+
+    run()
+    return () => {
+      cancelled = true
+    }
+  }, [runId, apiGoal, voiceSetId, custom, accessCode])
 
   const complete = progress >= 100
+
+  if (error) {
+    return (
+      <div className="mx-auto max-w-md py-10 text-center">
+        <StepHeader
+          eyebrow="Creating your program"
+          title="Let's pause here."
+          copy={error.message}
+        />
+        <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
+          {error.retryable && (
+            <Button
+              size="lg"
+              onClick={() => setRunId((n) => n + 1)}
+              className="bg-primary text-primary-foreground hover:bg-violet-300"
+            >
+              <RotateCcw className="size-4" />
+              Retry
+            </Button>
+          )}
+          <Button
+            size="lg"
+            variant="outline"
+            onClick={onStartOver}
+            className="border-white/15 bg-transparent text-white/75 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white"
+          >
+            Start over
+          </Button>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="mx-auto max-w-md py-10">
       <StepHeader
         eyebrow="Creating your program"
         title="Give the studio a moment."
-        copy="Script, voices, and entrainment bed — staged below as each pass completes."
+        copy="Script, voices, and entrainment bed — staged below as each pass completes. This takes a few minutes. You can safely wait here."
       />
       <Progress
         value={progress}
@@ -180,6 +359,9 @@ export default function Wizard({ onExit }: WizardProps) {
   const [customText, setCustomText] = useState('')
   const [voiceSetId, setVoiceSetId] = useState<VoiceSet['id'] | null>(null)
   const [agreed, setAgreed] = useState(false)
+  const [accessCode, setAccessCode] = useState('')
+  const [codeError, setCodeError] = useState<string | null>(null)
+  const [jobResult, setJobResult] = useState<JobResult | null>(null)
   const audio = useAudioPreview()
 
   const goal = GOALS.find((g) => g.id === goalId) ?? null
@@ -197,11 +379,25 @@ export default function Wizard({ onExit }: WizardProps) {
     setCustomText('')
     setVoiceSetId(null)
     setAgreed(false)
+    setCodeError(null)
+    setJobResult(null)
     goTo(0)
   }
 
+  const handleDone = (result: JobResult) => {
+    setJobResult(result)
+    goTo(4)
+  }
+
+  const handleBadCode = () => {
+    setCodeError("That code didn't work — check it and try again.")
+    goTo(2)
+  }
+
   const goalValid =
-    goalId !== null && (goalId !== 'custom' || customText.trim().length > 0)
+    goalId !== null &&
+    (GOALS.find((g) => g.id === goalId)?.available ?? false) &&
+    (goalId !== 'custom' || customText.trim().length > 0)
 
   return (
     <div className="animate-fade-in min-h-screen">
@@ -245,15 +441,26 @@ export default function Wizard({ onExit }: WizardProps) {
                     <button
                       key={g.id}
                       type="button"
-                      onClick={() => setGoalId(g.id)}
+                      disabled={!g.available}
+                      onClick={() => g.available && setGoalId(g.id)}
                       aria-pressed={selected}
                       className={cn(
                         'relative rounded-2xl border p-7 text-left transition-colors',
                         selected
                           ? 'border-violet-300/60 bg-violet-300/10'
                           : 'border-white/10 bg-white/5 hover:border-white/25',
+                        !g.available &&
+                          'cursor-not-allowed opacity-50 hover:border-white/10',
                       )}
                     >
+                      {!g.available && (
+                        <Badge
+                          variant="outline"
+                          className="absolute right-5 top-5 rounded-full border-white/15 px-3 py-1 text-[10px] font-normal uppercase tracking-[0.2em] text-white/40"
+                        >
+                          In production
+                        </Badge>
+                      )}
                       {selected && (
                         <span className="absolute right-5 top-5 flex size-5 items-center justify-center rounded-full bg-violet-300 text-[#0b0b12]">
                           <Check className="size-3" />
@@ -459,64 +666,212 @@ export default function Wizard({ onExit }: WizardProps) {
                     {DISCLAIMER}
                   </span>
                 </label>
+
+                <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6">
+                  <Label
+                    htmlFor="wizard-access-code"
+                    className="text-xs uppercase tracking-[0.2em] text-white/35"
+                  >
+                    Early-access code
+                  </Label>
+                  <Input
+                    id="wizard-access-code"
+                    type="password"
+                    value={accessCode}
+                    onChange={(e) => {
+                      setAccessCode(e.target.value)
+                      setCodeError(null)
+                    }}
+                    autoComplete="off"
+                    className="mt-3 border-white/15 bg-white/5 text-sm text-white/85 placeholder:text-white/30 focus-visible:ring-violet-300/50"
+                    placeholder="Enter your code"
+                  />
+                  <p className="mt-2 text-xs text-white/35">
+                    Prototype access only — full checkout lands at launch.
+                  </p>
+                  {codeError && (
+                    <p className="mt-2 text-xs text-red-300/90">{codeError}</p>
+                  )}
+                </div>
               </div>
             </section>
           )}
 
           {/* ── Step 4 · Generating ───────────────────────── */}
-          {step === 3 && <GeneratingStep onDone={() => goTo(4)} />}
+          {step === 3 && goal && voiceSet && (
+            <GeneratingStep
+              apiGoal={goal.apiGoal ?? goal.id}
+              voiceSetId={voiceSet.id}
+              custom={customText}
+              accessCode={accessCode}
+              onDone={handleDone}
+              onBadCode={handleBadCode}
+              onStartOver={reset}
+            />
+          )}
 
           {/* ── Step 5 · Result ───────────────────────────── */}
-          {step === 4 && goal && voiceSet && (
+          {step === 4 && goal && voiceSet && jobResult && (
             <section>
-              <StepHeader
-                eyebrow="Your program"
-                title="Your program is ready."
-                copy={`Four tracks, voiced by ${voiceSet.narrator.name} with ${voiceSet.whisper.name} underneath. This prototype plays short voice samples.`}
-              />
-              <div className="mx-auto grid max-w-4xl gap-4 sm:grid-cols-2">
-                {tracks.map((track, i) => {
-                  const sample =
-                    i < 2 ? voiceSet.narrator : voiceSet.whisper
+              {(() => {
+                const realTrack = jobResult.demo ? undefined : jobResult.track
+                if (!realTrack) {
+                  // Demo fallback (API unreachable — e.g. static preview)
                   return (
-                    <div
-                      key={track.numeral}
-                      className="rounded-2xl border border-white/10 bg-white/5 p-7"
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <Badge
-                          variant="outline"
-                          className="rounded-full border-violet-300/30 px-3 py-1 text-[10px] font-normal uppercase tracking-[0.2em] text-violet-200/80"
-                        >
-                          {track.phase}
-                        </Badge>
-                        <span className="flex items-center gap-1.5 text-xs text-white/40">
-                          <Clock className="size-3" />
-                          {track.duration}
-                        </span>
+                    <>
+                      <StepHeader
+                        eyebrow="Your program — demo"
+                        title="Your program is ready."
+                        copy={`Four tracks, voiced by ${voiceSet.narrator.name} with ${voiceSet.whisper.name} underneath. This demo plays short voice samples.`}
+                      />
+                      <div className="mx-auto grid max-w-4xl gap-4 sm:grid-cols-2">
+                        {tracks.map((track, i) => {
+                          const sample =
+                            i < 2 ? voiceSet.narrator : voiceSet.whisper
+                          return (
+                            <div
+                              key={track.numeral}
+                              className="rounded-2xl border border-white/10 bg-white/5 p-7"
+                            >
+                              <div className="flex items-center justify-between gap-3">
+                                <Badge
+                                  variant="outline"
+                                  className="rounded-full border-violet-300/30 px-3 py-1 text-[10px] font-normal uppercase tracking-[0.2em] text-violet-200/80"
+                                >
+                                  {track.phase}
+                                </Badge>
+                                <span className="flex items-center gap-1.5 text-xs text-white/40">
+                                  <Clock className="size-3" />
+                                  {track.duration}
+                                </span>
+                              </div>
+                              <h3 className="mt-5 text-sm font-medium leading-snug text-white/90">
+                                {track.title}
+                              </h3>
+                              <div className="mt-6 flex items-center justify-between gap-3 border-t border-white/5 pt-5">
+                                <span className="text-xs text-white/35">
+                                  Voice sample · {sample.name}
+                                </span>
+                                <AudioPreviewButton
+                                  src={sample.src}
+                                  playingSrc={audio.playingSrc}
+                                  onToggle={audio.toggle}
+                                  label={`${sample.name} voice sample`}
+                                />
+                              </div>
+                            </div>
+                          )
+                        })}
                       </div>
-                      <h3 className="mt-5 text-sm font-medium leading-snug text-white/90">
-                        {track.title}
-                      </h3>
-                      <div className="mt-6 flex items-center justify-between gap-3 border-t border-white/5 pt-5">
-                        <span className="text-xs text-white/35">
-                          Voice sample · {sample.name}
-                        </span>
-                        <AudioPreviewButton
-                          src={sample.src}
-                          playingSrc={audio.playingSrc}
-                          onToggle={audio.toggle}
-                          label={`${sample.name} voice sample`}
-                        />
-                      </div>
-                    </div>
+                      <p className="mt-8 text-center text-xs text-white/35">
+                        Demo preview — the studio API wasn't reachable, so this
+                        result is a staged sample, not a real render.
+                      </p>
+                    </>
                   )
-                })}
-              </div>
-              <p className="mt-8 text-center text-xs text-white/35">
-                Prototype preview — full-length renders are delivered after
-                purchase.
-              </p>
+                }
+                // Real render
+                const fileUrl = (name: string) =>
+                  `/api/jobs/${jobResult.jobId}/files/${encodeURIComponent(name)}`
+                return (
+                  <>
+                    <StepHeader
+                      eyebrow="Your program"
+                      title="Your program is ready."
+                      copy={`Track I, voiced by ${voiceSet.narrator.name} with ${voiceSet.whisper.name} underneath. Tracks II–IV join it at launch.`}
+                    />
+                    <div className="mx-auto grid max-w-4xl gap-4 sm:grid-cols-2">
+                      {tracks.map((track, i) => {
+                        if (i === 0) {
+                          return (
+                            <div
+                              key={track.numeral}
+                              className="rounded-2xl border border-violet-300/30 bg-violet-300/5 p-7"
+                            >
+                              <div className="flex items-center justify-between gap-3">
+                                <Badge
+                                  variant="outline"
+                                  className="rounded-full border-violet-300/30 px-3 py-1 text-[10px] font-normal uppercase tracking-[0.2em] text-violet-200/80"
+                                >
+                                  {track.phase}
+                                </Badge>
+                                <span className="flex items-center gap-1.5 text-xs text-white/40">
+                                  <Clock className="size-3" />
+                                  {fmtDuration(realTrack.durationSec)}
+                                </span>
+                              </div>
+                              <h3 className="mt-5 text-sm font-medium leading-snug text-white/90">
+                                {realTrack.title}
+                              </h3>
+                              {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+                              <audio
+                                controls
+                                preload="none"
+                                src={fileUrl(realTrack.mp3)}
+                                className="mt-5 w-full"
+                              />
+                              <div className="mt-5 flex gap-2 border-t border-white/5 pt-5">
+                                <Button
+                                  asChild
+                                  size="sm"
+                                  variant="outline"
+                                  className="border-white/15 bg-transparent text-white/75 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white"
+                                >
+                                  <a href={fileUrl(realTrack.mp3)} download={realTrack.mp3}>
+                                    <Download className="size-4" />
+                                    Download MP3
+                                  </a>
+                                </Button>
+                                <Button
+                                  asChild
+                                  size="sm"
+                                  variant="outline"
+                                  className="border-white/15 bg-transparent text-white/75 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white"
+                                >
+                                  <a href={fileUrl(realTrack.wav)} download={realTrack.wav}>
+                                    <Download className="size-4" />
+                                    Download WAV
+                                  </a>
+                                </Button>
+                              </div>
+                            </div>
+                          )
+                        }
+                        return (
+                          <div
+                            key={track.numeral}
+                            className="rounded-2xl border border-white/10 bg-white/[0.03] p-7 opacity-70"
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <Badge
+                                variant="outline"
+                                className="rounded-full border-white/15 px-3 py-1 text-[10px] font-normal uppercase tracking-[0.2em] text-white/40"
+                              >
+                                {track.phase}
+                              </Badge>
+                              <span className="flex items-center gap-1.5 text-xs text-white/40">
+                                <Clock className="size-3" />
+                                {track.duration}
+                              </span>
+                            </div>
+                            <h3 className="mt-5 text-sm font-medium leading-snug text-white/60">
+                              {track.title}
+                            </h3>
+                            <p className="mt-6 border-t border-white/5 pt-5 text-xs text-white/35">
+                              In production — included with your full program at
+                              launch.
+                            </p>
+                          </div>
+                        )
+                      })}
+                    </div>
+                    <p className="mt-8 text-center text-xs text-white/35">
+                      Save your files — this link lives as long as the studio
+                      keeps early-access renders on disk.
+                    </p>
+                  </>
+                )
+              })()}
               <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
                 <Button
                   disabled
@@ -578,7 +933,7 @@ export default function Wizard({ onExit }: WizardProps) {
             {step === 2 && (
               <Button
                 onClick={() => goTo(3)}
-                disabled={!agreed}
+                disabled={!agreed || !accessCode.trim()}
                 className="bg-primary text-primary-foreground hover:bg-violet-300 disabled:opacity-30"
               >
                 Generate my program

@@ -6,6 +6,7 @@ node_modules/
 __pycache__/
 
 # render pipeline working dirs / outputs (regenerable, or large binaries)
+renders/
 *_segments_raw/
 *_segments/
 qa_whisper_boost_*.wav

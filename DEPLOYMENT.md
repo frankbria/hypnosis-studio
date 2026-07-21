@@ -39,3 +39,15 @@ Live domain: **hypnosis.frankbria.net** — A record → 45.33.41.124, TLS issue
 - Logs: `ssh prod 'journalctl -u hypnosis-studio -f'`
 - Restart: `ssh prod 'systemctl restart hypnosis-studio'`
 - Always `nginx -t` before `systemctl reload nginx`
+
+## Render pipeline
+
+`POST /api/programs` spawns one worker per job and tracks it on disk; no queue daemon.
+
+- **Worker flow** (`engine/render_program.py`, per job): `scripting` (copy `engine/scripts/<goal>_tts_segments.json` into the job dir, verify pad) → `voicing` / `whisper-layer` (ElevenLabs TTS per segment — narrator voice `[soft]` for non-suggestion phases, whisper voice `[whispering]` for suggestion; idempotent, existing segment WAVs are skipped) → `entrainment-bed` (`assemble_track.py` as a subprocess with `cwd` = job dir) → `mastering-qa` (write `manifest.json`). Progress lives in `renders/<jobId>/status.json`, written atomically at every transition; worker stdout/stderr goes to `renders/<jobId>/worker.log`.
+- **Paths:** venv `/srv/hypnosis-studio/engine/venv` (worker runs as `<venv>/bin/python`), pads `/srv/hypnosis-studio/engine/pads/*.wav` (960 s mono 44.1 kHz — **server-only, not in git**), renders `/srv/hypnosis-studio/renders/<jobId>/`, env `/srv/hypnosis-studio/engine/api.env` (loaded by the systemd unit; provides `ELEVENLABS_API_KEY`, `ACCESS_CODE`, `HYPNO_DTYPE`, `HYPNO_SKIP_QA` to Node and its children).
+- **Early access:** the render endpoint requires `accessCode` = `ACCESS_CODE` from `api.env` (currently **`polymath-2026`**). If `ACCESS_CODE` is unset, the endpoint answers 503 `rendering_disabled`.
+- **Concurrency & quota:** one render at a time (409 `busy` while any job is `rendering`); daily cap `MAX_JOBS_PER_DAY` (default **6**, persisted in `renders/.quota.json`, 429 `daily_cap` when reached).
+- **Env flags on the assembler:** `HYPNO_DTYPE=float32` halves mixer RAM on the small box; `HYPNO_SKIP_QA=1` skips the QA section entirely (incl. the `faster_whisper` import, which is not installed in the venv). Both are set in `api.env`; the worker also sets them as defaults if missing.
+- **Files:** `GET /api/jobs/:id` returns status (+ manifest once ready); `GET /api/jobs/:id/files/:name` streams the mastered MP3/WAV listed in the manifest (attachment, ready jobs only).
+
