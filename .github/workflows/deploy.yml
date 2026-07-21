@@ -1,0 +1,32 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy app + engine to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          source: "server.js,package.json,engine/**"
+          target: "/srv/hypnosis-studio/"
+
+      - name: Restart service and smoke test
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            sudo /bin/systemctl restart hypnosis-studio
+            sleep 2
+            sudo /bin/systemctl is-active hypnosis-studio
+            curl -sf -o /dev/null -w "smoke: HTTP %{http_code}\n" http://127.0.0.1:4100/
