@@ -25,11 +25,12 @@ import {
   GENERATION_STAGES,
   GENERATION_TOTAL_MS,
   GOALS,
+  HEALING_NONMEDICAL,
   PROGRAM_PRICE,
   VOICE_SETS,
   buildTracks,
 } from '@/lib/data'
-import type { VoiceSet } from '@/lib/data'
+import type { DoorId, VoiceSet } from '@/lib/data'
 import { cn } from '@/lib/utils'
 
 const STEP_LABELS = ['Goal', 'Voice', 'Review', 'Create', 'Program'] as const
@@ -38,7 +39,9 @@ const fmtDuration = (sec: number) =>
   `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, '0')}`
 
 interface WizardProps {
+  door: DoorId
   onExit: () => void
+  onHome: () => void
 }
 
 // ─── Stepper ─────────────────────────────────────────────────────────────────
@@ -258,7 +261,7 @@ function GeneratingStep({
       }
       if (res.status === 422) {
         setError({
-          message: "That program isn't in production yet — choose one of the four available goals.",
+          message: "That program isn't in production yet — choose one of the available goals.",
           retryable: false,
         })
         return
@@ -356,7 +359,7 @@ function GeneratingStep({
 
 // ─── Wizard ──────────────────────────────────────────────────────────────────
 
-export default function Wizard({ onExit }: WizardProps) {
+export default function Wizard({ door, onExit, onHome }: WizardProps) {
   const [step, setStep] = useState(0)
   const [goalId, setGoalId] = useState<string | null>(null)
   const [customText, setCustomText] = useState('')
@@ -367,7 +370,8 @@ export default function Wizard({ onExit }: WizardProps) {
   const [jobResult, setJobResult] = useState<JobResult | null>(null)
   const audio = useAudioPreview()
 
-  const goal = GOALS.find((g) => g.id === goalId) ?? null
+  const doorGoals = useMemo(() => GOALS.filter((g) => g.door === door), [door])
+  const goal = doorGoals.find((g) => g.id === goalId) ?? null
   const voiceSet = VOICE_SETS.find((v) => v.id === voiceSetId) ?? null
   const tracks = useMemo(() => (goal ? buildTracks(goal) : []), [goal])
 
@@ -399,7 +403,7 @@ export default function Wizard({ onExit }: WizardProps) {
 
   const goalValid =
     goalId !== null &&
-    (GOALS.find((g) => g.id === goalId)?.available ?? false) &&
+    (doorGoals.find((g) => g.id === goalId)?.available ?? false) &&
     (goalId !== 'custom' || customText.trim().length > 0)
 
   return (
@@ -409,8 +413,9 @@ export default function Wizard({ onExit }: WizardProps) {
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-4 px-6">
           <button
             type="button"
-            onClick={onExit}
+            onClick={onHome}
             className="text-xs font-medium tracking-[0.3em] text-white/70 transition-colors hover:text-white"
+            title="Back to the door chooser"
           >
             HYPNOSIS&nbsp;STUDIO
           </button>
@@ -433,12 +438,20 @@ export default function Wizard({ onExit }: WizardProps) {
           {step === 0 && (
             <section>
               <StepHeader
-                eyebrow="Step 1 · Goal"
-                title="What should the program change?"
-                copy="Choose the territory. The script, the metaphor, and the suggestions are all written from this choice."
+                eyebrow={door === 'healing' ? 'Step 1 · Practice' : 'Step 1 · Goal'}
+                title={
+                  door === 'healing'
+                    ? 'What kind of rest do you need?'
+                    : 'What should the program change?'
+                }
+                copy={
+                  door === 'healing'
+                    ? 'Choose the practice. Every script is a guided descent into deep rest and symbolic renewal — rest and personal growth, never medical treatment.'
+                    : 'Choose the territory. The script, the metaphor, and the suggestions are all written from this choice.'
+                }
               />
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {GOALS.map((g) => {
+                {doorGoals.map((g) => {
                   const selected = goalId === g.id
                   return (
                     <button
@@ -596,7 +609,7 @@ export default function Wizard({ onExit }: WizardProps) {
                   <dl className="space-y-5">
                     <div className="flex items-start justify-between gap-6">
                       <dt className="text-xs uppercase tracking-[0.2em] text-white/35">
-                        Goal
+                        {door === 'healing' ? 'Practice' : 'Goal'}
                       </dt>
                       <dd className="text-right text-sm text-white/85">
                         {goal.name}
@@ -916,6 +929,14 @@ export default function Wizard({ onExit }: WizardProps) {
           </div>
         )}
       </main>
+
+      {door === 'healing' && (
+        <footer className="border-t border-white/5 px-6 py-6">
+          <p className="mx-auto max-w-2xl text-center text-[11px] leading-relaxed text-white/30">
+            {HEALING_NONMEDICAL}
+          </p>
+        </footer>
+      )}
     </div>
   )
 }

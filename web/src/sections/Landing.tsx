@@ -12,10 +12,13 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import { DISCLAIMER, GOALS, PRICING } from '@/lib/data'
+import { DISCLAIMER, PRICING, goalsForDoor } from '@/lib/data'
+import type { DoorId } from '@/lib/data'
 
 interface LandingProps {
+  door: DoorId
   onStart: () => void
+  onHome: () => void
 }
 
 const HOW_IT_WORKS = [
@@ -87,18 +90,65 @@ function Eyebrow({ children }: { children: string }) {
   )
 }
 
-export default function Landing({ onStart }: LandingProps) {
+function BrandButton({ onHome }: { onHome: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onHome}
+      className="text-sm font-medium tracking-[0.3em] text-white/90 transition-colors hover:text-white"
+    >
+      HYPNOSIS&nbsp;STUDIO
+    </button>
+  )
+}
+
+function Footer() {
+  return (
+    <footer className="border-t border-white/5 px-6 py-10">
+      <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-6 sm:flex-row">
+        <div className="flex items-center gap-3">
+          <Moon className="size-4 text-violet-300/70" />
+          <span className="text-xs font-medium tracking-[0.3em] text-white/70">
+            HYPNOSIS&nbsp;STUDIO
+          </span>
+        </div>
+        <p className="text-xs text-white/30">© 2026 Hypnosis Studio</p>
+        <nav className="flex items-center gap-6 text-xs text-white/40">
+          <a href="#disclaimer" className="transition-colors hover:text-white/80">
+            Disclaimer
+          </a>
+          <a href="#top" className="transition-colors hover:text-white/80">
+            Contact
+          </a>
+        </nav>
+      </div>
+    </footer>
+  )
+}
+
+function DisclaimerSection() {
+  return (
+    <section id="disclaimer" className="scroll-mt-24 px-6 py-16">
+      <div className="mx-auto max-w-3xl">
+        <div className="flex gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-7">
+          <Info className="mt-0.5 size-4 shrink-0 text-[#d4b87f]/70" />
+          <p className="text-xs leading-relaxed text-white/40">{DISCLAIMER}</p>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+// ─── Performance door (the original catalog) ─────────────────────────────────
+
+function PerformanceLanding({ onStart, onHome }: Omit<LandingProps, 'door'>) {
+  const goals = goalsForDoor('performance')
   return (
     <div id="top" className="animate-fade-in">
       {/* ── Nav ─────────────────────────────────────────── */}
       <header className="fixed inset-x-0 top-0 z-50 border-b border-white/5 bg-[#0b0b12]/80 backdrop-blur-md">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
-          <a
-            href="#top"
-            className="text-sm font-medium tracking-[0.3em] text-white/90 transition-colors hover:text-white"
-          >
-            HYPNOSIS&nbsp;STUDIO
-          </a>
+          <BrandButton onHome={onHome} />
           <nav className="hidden items-center gap-8 text-sm text-white/50 md:flex">
             <a href="#how" className="transition-colors hover:text-white/90">
               How it works
@@ -127,14 +177,15 @@ export default function Landing({ onStart }: LandingProps) {
           className="animate-glow absolute left-1/2 top-24 -z-10 h-[420px] w-[720px] -translate-x-1/2 rounded-full bg-violet-500/10 blur-3xl"
         />
         <div className="mx-auto max-w-3xl text-center">
-          <Eyebrow>Personalized self-hypnosis audio</Eyebrow>
+          <Eyebrow>Performance · personalized self-hypnosis audio</Eyebrow>
           <h1 className="font-display mt-6 text-5xl leading-[1.08] text-[#e8e6f0] md:text-7xl">
             Hypnosis, written for one mind.{' '}
             <em className="text-violet-300">Yours.</em>
           </h1>
           <p className="mx-auto mt-6 max-w-xl text-base leading-relaxed text-white/55 md:text-lg">
-            A personalized four-track self-hypnosis program — scripted and voiced
-            for your goal, delivered as studio-mastered audio.
+            A personalized four-track self-hypnosis program for learning,
+            focus, creativity, and seeing opportunity — scripted and voiced for
+            your goal, delivered as studio-mastered audio.
           </p>
           <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <Button
@@ -240,12 +291,12 @@ export default function Landing({ onStart }: LandingProps) {
 
           {/* Goal gallery */}
           <div className="mt-24">
-            <Eyebrow>Goals</Eyebrow>
+            <Eyebrow>Performance goals</Eyebrow>
             <h2 className="font-display mt-4 max-w-xl text-4xl leading-tight text-[#e8e6f0]">
               Six doors in. Or draw your own.
             </h2>
             <div className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {GOALS.map((goal) => (
+              {goals.map((goal) => (
                 <Card
                   key={goal.id}
                   className="group rounded-2xl border-white/10 bg-white/5 shadow-none transition-colors hover:border-violet-300/30"
@@ -332,36 +383,143 @@ export default function Landing({ onStart }: LandingProps) {
         </div>
       </section>
 
-      {/* ── Disclaimer ──────────────────────────────────── */}
-      <section id="disclaimer" className="scroll-mt-24 px-6 py-16">
-        <div className="mx-auto max-w-3xl">
-          <div className="flex gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-7">
-            <Info className="mt-0.5 size-4 shrink-0 text-[#d4b87f]/70" />
-            <p className="text-xs leading-relaxed text-white/40">{DISCLAIMER}</p>
+      <DisclaimerSection />
+      <Footer />
+    </div>
+  )
+}
+
+// ─── Healing door (mind-body rest visualizations — non-medical) ──────────────
+
+function HealingLanding({ onStart, onHome }: Omit<LandingProps, 'door'>) {
+  const goals = goalsForDoor('healing')
+  return (
+    <div id="top" className="animate-fade-in">
+      {/* ── Nav ─────────────────────────────────────────── */}
+      <header className="fixed inset-x-0 top-0 z-50 border-b border-white/5 bg-[#0b0b12]/80 backdrop-blur-md">
+        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
+          <BrandButton onHome={onHome} />
+          <nav className="hidden items-center gap-8 text-sm text-white/50 md:flex">
+            <a
+              href="#practices"
+              className="transition-colors hover:text-white/90"
+            >
+              Practices
+            </a>
+            <a
+              href="#disclaimer"
+              className="transition-colors hover:text-white/90"
+            >
+              Disclaimer
+            </a>
+          </nav>
+          <Button
+            size="sm"
+            onClick={onStart}
+            className="bg-primary text-primary-foreground hover:bg-violet-300"
+          >
+            Begin a practice
+          </Button>
+        </div>
+      </header>
+
+      {/* ── Hero ────────────────────────────────────────── */}
+      <section className="relative overflow-hidden px-6 pb-20 pt-40">
+        <div
+          aria-hidden
+          className="animate-glow absolute left-1/2 top-24 -z-10 h-[420px] w-[720px] -translate-x-1/2 rounded-full bg-violet-500/10 blur-3xl"
+        />
+        <div className="mx-auto max-w-3xl text-center">
+          <Eyebrow>Healing · guided imagery &amp; deep relaxation</Eyebrow>
+          <h1 className="font-display mt-6 text-5xl leading-[1.08] text-[#e8e6f0] md:text-7xl">
+            Healing — deep rest for a body that knows how to{' '}
+            <em className="text-violet-300">repair itself.</em>
+          </h1>
+          <p className="mx-auto mt-6 max-w-xl text-base leading-relaxed text-white/55 md:text-lg">
+            Guided imagery practices in the tradition of therapeutic
+            visualization: deep relaxation, symbolic repair imagery, and a
+            rehearsal of wellness. These audios are for rest and personal
+            growth — they are not medical treatment, and they never replace the
+            care of your doctors.
+          </p>
+          <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
+            <Button
+              size="lg"
+              onClick={onStart}
+              className="bg-primary text-primary-foreground hover:bg-violet-300"
+            >
+              Begin a practice
+              <ArrowRight className="size-4" />
+            </Button>
+            <Button
+              size="lg"
+              variant="ghost"
+              asChild
+              className="text-white/60 hover:bg-white/5 hover:text-white"
+            >
+              <a href="#practices">See the practices</a>
+            </Button>
+          </div>
+          <Waveform />
+        </div>
+      </section>
+
+      {/* ── Practices ───────────────────────────────────── */}
+      <section id="practices" className="scroll-mt-24 px-6 py-24">
+        <div className="mx-auto max-w-6xl">
+          <Eyebrow>Healing practices</Eyebrow>
+          <h2 className="font-display mt-4 max-w-xl text-4xl leading-tight text-[#e8e6f0]">
+            Practices for rest and renewal.
+          </h2>
+          <p className="mt-4 max-w-xl text-sm leading-relaxed text-white/50">
+            Every practice is a four-track program — induction, deepening,
+            suggestion, integration — rendered fresh in the voice you choose.
+          </p>
+          <div className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {goals.map((goal) => (
+              <Card
+                key={goal.id}
+                className={
+                  goal.available
+                    ? 'group rounded-2xl border-white/10 bg-white/5 shadow-none transition-colors hover:border-violet-300/30'
+                    : 'group relative rounded-2xl border-white/10 bg-white/5 opacity-60 shadow-none'
+                }
+              >
+                <CardContent className="p-7">
+                  {!goal.available && (
+                    <Badge
+                      variant="outline"
+                      className="absolute right-5 top-5 rounded-full border-white/15 px-3 py-1 text-[10px] font-normal uppercase tracking-[0.2em] text-white/40"
+                    >
+                      In production
+                    </Badge>
+                  )}
+                  <goal.icon className="size-5 text-violet-300 transition-colors group-hover:text-[#d4b87f]" />
+                  <h3 className="mt-5 text-base font-medium text-white/90">
+                    {goal.name}
+                  </h3>
+                  <p className="mt-1 text-xs uppercase tracking-[0.15em] text-white/35">
+                    {goal.tagline}
+                  </p>
+                  <p className="mt-4 text-sm leading-relaxed text-white/50">
+                    {goal.description}
+                  </p>
+                </CardContent>
+              </Card>
+            ))}
           </div>
         </div>
       </section>
 
-      {/* ── Footer ──────────────────────────────────────── */}
-      <footer className="border-t border-white/5 px-6 py-10">
-        <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-6 sm:flex-row">
-          <div className="flex items-center gap-3">
-            <Moon className="size-4 text-violet-300/70" />
-            <span className="text-xs font-medium tracking-[0.3em] text-white/70">
-              HYPNOSIS&nbsp;STUDIO
-            </span>
-          </div>
-          <p className="text-xs text-white/30">© 2026 Hypnosis Studio</p>
-          <nav className="flex items-center gap-6 text-xs text-white/40">
-            <a href="#disclaimer" className="transition-colors hover:text-white/80">
-              Disclaimer
-            </a>
-            <a href="#top" className="transition-colors hover:text-white/80">
-              Contact
-            </a>
-          </nav>
-        </div>
-      </footer>
+      <DisclaimerSection />
+      <Footer />
     </div>
   )
+}
+
+export default function Landing({ door, onStart, onHome }: LandingProps) {
+  if (door === 'healing') {
+    return <HealingLanding onStart={onStart} onHome={onHome} />
+  }
+  return <PerformanceLanding onStart={onStart} onHome={onHome} />
 }

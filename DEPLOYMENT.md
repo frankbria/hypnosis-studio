@@ -40,6 +40,18 @@ Live domain: **hypnosis.frankbria.net** — A record → 45.33.41.124, TLS issue
 - Restart: `ssh prod 'systemctl restart hypnosis-studio'`
 - Always `nginx -t` before `systemctl reload nginx`
 
+## Two-door site architecture (2026-07-23)
+
+The SPA has two storefronts behind a door chooser:
+
+- **`/`** — door chooser landing (two cards: Performance and Healing)
+- **`/performance`** — the original learning/optimization catalog (polymath, golden_thread, inner_studio, open_gate + coming-soon tiles)
+- **`/healing`** — mind-body rest/repair visualizations, **explicitly non-medical** ("Not medicine. Not treatment. Always alongside — never instead of — medical care."); launches with the `river` goal
+
+Routing is client-side only: the app reads `window.location.pathname` (no router dependency; browser back/forward is handled via `popstate`, and in-app navigation uses `history.pushState`). Trailing slashes are normalized client-side because the vite build uses `base: './'`. The wizard keeps the door path in the URL bar, and the brand mark returns to `/`. `document.title` is set per door client-side (`Hypnosis Studio — Performance` / `— Healing`); **true per-route meta/OG tags would need SSR or prerendering — not implemented.**
+
+**Server:** no route changes are needed — `serveStatic` already falls back to `index.html` for any extension-less path, so `/performance` and `/healing` are served by the existing SPA catch-all; `/api/*` handling is untouched.
+
 ## Render pipeline
 
 `POST /api/programs` spawns one worker per job and tracks it on disk; no queue daemon.
@@ -52,4 +64,16 @@ Live domain: **hypnosis.frankbria.net** — A record → 45.33.41.124, TLS issue
 - **Concurrency & quota:** one render at a time (409 `busy` while any job is `rendering`); daily cap `MAX_JOBS_PER_DAY` (default **6**, persisted in `renders/.quota.json`, 429 `daily_cap` when reached).
 - **Env flags on the assembler:** `HYPNO_DTYPE=float32` halves mixer RAM on the small box; `HYPNO_SKIP_QA=1` skips the QA section entirely (incl. the `faster_whisper` import, which is not installed in the venv). Both are set in `api.env`; the worker also sets them as defaults if missing.
 - **Files:** `GET /api/jobs/:id` returns status (+ manifest once ready); `GET /api/jobs/:id/files/:name` streams the mastered MP3/WAV listed in the manifest (attachment, ready jobs only).
+
+### Goal registry
+
+| Goal id | Program title | Pad | Door |
+|---|---|---|---|
+| `polymath` | The Polymath Mind | `pad_15.wav` | Performance |
+| `golden_thread` | The Golden Thread | `pad_golden_15.wav` | Performance |
+| `inner_studio` | The Inner Studio | `pad_studio.wav` | Performance |
+| `open_gate` | The Open Gate | `pad_gate.wav` | Performance |
+| `river` | The River of Renewal | `pad_15.wav` (shared with polymath) | Healing |
+
+`river` follows the standard suffix pattern — `engine/scripts/river_tts_segments.json` + `river_track2/3/4_tts_segments.json`; QA keywords `river,healing,rest,renewal,breath`. Goal allow-lists live in `engine/render_program.py` (`GOALS`/`PADS`/`KEYWORDS`/`TITLES`) and `server.js` (`VALID_GOALS`); the frontend door catalogs live in `web/src/lib/data.ts` (`door` field per goal).
 

@@ -1,12 +1,20 @@
 import type { LucideIcon } from 'lucide-react'
 import {
   Brain,
+  Cloud,
   DoorOpen,
   Infinity as InfinityIcon,
+  Moon,
   Mountain,
   Palette,
   PenLine,
+  Waves,
 } from 'lucide-react'
+
+// ─── Doors ───────────────────────────────────────────────────────────────────
+
+/** The two storefronts: performance (learning/optimization) and healing (rest/repair imagery). */
+export type DoorId = 'performance' | 'healing'
 
 // ─── Goals ───────────────────────────────────────────────────────────────────
 
@@ -16,6 +24,8 @@ export interface Goal {
   tagline: string
   description: string
   icon: LucideIcon
+  /** Which door (storefront) this goal belongs to */
+  door: DoorId
   /** Thematic names used for tracks II and III */
   themes: [string, string]
   /** Whether this goal can actually be rendered today */
@@ -32,6 +42,7 @@ export const GOALS: Goal[] = [
     description:
       'Train the mind to absorb deeply, connect widely, and recall on demand — learning as a way of being, not a task.',
     icon: Brain,
+    door: 'performance',
     themes: ['The Deep Library', 'The Whispering Index'],
     available: true,
     apiGoal: 'polymath',
@@ -43,6 +54,7 @@ export const GOALS: Goal[] = [
     description:
       'One clear line from intention to completion. Distraction loosens its grip; the thread holds.',
     icon: InfinityIcon,
+    door: 'performance',
     themes: ['The Loom of Attention', 'The Unbroken Line'],
     available: true,
     apiGoal: 'golden_thread',
@@ -54,6 +66,7 @@ export const GOALS: Goal[] = [
     description:
       'A quiet room inside you where the work makes itself. Enter, and the flow is already waiting.',
     icon: Palette,
+    door: 'performance',
     themes: ['The Quiet Atelier', 'The Flowing Hand'],
     available: true,
     apiGoal: 'inner_studio',
@@ -65,6 +78,7 @@ export const GOALS: Goal[] = [
     description:
       'Opportunity rarely knocks twice — but it always whispers first. Learn to hear it, and to move.',
     icon: DoorOpen,
+    door: 'performance',
     themes: ['The Widening Field', 'The Threshold Walk'],
     available: true,
     apiGoal: 'open_gate',
@@ -76,6 +90,7 @@ export const GOALS: Goal[] = [
     description:
       'Not bravado — bedrock. A calm that pressure cannot reach, rehearsed until it is simply yours.',
     icon: Mountain,
+    door: 'performance',
     themes: ['The Bedrock', 'The Still Center'],
     available: false,
   },
@@ -86,10 +101,48 @@ export const GOALS: Goal[] = [
     description:
       'Name the change you want, in your own words. The script is written around it — and only it.',
     icon: PenLine,
+    door: 'performance',
     themes: ['The Turning', 'The Deep Water'],
     available: false,
   },
+  {
+    id: 'river',
+    name: 'The River of Renewal',
+    tagline: 'Deep rest and symbolic repair',
+    description:
+      'A slow drift down warm water — deep relaxation, symbolic renewal, and a rehearsal of wellness. Rest, not medicine.',
+    icon: Waves,
+    door: 'healing',
+    themes: ['The Mending Current', 'The Far Shore'],
+    available: true,
+    apiGoal: 'river',
+  },
+  {
+    id: 'deep-sleep',
+    name: 'Deep Sleep',
+    tagline: 'Rest, all the way down',
+    description:
+      'A long, slow descent into the deepest natural rest — nothing to do, nowhere to be, only drifting.',
+    icon: Moon,
+    door: 'healing',
+    themes: ['The Dark Water', 'The Undisturbed House'],
+    available: false,
+  },
+  {
+    id: 'the-quiet-mind',
+    name: 'The Quiet Mind',
+    tagline: 'Stillness for a busy mind',
+    description:
+      'For minds that run hot — a practice of unhooking, softening, and letting the noise settle on its own.',
+    icon: Cloud,
+    door: 'healing',
+    themes: ['The Empty Sky', 'The Settling Snow'],
+    available: false,
+  },
 ]
+
+export const goalsForDoor = (door: DoorId): Goal[] =>
+  GOALS.filter((g) => g.door === door)
 
 // ─── Voice sets ──────────────────────────────────────────────────────────────
 
@@ -229,6 +282,10 @@ export const PROGRAM_PRICE = '$39'
 
 export const DISCLAIMER =
   'Hypnosis Studio audio is for relaxation and personal development. It is not medical or psychological treatment and is not a substitute for professional care. Never listen while driving or operating machinery. If you have a history of seizures, severe mental illness, or are under 18, consult a qualified professional before use.'
+
+/** The healing door's non-medical stance — shown on the chooser card, healing landing, and wizard footer. */
+export const HEALING_NONMEDICAL =
+  'Not medicine. Not treatment. Always alongside — never instead of — medical care.'
 
 export const GENERATION_STAGES = [
   'Writing your script…',

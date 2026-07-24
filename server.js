@@ -18,7 +18,7 @@ const WORKER = path.join(__dirname, 'engine', 'render_program.py');
 const ACCESS_CODE = process.env.ACCESS_CODE || '';
 const MAX_JOBS_PER_DAY = parseInt(process.env.MAX_JOBS_PER_DAY || '6', 10) || 6;
 
-const VALID_GOALS = new Set(['polymath', 'golden_thread', 'inner_studio', 'open_gate']);
+const VALID_GOALS = new Set(['polymath', 'golden_thread', 'inner_studio', 'open_gate', 'river']);
 const VALID_VOICE_SETS = new Set(['male', 'female']);
 const SAFE_ID = /^[A-Za-z0-9_-]+$/;
 

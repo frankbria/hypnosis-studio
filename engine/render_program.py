@@ -37,13 +37,14 @@ import soundfile as sf
 import render_track
 
 # ---------- registries ----------
-GOALS = ("polymath", "golden_thread", "inner_studio", "open_gate")
+GOALS = ("polymath", "golden_thread", "inner_studio", "open_gate", "river")
 
 PADS = {
     "polymath": "pad_15.wav",
     "golden_thread": "pad_golden_15.wav",
     "inner_studio": "pad_studio.wav",
     "open_gate": "pad_gate.wav",
+    "river": "pad_15.wav",  # healing door reuses the polymath pad
 }
 
 VOICE_SETS = {
@@ -56,6 +57,7 @@ KEYWORDS = {
     "golden_thread": "golden,thread,labyrinth,door,notice",
     "inner_studio": "studio,canvas,create,inner",
     "open_gate": "gate,open,opportunity,notice",
+    "river": "river,healing,rest,renewal,breath",
 }
 
 TITLES = {
@@ -63,6 +65,7 @@ TITLES = {
     "golden_thread": "The Golden Thread",
     "inner_studio": "The Inner Studio",
     "open_gate": "The Open Gate",
+    "river": "The River of Renewal",
 }
 
 # 4-track program registry. script_suffix selects engine/scripts/<goal><suffix>_tts_segments.json;
