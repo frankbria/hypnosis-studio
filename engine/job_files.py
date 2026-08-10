@@ -58,9 +58,13 @@ def prune_intermediates(outdir):
     destroy a deliverable to reclaim disk, which is the wrong trade. Problems are
     logged and left for the retention sweep.
 
-    NOTE: when a cross-job segment cache lands (issue #9), segments should be
-    *moved* into that cache here rather than deleted, so a retried job does not
-    re-purchase them from ElevenLabs.
+    Safe to delete outright since #9: each segment is copied into the shared
+    cache — best effort — as soon as it is treated, rather than being promoted
+    when the job finishes. Promoting only here would cache nothing for a job
+    that died at segment 150 of 152, which is precisely the case that issue is
+    about. `segment_cache.store` never raises, so a segment whose copy failed is
+    simply re-purchased on a later run; that is the trade, not a guarantee that
+    every segment reached the cache.
     """
     removed = 0
     freed = 0
