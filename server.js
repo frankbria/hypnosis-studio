@@ -20,7 +20,9 @@ const DIST = path.join(__dirname, 'web', 'dist');
 // write where the server never looks — the render would appear to hang, then be
 // swept as stale, discarding work the customer paid for.
 const RENDERS = path.resolve(process.env.RENDERS_DIR || path.join(__dirname, 'renders'));
-const ENGINE_PY = path.join(__dirname, 'engine', 'venv', 'bin', 'python');
+// Overridable for the same reason RENDERS_DIR is: the tests need a worker they
+// control. Defaults to the engine venv the deploy creates.
+const ENGINE_PY = process.env.ENGINE_PY || path.join(__dirname, 'engine', 'venv', 'bin', 'python');
 const WORKER = path.join(__dirname, 'engine', 'render_program.py');
 
 const ACCESS_CODE = process.env.ACCESS_CODE || '';
@@ -134,17 +136,60 @@ function quotaPath() {
   return path.join(RENDERS, '.quota.json');
 }
 
+// `jobs` is the ledger of ids that currently hold a slot today. It is what
+// makes releasing one idempotent: the worker-exit handler and the stale sweep
+// can both declare the same job failed, and they genuinely race — a worker can
+// exit at the moment the sweep decides it is stale.
+//
+// It also gets day-correctness for free. This function discards the file when
+// `day` is not today, so yesterday's ids vanish with it and a job that fails
+// after midnight cannot refund against today's allowance — which a bare
+// `count -= 1` would happily do.
 function readQuota() {
   const today = new Date().toISOString().slice(0, 10);
   const q = readJsonSafe(quotaPath());
-  if (q && q.day === today && typeof q.count === 'number') return q;
-  return { day: today, count: 0 };
+  if (q && q.day === today && typeof q.count === 'number') {
+    return { day: today, count: q.count, jobs: Array.isArray(q.jobs) ? q.jobs : [] };
+  }
+  return { day: today, count: 0, jobs: [] };
 }
 
-function bumpQuota() {
+// Written the way writeStatus writes status.json. The file is now touched on
+// both sides of every job, and a torn write would either reopen the day's
+// allowance or close it for good.
+function writeQuota(q) {
+  const p = quotaPath();
+  const tmp = p + '.tmp';
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(q));
+    fs.renameSync(tmp, p);
+  } catch (e) {
+    console.error('quota write failed:', e && e.message);
+  }
+}
+
+function bumpQuota(id) {
   const q = readQuota();
   q.count += 1;
-  fs.writeFileSync(quotaPath(), JSON.stringify(q));
+  q.jobs.push(id);
+  writeQuota(q);
+}
+
+// Give a slot back. Only a job still listed in today's ledger can return one,
+// so a second call — from the other of the two failure paths, or from a sweep
+// re-running — finds nothing and does nothing.
+//
+// A quota file written before this ledger existed has no `jobs`, so releases
+// against it are no-ops: the cap still binds, and the day rolls over to a file
+// that has the ledger.
+function releaseQuota(id) {
+  const q = readQuota();
+  if (!q.jobs.includes(id)) return false;
+  q.jobs = q.jobs.filter((j) => j !== id);
+  q.count = Math.max(0, q.count - 1);
+  writeQuota(q);
+  console.log('released quota slot for failed job', id);
+  return true;
 }
 
 function startWorker(id, goal, voiceSet) {
@@ -169,6 +214,7 @@ function startWorker(id, goal, voiceSet) {
       jobId: id, state: 'failed', stage: null, progress: 0,
       detail: 'worker spawn failed', error: String(e),
     });
+    releaseQuota(id);
     return;
   }
   fs.closeSync(logFd); // child holds its own copy of the fd
@@ -177,6 +223,7 @@ function startWorker(id, goal, voiceSet) {
       jobId: id, state: 'failed', stage: null, progress: 0,
       detail: 'worker spawn failed', error: String(e),
     });
+    releaseQuota(id);
   });
   child.on('exit', () => {
     const st = readJsonSafe(path.join(jobDir(id), 'status.json'));
@@ -187,6 +234,9 @@ function startWorker(id, goal, voiceSet) {
         detail: 'worker crashed', error: 'worker crashed',
       });
     }
+    // The customer has nothing either way, so a crash and a clean failure are
+    // not worth charging differently for. A `ready` job keeps its slot.
+    if (!st || st.state !== 'ready') releaseQuota(id);
   });
 }
 
@@ -256,7 +306,7 @@ async function handleRequest(req, res) {
       jobId, state: 'rendering', stage: 'scripting', progress: 0,
       detail: 'Queued',
     });
-    bumpQuota();
+    bumpQuota(jobId);
     startWorker(jobId, body.goal, body.voiceSet);
     return sendJson(res, 202, { jobId, state: 'rendering' });
   }
@@ -353,6 +403,7 @@ function sweepStaleJobs() {
     const age = Date.now() - new Date(st.updatedAt || 0).getTime();
     if (age > STALE_MS) {
       writeStatus(d.name, { ...st, state: 'failed', error: 'service restarted during render — please start a new one' });
+      releaseQuota(d.name);
       console.log('swept stale job', d.name);
     }
   }
