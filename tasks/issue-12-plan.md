@@ -51,6 +51,24 @@ with `resource.getrusage(RUSAGE_CHILDREN).ru_maxrss`:
 2. `main` vs patched, `HYPNO_DTYPE=float32` — peak RSS (expect a real drop), and report how far the audio moved rather than asserting identity.
 3. Scale the fixture up so the arrays are large enough for the difference to be visible rather than lost in interpreter overhead.
 
+## Outcome — peak memory did not move, and the reason matters
+
+Measured: peak is 968.6 MB float64 / 770.2 MB float32, unchanged by this fix.
+The working set does drop ~69 MB from the notch filter onward, which is what the
+flag was supposed to buy.
+
+My first explanation — "welch() sets the peak, so nothing after it can matter" —
+was wrong, and review caught it. Shrinking welch's window to 60 s shows why:
+
+| welch window | float32 peak | float64 peak |
+|---|---|---|
+| 300 s | 770.4 (set by welch) | 968.8 |
+| 60 s | 728.7 (set by the **mix notch**) | 981.0 |
+
+They are two peaks of comparable size. Cutting welch alone buys ~42 MB before
+the notch filter takes over as the ceiling. Chunking the mix notch — the pattern
+the rest of this file already uses — is the change that would move it.
+
 ## Changes
 
 1. Delete the dead `pad = sosfiltfilt(...)` line.
