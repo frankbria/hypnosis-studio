@@ -13,7 +13,13 @@ const PORT = process.env.PORT || 4100;
 const DIST = path.join(__dirname, 'web', 'dist');
 // Overridable so the renders root can be a mounted volume (see the container
 // work) and so tests never point a retention window at a real renders/ dir.
-const RENDERS = process.env.RENDERS_DIR || path.join(__dirname, 'renders');
+//
+// Resolved to absolute deliberately: jobDir() is handed to the worker as
+// --outdir, and the worker runs abspath() against its OWN cwd (__dirname). A
+// relative value would resolve differently on each side, so the worker would
+// write where the server never looks — the render would appear to hang, then be
+// swept as stale, discarding work the customer paid for.
+const RENDERS = path.resolve(process.env.RENDERS_DIR || path.join(__dirname, 'renders'));
 const ENGINE_PY = path.join(__dirname, 'engine', 'venv', 'bin', 'python');
 const WORKER = path.join(__dirname, 'engine', 'render_program.py');
 
