@@ -9,6 +9,7 @@ Infrastructure is live on prod-linode; the web app is currently a placeholder. S
 ## Layout
 
 - `server.js`, `package.json` — placeholder web app (Node 24, systemd `hypnosis-studio`, 127.0.0.1:4100 behind nginx)
+- `test/` — `npm test` (`node --test`, no dependencies). Spawns a real server and asserts it survives hostile requests.
 - `engine/` — audio render pipeline (ElevenLabs TTS + NumPy/SciPy mastering)
 - `.github/workflows/deploy.yml` — push-to-main deploy over SSH
 
