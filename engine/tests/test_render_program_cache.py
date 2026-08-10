@@ -253,9 +253,31 @@ def test_the_cache_is_swept_after_a_render(rp, tmp_path, monkeypatch):
         "the sweep should have run at the end of the render")
 
 
-def test_the_sweep_runs_after_the_job_is_marked_ready(rp, tmp_path, monkeypatch):
-    """A full cache must not stop a finished render being delivered."""
+def test_the_sweep_runs_after_the_job_is_marked_ready(rp, code_only):
+    """Housekeeping belongs after the customer's render is deliverable.
+
+    Written with the comment-stripping fixture: an earlier version of this test
+    matched the *comment* "only job.ready() reports 100%" rather than the call,
+    so it passed while asserting the opposite of the truth.
+    """
     mod, _calls = rp
     import inspect
-    src = inspect.getsource(mod.run)
+    src = code_only(inspect.getsource(mod.run))
     assert src.index("segment_cache.sweep") > src.index("job.ready()")
+
+
+def test_a_failing_sweep_cannot_unready_a_finished_render(rp, tmp_path, monkeypatch):
+    """The ordering above is intent; this is the property that actually matters,
+    and the structural test does not exercise it at all."""
+    mod, calls = rp
+    root = str(tmp_path / "renders")
+    monkeypatch.setenv(segment_cache.CACHE_DIR_ENV, str(tmp_path / "cache"))
+
+    def explode(*a, **k):
+        raise RuntimeError("cache volume went away")
+
+    monkeypatch.setattr(mod.segment_cache, "sweep", explode)
+    outdir = run_job(mod, root, "job_one")
+    status = json.load(open(os.path.join(outdir, "status.json")))
+    assert status["state"] == "ready", "a broken sweep must not affect the render"
+    assert os.path.exists(os.path.join(outdir, "manifest.json"))

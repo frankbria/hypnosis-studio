@@ -342,6 +342,10 @@ def run(job_id: str, goal: str, voice_set: str, outdir: str,
     render_track.load_key()  # resolve once; tts() reads the module global
     voices = VOICE_SETS[voice_set]
     cache_dir = segment_cache.configured_dir(os.path.dirname(outdir))
+    # Resolved now, before any spend: the sweep at the end is wrapped in a guard
+    # so a cache problem cannot fail a finished job, which would also swallow a
+    # misconfigured ceiling and let the cache grow unbounded, quietly, forever.
+    segment_cache.configured_max_bytes()
     cache_hits = 0
     done = 0
     for t in plan:
@@ -497,18 +501,23 @@ def run(job_id: str, goal: str, voice_set: str, outdir: str,
         print(f"cleanup: removed {removed} intermediate dirs "
               f"({freed / 1e6:.0f} MB)", flush=True)
 
-    # Bound the cache now the job has finished growing it. Swept here rather
-    # than on a timer because it only ever grows during a render, so a periodic
-    # sweep would have nothing to do between them.
+    job.ready()
+
+    # Housekeeping, after the customer's render is deliverable. Bounding the
+    # cache is not worth a second of a finished job's latency, and a sweep that
+    # somehow fails must not be able to touch the outcome — hence both the
+    # placement and the guard.
+    #
+    # Swept here rather than on a timer because the cache only grows during a
+    # render, so a periodic sweep would have nothing to do between them.
     try:
         evicted, reclaimed = segment_cache.sweep(cache_dir)
         if evicted:
             print(f"segment cache: evicted {evicted} least-recently-used "
                   f"segments ({reclaimed / 1e6:.0f} MB)", flush=True)
-    except Exception as e:  # noqa: BLE001 — a full cache must not fail a done job
+    except Exception as e:  # noqa: BLE001 — a done job must stay done
         print(f"segment cache: sweep failed: {e}", flush=True)
 
-    job.ready()
     total_min = sum(e["durationSec"] for e in manifest["tracks"]) / 60
     print(f"ready: {manifest['goalTitle']} — 4 tracks, {total_min:.1f} min total",
           flush=True)

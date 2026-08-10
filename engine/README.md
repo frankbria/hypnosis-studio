@@ -10,7 +10,7 @@ Two-stage pipeline that turns a hypnosis script (segment JSON) into a finished, 
 
 ## Stage 1 — `render_track.py <track>`
 
-Reads `<track>_tts_segments.json`, calls ElevenLabs per segment, de-harshes (6.5 kHz one-pole blend) and adds a light algorithmic reverb, writes `<track>_segments/<id>.wav`. Existing segments are skipped (idempotent reruns).
+Reads `<track>_tts_segments.json`, calls ElevenLabs per segment, de-harshes (6.5 kHz one-pole blend) and adds a light algorithmic reverb, writes `<track>_segments/<id>.wav`. Existing segments in the working directory are skipped (idempotent reruns), and since #9 anything already bought in a *previous* job is served from the shared segment cache — see below.
 
 Requires `.env.local` in the working directory:
 
@@ -56,6 +56,39 @@ still down, and a full disk would buy all 152 segments and save none.
 - 30 s fade-out, master to −20 dB RMS, soft clip; writes WAV + MP3
 - **Track length is bounded by the pad** — see below
 - Diagnostics (`HYPNO_SKIP_QA=0`, off in production): per-minute RMS profile, bed-pulse check, faster-whisper transcript of the sunken suggestion layer with keyword hit count. These **print**; they do not gate anything, and the transcript step is skipped with a notice when `faster_whisper` is not installed. The gate that decides whether a track ships is in `render_program.py` — see below.
+
+## The segment cache
+
+Every rendered segment is copied into a shared cache keyed on
+`sha256(voice_id, tag, text)`, so a segment is bought from ElevenLabs at most
+once no matter how many jobs need it.
+
+This matters because the per-job idempotency above is scoped to the job
+directory, and the server mints a fresh one on every POST — so before #9 a
+customer-visible retry re-bought the entire program. One transient failure on
+segment 150 of 152 discarded ~20 minutes and the whole 17k-22k character spend.
+
+- **Cached on write**, as soon as each segment is treated — not promoted when
+  the job succeeds. Promoting on success would cache nothing for the job that
+  died at segment 150, which is the case the cache exists for.
+- **Content-keyed**, so editing a script misses the cache automatically. There
+  is no invalidation step to forget.
+- **Location**: `RENDERS/segment-cache/`, overridable with `SEGMENT_CACHE_DIR`.
+  The name deliberately does not match the `^job_` pattern the retention sweep
+  uses to choose what it may delete.
+- **Bounded** by `SEGMENT_CACHE_MAX_BYTES` (default 4 GB — one goal/voice-set
+  pair is ~80 MB, all ten ~800 MB). Least-recently-used entries are evicted by
+  a sweep that runs *after* the job is marked ready.
+- **Never fatal.** A cache that cannot be read, written or swept produces a
+  slower render, never a failed one — every render reaching this code has
+  already been paid for.
+
+A cached entry is checked for a RIFF header on the way out and discarded if it
+is not one: `store()` is atomic so this module cannot create a partial entry,
+but nothing else re-validates one, and a corrupt entry would otherwise be served
+to every future render for that key. One bad segment in 152 is ~0.7% of a
+master, far under the QA gate's dead-air tolerance, so nothing downstream would
+notice.
 
 ## The delivery QA gate
 

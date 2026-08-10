@@ -21,6 +21,7 @@ treatment saves the decode and reverb on every hit as well as the purchase.
 """
 import hashlib
 import os
+import re
 import shutil
 
 # ~530 KB per treated segment x ~152 per (goal, voice set) is ~80 MB. The ceiling
@@ -36,19 +37,28 @@ MAX_BYTES_ENV = "SEGMENT_CACHE_MAX_BYTES"
 # the sweep recognises its own files: the cache directory lives under RENDERS/
 # and must never delete something that merely shares the directory.
 ENTRY_SUFFIX = ".wav"
+_ENTRY_NAME = re.compile(r"[0-9a-f]{64}\.wav")
+_TMP_NAME = re.compile(r"[0-9a-f]{64}\.wav\.\d+\.tmp")
+# Mirrors JOB_DIR_RE in server.js, which is how the retention sweep decides what
+# it may delete.
+_JOB_DIR = re.compile(r"job_[A-Za-z0-9_-]+")
 
 
 def key(voice_id, tag, text):
     """Content address for one segment.
 
-    The fields are NUL-separated rather than concatenated: joining them plainly
+    Each field is length-prefixed, not merely separated. Concatenating plainly
     would make ("ab", "c") and ("a", "bc") collide, which would serve one
-    segment's audio in another's place — a silent, undetectable defect.
+    segment's audio in another's place — silent and undetectable downstream. A
+    separator alone fixes that only while no field can contain the separator;
+    prefixing the length is unconditional.
     """
     digest = hashlib.sha256()
     for field in (voice_id, tag, text):
-        digest.update(field.encode("utf-8"))
+        raw = field.encode("utf-8")
+        digest.update(str(len(raw)).encode("ascii"))
         digest.update(b"\0")
+        digest.update(raw)
     return digest.hexdigest()
 
 
@@ -68,6 +78,18 @@ def lookup(cache_dir, voice_id, tag, text):
     try:
         if not os.path.isfile(path):
             return None
+        # store() is atomic, so this module cannot leave a partial entry — but
+        # nothing re-validates an entry after it lands, and a cached file
+        # corrupted by anything else (disk fault, a stray edit) would be served
+        # to every future render for that key, forever. One bad segment in 152
+        # is ~0.7% of a master, far under the QA gate's dead-air tolerance, so
+        # nothing downstream would catch it either. The header check is cheap
+        # insurance against a permanent, silent defect.
+        with open(path, "rb") as f:
+            if f.read(4) != b"RIFF":
+                print(f"segment cache: discarding corrupt entry {path}", flush=True)
+                os.remove(path)
+                return None
         os.utime(path, None)
         return path
     except OSError:
@@ -98,12 +120,22 @@ def store(cache_dir, voice_id, tag, text, src_path):
             pass
 
 
+def _is_entry(name):
+    """True only for a filename this module could have produced.
+
+    Matching on `.wav` alone would let the sweep delete any WAV that happened to
+    be in the directory. An entry is named for its own SHA-256, so requiring
+    that exact shape is a real ownership test rather than a guess.
+    """
+    return bool(_ENTRY_NAME.fullmatch(name))
+
+
 def entries(cache_dir):
     """(path, size, mtime) for every file this module created."""
     found = []
     for root, _dirs, files in os.walk(cache_dir):
         for name in files:
-            if not name.endswith(ENTRY_SUFFIX):
+            if not _is_entry(name):
                 continue
             path = os.path.join(root, name)
             try:
@@ -112,6 +144,26 @@ def entries(cache_dir):
                 continue
             found.append((path, st.st_size, st.st_mtime))
     return found
+
+
+def _refuse_to_sweep(cache_dir):
+    """Why this directory must not be swept, or None.
+
+    SEGMENT_CACHE_DIR can point anywhere, and the obvious wrong value is
+    RENDERS itself — which would walk every job directory and evict customers'
+    finished masters. The retention sweep in server.js carries a `^job_` guard
+    for exactly this reason; this is the same guard from the other side.
+    """
+    try:
+        names = os.listdir(cache_dir)
+    except OSError:
+        return None
+    for name in names:
+        if _JOB_DIR.fullmatch(name) and os.path.isdir(os.path.join(cache_dir, name)):
+            return (f"{cache_dir} contains job directories ({name}) — refusing to "
+                    f"sweep it; {CACHE_DIR_ENV} is pointing at the render store, "
+                    f"not at a cache")
+    return None
 
 
 def total_bytes(cache_dir):
@@ -127,6 +179,22 @@ def sweep(cache_dir, max_bytes=None):
     """
     if max_bytes is None:
         max_bytes = configured_max_bytes()
+
+    refusal = _refuse_to_sweep(cache_dir)
+    if refusal:
+        print(f"segment cache: {refusal}", flush=True)
+        return 0, 0
+
+    # A store() that failed after writing its temp file and then failed to
+    # remove it leaves one behind. entries() ignores those by name, so nothing
+    # would ever reclaim them.
+    for root, _dirs, files in os.walk(cache_dir):
+        for name in files:
+            if _TMP_NAME.fullmatch(name):
+                try:
+                    os.remove(os.path.join(root, name))
+                except OSError:
+                    pass
 
     found = entries(cache_dir)
     total = sum(size for _p, size, _m in found)
