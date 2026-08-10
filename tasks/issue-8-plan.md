@@ -43,10 +43,21 @@ expected_bytes = expected_s * BYTES_PER_SEC
 floor          = expected_bytes * MIN_RESPONSE_FRACTION
 ```
 
-`MIN_RESPONSE_FRACTION = 0.5`. The rate estimate is already deliberately
-conservative (12.0 against a measured ~12.75), so a healthy response coming in
-under half its predicted size would mean the voice spoke twice as fast as the
-slow estimate — implausible. Truncation to half a sentence is caught.
+`MIN_RESPONSE_FRACTION = 0.5`. Checked against the 768 real segments before
+committing to it:
+
+| | chars | est. seconds | est. bytes | floor @50% |
+|---|---|---|---|---|
+| shortest segment | 40 | 3.3 | 53 333 | **26 667** |
+| longest segment | 443 | 36.9 | 590 667 | **295 333** |
+
+The floor scales with the text, so it is meaningful at both ends — and an empty
+body or an HTML error page (well under 1 KB) is caught even against the
+shortest segment's floor.
+
+False-positive margin: a healthy response only trips this if the voice speaks
+faster than **24 chars/s**, i.e. double the 12.0 estimate and nearly double the
+~12.75 actually measured. Not reachable for speech.
 
 ### Retry, not fail
 

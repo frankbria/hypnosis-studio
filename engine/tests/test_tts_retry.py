@@ -409,9 +409,9 @@ def test_main_stops_after_repeated_network_failures(
         render_track.main()
 
     assert exc.value.kind == "transient"
-    attempted = render_track.MAX_CONSECUTIVE_TRANSIENT * tts_policy.MAX_ATTEMPTS
+    attempted = render_track.MAX_CONSECUTIVE_FAILURES * tts_policy.MAX_ATTEMPTS
     assert fake.calls == attempted, (
-        f"expected to stop after {render_track.MAX_CONSECUTIVE_TRANSIENT} "
+        f"expected to stop after {render_track.MAX_CONSECUTIVE_FAILURES} "
         f"segments ({attempted} calls), not grind through all 6")
 
 
@@ -437,7 +437,7 @@ def test_main_resets_the_failure_run_after_a_success(
                         lambda p, *a, **k: written.append(p))
 
     # Segments 1, 3 and 5 exhaust their retries; 2, 4 and 6 succeed. That is
-    # MAX_CONSECUTIVE_TRANSIENT failures in total, but never in a row.
+    # MAX_CONSECUTIVE_FAILURES failures in total, but never in a row.
     burst = [urllib.error.URLError("blip")] * tts_policy.MAX_ATTEMPTS
     sequence = (burst + [Response(b"audio")]) * 3
     fake = Recorder(*sequence)
@@ -473,3 +473,40 @@ def test_a_body_that_cannot_be_read_still_classifies_by_status(
         render_track.tts("voice", "hi", out)
     assert exc.value.kind == "auth", "the 401 must survive an unreadable body"
     assert fake.calls == 1
+
+
+def test_main_stops_when_every_segment_fails_to_persist(
+        render_track, monkeypatch, tmp_path):
+    """A full disk is the most expensive failure the CLI can skip past.
+
+    Each segment is fetched successfully and billed, and only then fails to
+    write. Counting only `transient` would let all 152 be purchased and thrown
+    away — quieter than a network outage, and worse.
+    """
+    import json as _json
+    segments = [{"id": f"S{n:02d}", "text": "x", "pause_after_s": 1.0,
+                 "phase": "induction"} for n in range(1, 7)]
+    (tmp_path / "demo_tts_segments.json").write_text(
+        _json.dumps({"segments": segments}))
+
+    fake = Recorder(Response(b"audio"))
+    monkeypatch.setattr(render_track.urllib.request, "urlopen", fake)
+    real_open = open
+
+    def full_disk(path, mode="r", *a, **k):
+        if mode == "wb":
+            raise OSError(28, "No space left on device")
+        return real_open(path, mode, *a, **k)
+
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "k")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(render_track.sys, "argv", ["render_track.py", "demo"])
+    monkeypatch.setattr("builtins.open", full_disk)
+
+    with pytest.raises(render_track.TtsError) as exc:
+        render_track.main()
+
+    assert exc.value.kind == "fatal"
+    assert fake.calls == render_track.MAX_CONSECUTIVE_FAILURES, (
+        f"a persistent write failure must stop after "
+        f"{render_track.MAX_CONSECUTIVE_FAILURES} billed segments, not all 6")

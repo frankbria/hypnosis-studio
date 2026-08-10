@@ -22,12 +22,16 @@ KEY = None
 BRIAN = "nPczCjzI2devNBz1zQrb"
 FRANK = "RsoSo7Gg7GyAtGoPBiqb"
 
-# How many segments may fail on network errors back to back before the
-# standalone CLI stops. Each segment carries its own retry budget, so a sustained
-# outage would otherwise spend 152 x (4 attempts x 120 s + 50 s of backoff)
-# re-establishing that the network is still down. render_program does not need
-# this — it raises on the first TtsError.
-MAX_CONSECUTIVE_TRANSIENT = 3
+# How many segments may fail back to back before the standalone CLI stops.
+#
+# The kind of failure does not matter, only that it keeps happening. A sustained
+# network outage spends 152 x (4 attempts x 120 s + 50 s of backoff) proving the
+# network is still down; a full disk is quieter but worse — every segment is
+# fetched successfully, billed, and then thrown away because it cannot be
+# written. Both are "the next 150 will fail the same way".
+#
+# render_program does not need this: it raises on the first TtsError.
+MAX_CONSECUTIVE_FAILURES = 3
 
 
 def load_key() -> str:
@@ -206,7 +210,7 @@ def main():
     segs = json.load(open(f"{track}_tts_segments.json"))["segments"]
 
     total_chars = 0
-    consecutive_transient = 0
+    consecutive_failures = 0
     for i, seg in enumerate(segs):
         vid, tag = register_for(seg)
         text = tag + seg["text"]
@@ -219,26 +223,26 @@ def main():
         try:
             ok = tts(vid, text, raw_path)
         except TtsError as e:
-            # A dead key or an empty account fails every remaining segment the
-            # same way, so there is nothing to be gained by grinding through
-            # them; a one-off fatal is still worth skipping past.
+            # A dead key or an empty account fails every remaining segment
+            # identically, so stop immediately.
             print(f"FAIL {seg['id']}: {e.detail}")
             if e.kind in ("auth", "quota"):
                 raise
-            if e.kind == "transient":
-                consecutive_transient += 1
-                if consecutive_transient >= MAX_CONSECUTIVE_TRANSIENT:
-                    # Each segment burns its own retry budget, so a sustained
-                    # outage would otherwise spend 152 x (4 x 120 s + 50 s) —
-                    # the better part of a day — proving the network is still
-                    # down. Stop and let the operator retry the run.
-                    raise TtsError(
-                        "transient",
-                        f"{consecutive_transient} segments in a row failed on "
-                        f"network errors; giving up rather than retrying the "
-                        f"remaining {len(segs) - i - 1}") from e
+            # Anything else is skippable *once* — one odd segment should not end
+            # a run — but a streak means the next 150 will fail the same way.
+            # Counting every kind matters: a full disk raises "fatal", and each
+            # of those segments has already been fetched and billed before the
+            # write failed, so skipping past them is the most expensive
+            # possible response.
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                raise TtsError(
+                    e.kind,
+                    f"{consecutive_failures} segments in a row failed "
+                    f"({e.kind}); giving up rather than attempting the "
+                    f"remaining {len(segs) - i - 1}") from e
             continue
-        consecutive_transient = 0
+        consecutive_failures = 0
         if not ok:
             print(f"FAIL {seg['id']}: both voice-setting variants were rejected")
             continue
