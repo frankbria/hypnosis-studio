@@ -34,6 +34,7 @@ sys.path.insert(0, ENGINE_DIR)
 
 import soundfile as sf
 
+import job_files
 import render_track
 
 # ---------- registries ----------
@@ -290,6 +291,16 @@ def run(job_id: str, goal: str, voice_set: str, outdir: str,
         entry["durationSec"] = round(float(sf.info(wav_path).duration), 1)
     manifest["createdAt"] = now_iso()
     write_json_atomic(os.path.join(outdir, "manifest.json"), manifest)
+
+    # Only now that the masters exist and the manifest lists them are the
+    # per-segment intermediates safe to drop — ~230 MB per job that nothing
+    # reads again. A failed job keeps its segments for debugging, because this
+    # line is never reached.
+    removed, freed = job_files.prune_intermediates(outdir)
+    if removed:
+        print(f"cleanup: removed {removed} intermediate dirs "
+              f"({freed / 1e6:.0f} MB)", flush=True)
+
     job.ready()
     total_min = sum(e["durationSec"] for e in manifest["tracks"]) / 60
     print(f"ready: {manifest['goalTitle']} — 4 tracks, {total_min:.1f} min total",
