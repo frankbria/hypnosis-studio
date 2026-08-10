@@ -530,9 +530,10 @@ test('the sweep does not refund a slot while the worker is still running', async
   // finishes `ready`, the day's cap has been silently raised by one, and every
   // over-cap render spends real ElevenLabs credits.
   //
-  // (The sweep also marks that job `failed`, which frees the concurrency lock
-  // under a live worker. That is #11 and is not fixed here — this test pins
-  // only that the money half cannot be made worse.)
+  // #11 has since fixed the other half: the sweep no longer marks a live job
+  // failed at all, so it also no longer frees the concurrency lock under a live
+  // worker. This test is kept because the quota property is separate — a future
+  // change to the sweep must not start refunding live jobs again.
   const engine = path.join(os.tmpdir(), `fake-slow-${process.pid}-${Date.now()}.sh`);
   fs.writeFileSync(engine, `#!/bin/sh
 outdir=""
@@ -560,13 +561,14 @@ sleep 30
     // so every one of them considers this job.
     await sleep(2000);
 
+    // Since #11 the sweep leaves a live worker alone entirely, so the job is
+    // still `rendering` — which is also what keeps the concurrency lock held.
     const swept = JSON.parse(fs.readFileSync(
       path.join(srv.rendersDir,
         fs.readdirSync(srv.rendersDir).find((n) => n.startsWith('job_')),
         'status.json'), 'utf8'));
-    assert.strictEqual(swept.state, 'failed',
-      'the sweep never ran, so this test proves nothing (see #11: it should not ' +
-      'be marking a live job failed at all)');
+    assert.strictEqual(swept.state, 'rendering',
+      'the sweep declared a live worker failed');
 
     const q = readQuotaFile(srv.rendersDir);
     assert.strictEqual(q.count, 1,
