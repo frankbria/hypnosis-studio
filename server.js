@@ -226,6 +226,63 @@ function failToStart(id, detail, error) {
 // so the money half cannot be made worse in the meantime.)
 const liveWorkers = new Set();
 
+// How long a render may run before it is reclaimed regardless of liveness.
+// Liveness alone never recovers a worker wedged forever on a socket, so this is
+// the backstop — and the only path that kills a process.
+//
+// A full 4-track render is 15-20 minutes, and a single TTS stall can add ~17
+// (4 attempts x a 120 s timeout, plus 5+15+30 s of backoff, and again through
+// the fallback settings on a 422). 45 minutes clears both without being so far
+// out that a wedged job holds the service for an hour.
+const HARD_TIMEOUT_MS = (() => {
+  const n = parseInt(process.env.HARD_TIMEOUT_MS || '2700000', 10);
+  return Number.isFinite(n) && n > 0 ? n : 45 * 60 * 1000;
+})();
+
+function pidPath(id) {
+  return path.join(jobDir(id), 'worker.pid');
+}
+
+// Recorded on disk as well as in liveWorkers, because a job can outlive the
+// server process that started it — after a crash the in-memory set is empty
+// while the child may still be running. A sidecar rather than a status.json
+// field, because the Python worker rewrites that file wholesale on every
+// transition and would erase it.
+function recordWorkerPid(id, pid) {
+  try {
+    fs.writeFileSync(pidPath(id), String(pid));
+  } catch (e) {
+    console.error('could not record worker pid for', id, e && e.message);
+  }
+}
+
+function readWorkerPid(id) {
+  try {
+    const n = parseInt(fs.readFileSync(pidPath(id), 'utf8').trim(), 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+// Is this job's worker still running?
+//
+// liveWorkers is exact for jobs this process started — the child is ours and we
+// hold the handle, so there is no pid-reuse ambiguity. The pid file is the
+// fallback for jobs orphaned across a restart. A job with no pid recorded reads
+// as dead, so it stays reclaimable rather than blocking the service forever.
+function workerAlive(id) {
+  if (liveWorkers.has(id)) return true;
+  const pid = readWorkerPid(id);
+  if (pid === null) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function startWorker(id, goal, voiceSet) {
   // The whole body is guarded, not just the spawn. bumpQuota() has already run
   // by the time we get here, so anything that throws on the way to a live
@@ -260,6 +317,7 @@ function startWorker(id, goal, voiceSet) {
   }
   fs.closeSync(logFd); // child holds its own copy of the fd
   liveWorkers.add(id);
+  if (child.pid) recordWorkerPid(id, child.pid);
   child.on('error', (e) => {
     liveWorkers.delete(id);
     failToStart(id, 'worker spawn failed', e);
@@ -441,8 +499,20 @@ const server = http.createServer((req, res) => {
 // "rendering" — e.g. the service was restarted mid-render (OOM kill on prod
 // proved this path). updatedAt is refreshed by the worker at every stage, so
 // a stale timestamp means the worker is gone.
+// Reclaim jobs whose worker is gone, and only those.
+//
+// This used to declare a job dead purely from how long ago status.json was
+// touched, with STALE_MS at 2 minutes. A single segment can legitimately go
+// quiet far longer than that — the retry budget alone is ~8.8 minutes, ~17.7
+// through the fallback settings — and assembly writes status once per track. So
+// the sweep fired on healthy renders, marked them `failed` WITHOUT killing the
+// child, and anyJobRendering() then reported nothing in flight: a second POST
+// was accepted and two NumPy mixers ran on a 4 GB box.
+//
+// Liveness rather than a bigger timeout, because a timeout tuned to the current
+// retry budget silently goes wrong the next time that budget changes — which is
+// exactly what #7 did to the 2-minute one.
 function sweepStaleJobs() {
-  const STALE_MS = 2 * 60 * 1000;
   let dirs;
   try { dirs = fs.readdirSync(RENDERS, { withFileTypes: true }); } catch { return; }
   for (const d of dirs) {
@@ -450,22 +520,52 @@ function sweepStaleJobs() {
     const p = path.join(RENDERS, d.name, 'status.json');
     const st = readJsonSafe(p);
     if (!st || st.state !== 'rendering') continue;
+
     const age = Date.now() - new Date(st.updatedAt || 0).getTime();
-    if (age > STALE_MS) {
-      writeStatus(d.name, { ...st, state: 'failed', error: 'service restarted during render — please start a new one' });
-      // Only refund when the worker is genuinely gone. A long assembly stage
-      // makes a live render look stale, and refunding there would hand back a
-      // slot the job is still using — it may yet finish `ready`, and the day's
-      // cap would then be exceeded by a render that spends real credits.
-      if (liveWorkers.has(d.name)) {
-        console.warn('stale sweep hit a job whose worker is still running:', d.name,
-          '- not releasing its quota slot (see #11)');
-      } else {
-        releaseQuota(d.name);
-      }
+    const alive = workerAlive(d.name);
+
+    if (alive && age <= HARD_TIMEOUT_MS) continue;  // working, however quietly
+
+    if (alive) {
+      // Past the ceiling and still running: the only path that kills. A wedged
+      // worker holds the concurrency lock forever otherwise.
+      killWorker(d.name);
+      writeStatus(d.name, {
+        ...st, state: 'failed',
+        error: 'the render ran too long and was stopped — please start a new one',
+      });
+      console.warn('swept job past the hard timeout:', d.name, `(${Math.round(age / 60000)} min)`);
+    } else {
+      writeStatus(d.name, {
+        ...st, state: 'failed',
+        error: 'service restarted during render — please start a new one',
+      });
       console.log('swept stale job', d.name);
     }
+    releaseQuota(d.name);
   }
+}
+
+// SIGTERM, then SIGKILL if it is still there. Never throws: this runs in a timer
+// callback, where a throw is an uncaughtException rather than something the
+// request backstop can catch.
+function killWorker(id) {
+  const pid = readWorkerPid(id);
+  if (pid === null) return;
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    return; // already gone
+  }
+  setTimeout(() => {
+    try {
+      process.kill(pid, 0);
+      process.kill(pid, 'SIGKILL');
+      console.warn('worker', pid, 'ignored SIGTERM; killed');
+    } catch {
+      // exited on SIGTERM, which is the normal case
+    }
+  }, 1000).unref();
 }
 // Reclaim finished jobs once they pass the retention window. This DELETES
 // CUSTOMER PURCHASES, so it only removes what it can positively identify as an
