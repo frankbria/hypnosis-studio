@@ -21,7 +21,24 @@ Two measurements drive the numbers here:
     to 20% still reports its full length, so duration cannot detect truncation
     and size is the only cheap signal.
 """
+import collections
 import math
+
+# What measure_audio() hands back: overall level, the length actually decoded,
+# and how much of the track is dead air.
+Measurement = collections.namedtuple(
+    "Measurement", "rms_db seconds silent_fraction")
+
+# A one-second window at or below this level counts as silence. The master fades
+# to zero over its last 30 s, so the final ~2 s of every healthy track land here
+# — which is why the tolerance below is a fraction rather than zero.
+SILENT_WINDOW_DBFS = -60.0
+
+# How much of a track may be dead air. Measured on a real master: 0.3%. A track
+# that dies partway through is the case this catches — overall RMS cannot, since
+# a 780 s master with its last 310 s silent still averages about -22 dB, inside
+# the passing band.
+MAX_SILENT_FRACTION = 0.10
 
 # The master is normalised to -20 dB RMS as its last-but-one step, so this is a
 # sanity band around a value fixed by construction rather than a tolerance on
@@ -53,24 +70,9 @@ MIN_MP3_DURATION_FRACTION = 0.98
 MIN_DURATION_FRACTION = 0.5
 
 
-def check_master(label, rms_db, mp3_bytes, duration_s, planned_s=None,
-                 mp3_decoded_s=None):
-    """Problems that make this track unshippable, as readable strings.
-
-    Empty list means ship it. Every problem is reported rather than the first,
-    so an operator fixing one does not discover the next on the following run.
-    """
+def _level_problems(label, rms_db, silent_fraction):
+    """Problems with the audio level itself, independent of any duration."""
     problems = []
-
-    if duration_s is None or not math.isfinite(duration_s) or duration_s <= 0:
-        problems.append(
-            f"{label}: master duration is {duration_s}, so there is no audio to ship")
-        return problems  # every other check divides by duration
-
-    if planned_s and duration_s < planned_s * MIN_DURATION_FRACTION:
-        problems.append(
-            f"{label}: master is {duration_s:.0f}s against a planned {planned_s:.0f}s "
-            f"(under {MIN_DURATION_FRACTION:.0%}) — the WAV looks truncated")
 
     # NaN and +inf first: `nan < MIN` and `nan > MAX` are both False, so a plain
     # range check waves a NaN master straight through.
@@ -92,6 +94,39 @@ def check_master(label, rms_db, mp3_bytes, duration_s, planned_s=None,
         problems.append(
             f"{label}: master RMS is {rms_db:.1f} dB, above the {MAX_RMS_DB:.0f} dB "
             f"ceiling — the master did not normalise")
+
+    # Overall RMS cannot see a track that dies partway through — the surviving
+    # audio holds the average up inside the passing band.
+    if silent_fraction is not None and silent_fraction > MAX_SILENT_FRACTION:
+        problems.append(
+            f"{label}: {silent_fraction:.0%} of the track is dead air (over the "
+            f"{MAX_SILENT_FRACTION:.0%} limit) — part of the program is missing")
+
+    return problems
+
+
+def check_master(label, rms_db, mp3_bytes, duration_s, planned_s=None,
+                 mp3_decoded_s=None, silent_fraction=None):
+    """Problems that make this track unshippable, as readable strings.
+
+    Empty list means ship it. Every problem is reported rather than the first,
+    so an operator fixing one does not discover the next on the following run.
+    """
+    problems = []
+
+    # Level checks first: they do not depend on duration, so a zero-length master
+    # still reports everything wrong with it rather than just the length.
+    problems += _level_problems(label, rms_db, silent_fraction)
+
+    if duration_s is None or not math.isfinite(duration_s) or duration_s <= 0:
+        problems.append(
+            f"{label}: master duration is {duration_s}, so there is no audio to ship")
+        return problems  # every remaining check divides by duration
+
+    if planned_s and duration_s < planned_s * MIN_DURATION_FRACTION:
+        problems.append(
+            f"{label}: master is {duration_s:.0f}s against a planned {planned_s:.0f}s "
+            f"(under {MIN_DURATION_FRACTION:.0%}) — the WAV looks truncated")
 
     bytes_per_sec = mp3_bytes / duration_s
     if bytes_per_sec < MIN_MP3_BYTES_PER_SEC:

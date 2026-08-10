@@ -48,28 +48,13 @@ def render_program():
             sys.modules[name] = mod
 
 
-def code_only(src):
-    """Source with comment text removed.
-
-    The ordering assertions below locate calls by string index, which finds a
-    *mention* of a call in a comment just as readily as the call itself. That is
-    not hypothetical: a comment explaining why progress stops short of
-    `job.ready()` once made `ready` appear to precede `prune`, inverting the
-    apparent order while the real code was unchanged.
-
-    Splitting on `#` is safe here only because neither function inspected below
-    has a `#` inside a string literal.
-    """
-    return "\n".join(line.split("#", 1)[0] for line in src.splitlines())
-
-
 def test_cleanup_is_wired_in(render_program):
     """job_files is actually imported and reachable from render_program."""
     assert hasattr(render_program, "job_files")
     assert callable(render_program.job_files.prune_intermediates)
 
 
-def test_prune_runs_after_the_manifest_and_before_ready(render_program):
+def test_prune_runs_after_the_manifest_and_before_ready(render_program, code_only):
     import inspect
 
     src = code_only(inspect.getsource(render_program.run))
@@ -85,7 +70,7 @@ def test_prune_runs_after_the_manifest_and_before_ready(render_program):
     assert prune_at < ready_at, "the job should be finalised before it is marked ready"
 
 
-def test_prune_is_not_reachable_on_the_failure_path(render_program):
+def test_prune_is_not_reachable_on_the_failure_path(render_program, code_only):
     """A failed job must keep its segments for debugging.
 
     run() raises on any failure, and the cleanup call sits after every raise in

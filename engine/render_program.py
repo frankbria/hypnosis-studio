@@ -224,7 +224,7 @@ def check_pad_headroom(plan: list, pad_path: str, strict: bool) -> list:
 
 
 def measure_audio(path: str):
-    """Decode a file and return ``(rms_db, seconds)`` of what is really in it.
+    """Decode a file and return a `qa.Measurement` of what is really in it.
 
     Streamed rather than read whole: a 780 s master is ~69 MB as float64 and the
     prod box has 4 GB, which the assembler already works hard to stay inside.
@@ -240,29 +240,51 @@ def measure_audio(path: str):
     reliable truncation signal available for MP3.
     """
     total = 0.0
-    count = 0
+    samples = 0
+    frames = 0
+    windows = 0
+    silent_windows = 0
+    silent_mean_square = 10.0 ** (qa.SILENT_WINDOW_DBFS / 10.0)
+
     with sf.SoundFile(path) as fh:
         rate = fh.samplerate
+        if not rate:
+            return qa.Measurement(None, 0.0, 0.0)
         while True:
-            block = fh.read(1 << 20, dtype="float64")
+            # One second at a time so a stretch of silence inside an otherwise
+            # normal track is visible. Overall RMS cannot see that: a 780 s
+            # master with its last 310 s dead still averages about -22 dB and
+            # sits comfortably inside the passing band.
+            block = fh.read(rate, dtype="float64")
             if not len(block):
                 break
-            total += float(np.sum(block * block))
-            count += len(block)
-    if count == 0 or not rate:
-        return None, 0.0
-    seconds = count / rate
+            block_energy = float(np.sum(block * block))
+            # block is (frames,) mono or (frames, channels); .size counts every
+            # sample, block.shape[0] counts frames. Using len() for both would
+            # overstate a stereo RMS by sqrt(channels).
+            block_samples = block.size
+            total += block_energy
+            samples += block_samples
+            frames += block.shape[0]
+            windows += 1
+            if block_energy / block_samples <= silent_mean_square:
+                silent_windows += 1
+
+    if samples == 0:
+        return qa.Measurement(None, 0.0, 0.0)
+
+    seconds = frames / rate
+    silent_fraction = silent_windows / windows if windows else 0.0
     # No epsilon floor: a genuinely zero master should read as -inf and be caught
     # as silence, rather than nudged into a plausible-looking number.
-    mean_square = total / count
-    if mean_square <= 0:
-        return float("-inf"), seconds
-    return 10.0 * math.log10(mean_square), seconds
+    mean_square = total / samples
+    rms_db = float("-inf") if mean_square <= 0 else 10.0 * math.log10(mean_square)
+    return qa.Measurement(rms_db, seconds, silent_fraction)
 
 
 def master_rms_db(wav_path: str):
     """RMS of a master in dBFS, or None if it holds no samples."""
-    return measure_audio(wav_path)[0]
+    return measure_audio(wav_path).rms_db
 
 
 def planned_manifest(job_id: str, goal: str, voice_set: str, plan: list) -> dict:
@@ -405,15 +427,18 @@ def run(job_id: str, goal: str, voice_set: str, outdir: str,
                    f"track {entry['n']}/4 · checking the master")
         # Read the actual audio. Existence and a readable duration were the only
         # checks here, and an all-silent master satisfies both (issue #6).
-        wav_rms, _ = measure_audio(wav_path)
-        _, mp3_seconds = measure_audio(mp3_path)
+        wav = measure_audio(wav_path)
+        mp3 = measure_audio(mp3_path)
         problems += qa.check_master(
             label=entry["id"],
-            rms_db=wav_rms,
+            rms_db=wav.rms_db,
             mp3_bytes=os.path.getsize(mp3_path),
-            duration_s=entry["durationSec"],
+            # What actually decoded, not what the header claims. They agree for
+            # a well-formed WAV; when they do not, the file is the liar.
+            duration_s=wav.seconds,
             planned_s=planned_by_n.get(entry["n"]),
-            mp3_decoded_s=mp3_seconds,
+            mp3_decoded_s=mp3.seconds,
+            silent_fraction=wav.silent_fraction,
         )
 
     # Before the manifest is written, so a job that fails QA is never listed as

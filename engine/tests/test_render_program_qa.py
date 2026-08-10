@@ -65,14 +65,6 @@ def write_master(path, seconds=5.0, amplitude=0.1, silent=False):
     return y
 
 
-def code_only(src):
-    """Source with comment text removed — see test_render_program_cleanup.py.
-
-    Locating a call by string index finds a *mention* of it in a comment just as
-    readily as the call, which silently inverts an ordering assertion.
-    """
-    return "\n".join(line.split("#", 1)[0] for line in src.splitlines())
-
 
 # --------------------------------------------------------------------------
 # master_rms_db against real files
@@ -148,7 +140,7 @@ def test_a_healthy_master_passes_the_full_gate(render_program, tmp_path):
 # Call-site ordering — the gate is worthless if it runs after the manifest
 # --------------------------------------------------------------------------
 
-def test_gate_runs_before_the_manifest_is_written(render_program):
+def test_gate_runs_before_the_manifest_is_written(render_program, code_only):
     import inspect
     src = code_only(inspect.getsource(render_program.run))
     gate_at = src.index("QA gate rejected the masters")
@@ -157,13 +149,13 @@ def test_gate_runs_before_the_manifest_is_written(render_program):
         "a job that fails QA must never get a manifest listing its masters")
 
 
-def test_gate_runs_before_cleanup_so_failures_keep_their_evidence(render_program):
+def test_gate_runs_before_cleanup_so_failures_keep_their_evidence(render_program, code_only):
     import inspect
     src = code_only(inspect.getsource(render_program.run))
     assert src.index("QA gate rejected the masters") < src.index("prune_intermediates(outdir)")
 
 
-def test_gate_is_not_behind_an_env_flag(render_program):
+def test_gate_is_not_behind_an_env_flag(render_program, code_only):
     """Criterion: it runs in production by default. HYPNO_SKIP_QA must not reach
     it — that flag only governs the assembler's diagnostic block."""
     import inspect
@@ -189,3 +181,128 @@ def test_qa_progress_never_reports_a_complete_render(render_program):
     """
     assert render_program.P_QA_END < 1.0
     assert render_program.P_BED_END < render_program.P_QA_END
+
+
+# --------------------------------------------------------------------------
+# The measurement itself — the claim the whole truncation check rests on
+# --------------------------------------------------------------------------
+
+def write_mp3(path, seconds, amplitude=0.1):
+    rng = np.random.default_rng(5)
+    y = (amplitude * rng.standard_normal(int(seconds * SR))).astype("float32")
+    sf.write(path, y, SR, format="MP3")
+    return path
+
+
+def test_measure_audio_sees_through_a_truncated_mp3(render_program, tmp_path):
+    """The load-bearing claim of the MP3 truncation check, pinned to a real file.
+
+    Everything else about that check — thresholds, error text, call site — is
+    tested against numbers handed in. This is the only test that verifies the
+    *measurement*: that decoding stops at the real end of a truncated MP3.
+
+    Without it, a libsndfile change that made this read fabricate audio past the
+    end (as `sf.blocks` already does) would turn the check into a silent no-op
+    with every other test still green — shipping truncated files, which is the
+    failure this issue exists to prevent.
+    """
+    full = write_mp3(str(tmp_path / "full.mp3"), seconds=30.0)
+    full_s = render_program.measure_audio(full).seconds
+    assert full_s == pytest.approx(30.0, abs=0.5), f"fixture is wrong: {full_s}"
+
+    data = open(full, "rb").read()
+    cut = tmp_path / "cut.mp3"
+    cut.write_bytes(data[: len(data) * 4 // 10])
+
+    cut_s = render_program.measure_audio(str(cut)).seconds
+    assert cut_s < full_s * 0.6, (
+        f"a 40%-of-bytes mp3 decoded to {cut_s:.1f}s of {full_s:.1f}s — the "
+        f"truncation check is not measuring what it claims to")
+
+
+def test_header_duration_would_not_have_caught_it(render_program, tmp_path):
+    """Documents why the obvious implementation is wrong.
+
+    If this ever starts failing, libsndfile has begun reporting truthful MP3
+    header durations and the cheaper check would then be viable — that is a
+    change worth noticing, not a break.
+    """
+    full = write_mp3(str(tmp_path / "f.mp3"), seconds=30.0)
+    data = open(full, "rb").read()
+    cut = tmp_path / "c.mp3"
+    cut.write_bytes(data[: len(data) * 4 // 10])
+
+    header_s = sf.info(str(cut)).duration
+    decoded_s = render_program.measure_audio(str(cut)).seconds
+    assert header_s > decoded_s * 1.5, (
+        f"header {header_s:.1f}s vs decoded {decoded_s:.1f}s — header is now "
+        f"truthful; the decode may no longer be necessary")
+
+
+def test_measure_audio_is_channel_correct(render_program, tmp_path):
+    """A stereo file must not read louder than the same audio in mono.
+
+    `len(block)` counts frames while `sum(block*block)` sums every channel, so
+    dividing by frames overstates a stereo RMS by sqrt(channels) — +3 dB, enough
+    to push a quiet-but-valid master out of the window.
+    """
+    rng = np.random.default_rng(9)
+    mono = (0.1 * rng.standard_normal(SR * 2)).astype("float32")
+    mono_path = str(tmp_path / "mono.wav")
+    stereo_path = str(tmp_path / "stereo.wav")
+    sf.write(mono_path, mono, SR, subtype="PCM_16")
+    sf.write(stereo_path, np.column_stack([mono, mono]), SR, subtype="PCM_16")
+
+    m = render_program.measure_audio(mono_path)
+    s = render_program.measure_audio(stereo_path)
+    assert s.rms_db == pytest.approx(m.rms_db, abs=0.1), (
+        f"stereo read {s.rms_db:.2f} dB against mono {m.rms_db:.2f} dB")
+    assert s.seconds == pytest.approx(m.seconds, abs=0.01), "duplicated channels are not extra time"
+
+
+# --------------------------------------------------------------------------
+# Dead air inside an otherwise normal track
+# --------------------------------------------------------------------------
+
+def test_a_track_that_dies_halfway_is_measured_as_dead_air(render_program, tmp_path):
+    """Overall RMS cannot see this: the surviving audio holds the average up."""
+    rng = np.random.default_rng(4)
+    live = (0.1 * rng.standard_normal(SR * 20)).astype("float32")
+    dead = np.zeros(SR * 20, dtype="float32")
+    p = str(tmp_path / "half.wav")
+    sf.write(p, np.concatenate([live, dead]), SR, subtype="PCM_16")
+
+    m = render_program.measure_audio(p)
+    assert -30.0 < m.rms_db < -12.0, (
+        f"RMS {m.rms_db:.1f} dB is inside the passing band — which is the point")
+    assert m.silent_fraction > 0.4, m.silent_fraction
+    assert qa.check_master(label="river_track1", rms_db=m.rms_db,
+                           mp3_bytes=int(9000 * m.seconds), duration_s=m.seconds,
+                           silent_fraction=m.silent_fraction)
+
+
+def test_a_healthy_master_has_almost_no_dead_air(render_program, tmp_path):
+    """The threshold must not fire on a normal track."""
+    p = str(tmp_path / "ok.wav")
+    write_master(p, seconds=40.0, amplitude=0.1)
+    m = render_program.measure_audio(p)
+    assert m.silent_fraction <= qa.MAX_SILENT_FRACTION
+    assert qa.check_master(label="t", rms_db=m.rms_db, mp3_bytes=int(9000 * m.seconds),
+                           duration_s=m.seconds, silent_fraction=m.silent_fraction) == []
+
+
+def test_the_closing_fade_does_not_count_as_dead_air(render_program, tmp_path):
+    """Every real master fades to zero over its last 30 s, so its final couple of
+    seconds are genuinely below the silence floor. The tolerance is a fraction
+    rather than zero precisely so that does not fail a good render."""
+    rng = np.random.default_rng(6)
+    n = SR * 120
+    y = (0.1 * rng.standard_normal(n)).astype("float32")
+    fade = int(30 * SR)
+    y[-fade:] *= (np.cos(np.linspace(0, np.pi / 2, fade)) ** 2).astype("float32")
+    p = str(tmp_path / "faded.wav")
+    sf.write(p, y, SR, subtype="PCM_16")
+
+    m = render_program.measure_audio(p)
+    assert m.silent_fraction <= qa.MAX_SILENT_FRACTION, (
+        f"a normal 30 s fade produced {m.silent_fraction:.1%} dead air")
