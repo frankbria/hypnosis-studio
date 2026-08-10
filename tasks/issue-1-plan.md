@@ -50,9 +50,31 @@ moment retention deletion exists (#3). Fixing 3 without 4 leaves a narrower vers
   Limitation instead.
 - Plan persisted here rather than `tasks/todo.md` so the launch-readiness plan is not clobbered.
 
+## Added after cross-family review (opencode / GLM)
+
+The review confirmed the request promise chain was fully closed, and found the backstop does **not**
+cover `writeStatus` (`server.js:75-81`): three of its four call sites run in async callbacks outside
+the chain — the worker's `error` and `exit` handlers, and the sweep timer — where a throw is an
+`uncaughtException`, not a rejection.
+
+One is HTTP-reachable: `POST /api/programs` spawns a worker, and if that worker exits while the disk
+is full, `writeStatus` throws `ENOSPC` and the process dies. Same defect class as the issue, so it is
+in scope rather than deferred.
+
+7. **Guard `writeStatus` internally** — once, where all four callers route through, rather than at
+   each call site.
+8. **Add an `error` listener for the pipe destination** so a client aborting mid-download cannot leak
+   the read stream.
+9. **Test it** — a read-only job directory makes the boot sweep's status write fail; without the
+   guard the process exits at startup.
+
+Declined from the review: the `fs.readFile` callbacks in `serveStatic` are structurally outside the
+chain, but every value reaching `send`/`writeHead` there is a hardcoded literal, and the reviewer
+could not construct a throw path. Flagged as fragile-to-future-edits, not a live bug — left alone.
+
 ## Acceptance criteria (from the issue)
 
-- [ ] `GET /%80`, `/%e0%80`, `/%f0%9f` and `/%00` each return 400 and the process stays up
-- [ ] A `GET` for a manifest-listed file deleted from disk returns 404, not a crash
-- [ ] Any unexpected throw inside the handler produces a 500 and the process stays up
-- [ ] A regression check exists that issues these requests and asserts the server is still listening
+- [x] `GET /%80`, `/%e0%80`, `/%f0%9f` and `/%00` each return 400 and the process stays up
+- [x] A `GET` for a manifest-listed file deleted from disk returns 404, not a crash
+- [x] Any unexpected throw inside the handler produces a 500 and the process stays up
+- [x] A regression check exists that issues these requests and asserts the server is still listening
