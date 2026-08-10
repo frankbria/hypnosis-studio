@@ -48,6 +48,21 @@ def render_program():
             sys.modules[name] = mod
 
 
+def code_only(src):
+    """Source with comment text removed.
+
+    The ordering assertions below locate calls by string index, which finds a
+    *mention* of a call in a comment just as readily as the call itself. That is
+    not hypothetical: a comment explaining why progress stops short of
+    `job.ready()` once made `ready` appear to precede `prune`, inverting the
+    apparent order while the real code was unchanged.
+
+    Splitting on `#` is safe here only because neither function inspected below
+    has a `#` inside a string literal.
+    """
+    return "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+
+
 def test_cleanup_is_wired_in(render_program):
     """job_files is actually imported and reachable from render_program."""
     assert hasattr(render_program, "job_files")
@@ -57,7 +72,7 @@ def test_cleanup_is_wired_in(render_program):
 def test_prune_runs_after_the_manifest_and_before_ready(render_program):
     import inspect
 
-    src = inspect.getsource(render_program.run)
+    src = code_only(inspect.getsource(render_program.run))
 
     manifest_at = src.index('write_json_atomic(os.path.join(outdir, "manifest.json")')
     prune_at = src.index("prune_intermediates(outdir)")
@@ -78,7 +93,7 @@ def test_prune_is_not_reachable_on_the_failure_path(render_program):
     """
     import inspect
 
-    src = inspect.getsource(render_program.run)
+    src = code_only(inspect.getsource(render_program.run))
     prune_at = src.index("prune_intermediates(outdir)")
     raises_after_prune = [
         i for i in range(prune_at, len(src)) if src.startswith("raise ", i)

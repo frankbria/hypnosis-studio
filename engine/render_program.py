@@ -26,6 +26,7 @@ render logs the same projection but does not refuse on it.
 """
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -36,9 +37,11 @@ from datetime import datetime, timezone
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ENGINE_DIR)
 
+import numpy as np
 import soundfile as sf
 
 import job_files
+import qa
 import render_track
 import timeline
 
@@ -88,6 +91,7 @@ TRACKS = [
 P_SCRIPTING = 0.05
 P_VOICE_END = 0.75
 P_BED_END = 0.90
+P_QA_END = 0.99  # never 1.0 — only job.ready() reports a complete render
 
 
 def now_iso() -> str:
@@ -219,6 +223,48 @@ def check_pad_headroom(plan: list, pad_path: str, strict: bool) -> list:
     return problems
 
 
+def measure_audio(path: str):
+    """Decode a file and return ``(rms_db, seconds)`` of what is really in it.
+
+    Streamed rather than read whole: a 780 s master is ~69 MB as float64 and the
+    prod box has 4 GB, which the assembler already works hard to stay inside.
+    The whole file is decoded — this gates the deliverable, so sampling windows
+    could miss a track that goes silent halfway. Measured cost is ~0.4 s per
+    780 s track against a 15-20 minute render.
+
+    Deliberately `SoundFile.read` in a loop rather than `sf.blocks` or the header.
+    On a truncated MP3 those two disagree with reality and with each other: for a
+    file cut to 50 %, the header claims 780.0 s and `sf.blocks` yields 780.0 s of
+    audio (it repeats content past the real end, so even the RMS looks normal),
+    while this loop stops at the true 390.1 s. That difference is the only
+    reliable truncation signal available for MP3.
+    """
+    total = 0.0
+    count = 0
+    with sf.SoundFile(path) as fh:
+        rate = fh.samplerate
+        while True:
+            block = fh.read(1 << 20, dtype="float64")
+            if not len(block):
+                break
+            total += float(np.sum(block * block))
+            count += len(block)
+    if count == 0 or not rate:
+        return None, 0.0
+    seconds = count / rate
+    # No epsilon floor: a genuinely zero master should read as -inf and be caught
+    # as silence, rather than nudged into a plausible-looking number.
+    mean_square = total / count
+    if mean_square <= 0:
+        return float("-inf"), seconds
+    return 10.0 * math.log10(mean_square), seconds
+
+
+def master_rms_db(wav_path: str):
+    """RMS of a master in dBFS, or None if it holds no samples."""
+    return measure_audio(wav_path)[0]
+
+
 def planned_manifest(job_id: str, goal: str, voice_set: str, plan: list) -> dict:
     return {
         "jobId": job_id,
@@ -341,13 +387,41 @@ def run(job_id: str, goal: str, voice_set: str, outdir: str,
     # ---- 4. mastering-qa ----
     job.update("mastering-qa", P_BED_END, "Locating masters")
     manifest = planned_manifest(job_id, goal, voice_set, plan)
-    for entry in manifest["tracks"]:
+    planned_by_n = {t["n"]: float(t["total_s"]) for t in plan}
+    problems = []
+    for i, entry in enumerate(manifest["tracks"]):
         mp3_path = os.path.join(outdir, entry["mp3"])
         wav_path = os.path.join(outdir, entry["wav"])
         if not os.path.exists(mp3_path) or not os.path.exists(wav_path):
             raise FileNotFoundError(
                 f"mastered output not found for track {entry['n']}")
         entry["durationSec"] = round(float(sf.info(wav_path).duration), 1)
+        # Capped below 1.0 on purpose: only job.ready() reports 100%. Showing a
+        # complete bar and then failing the job reads as a finished render that
+        # then broke, which is exactly the success-state-for-something-that-did-
+        # not-happen the frontend must never display.
+        job.update("mastering-qa",
+                   P_BED_END + (i + 1) / len(manifest["tracks"]) * (P_QA_END - P_BED_END),
+                   f"track {entry['n']}/4 · checking the master")
+        # Read the actual audio. Existence and a readable duration were the only
+        # checks here, and an all-silent master satisfies both (issue #6).
+        wav_rms, _ = measure_audio(wav_path)
+        _, mp3_seconds = measure_audio(mp3_path)
+        problems += qa.check_master(
+            label=entry["id"],
+            rms_db=wav_rms,
+            mp3_bytes=os.path.getsize(mp3_path),
+            duration_s=entry["durationSec"],
+            planned_s=planned_by_n.get(entry["n"]),
+            mp3_decoded_s=mp3_seconds,
+        )
+
+    # Before the manifest is written, so a job that fails QA is never listed as
+    # deliverable — and, because prune_intermediates runs after the manifest,
+    # its segments survive for debugging.
+    if problems:
+        raise RuntimeError("QA gate rejected the masters: " + "; ".join(problems))
+
     manifest["createdAt"] = now_iso()
     write_json_atomic(os.path.join(outdir, "manifest.json"), manifest)
 
