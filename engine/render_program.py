@@ -18,7 +18,11 @@ mastered, so partial renders are never manifest-listed. The ElevenLabs key is
 resolved once via render_track.load_key() and is never printed.
 
 --dry-run verifies scripts + pad and prints the planned 4-track manifest
-without calling ElevenLabs or the assembler.
+without calling ElevenLabs or the assembler. It also projects each track's voice
+length from its character count and checks that against the real pad duration,
+so a program too long for its pad is caught before any credits are spent rather
+than at assembly, after the whole track has been bought (issue #5). A real
+render logs the same projection but does not refuse on it.
 """
 import argparse
 import json
@@ -36,6 +40,7 @@ import soundfile as sf
 
 import job_files
 import render_track
+import timeline
 
 # ---------- registries ----------
 GOALS = ("polymath", "golden_thread", "inner_studio", "open_gate", "river")
@@ -161,6 +166,49 @@ def plan_tracks(goal: str) -> list:
     return plan
 
 
+def check_pad_headroom(plan: list, pad_path: str, strict: bool) -> list:
+    """Project every track against the real pad before any credits are spent.
+
+    The old failure mode was invisible until assembly: `voice_end` is the sum of
+    real TTS durations, so a program that overran the pad only announced itself
+    after the whole track had been bought (issue #5). Estimating from character
+    counts makes it visible up front, for the price of reading one WAV header.
+
+    `strict` raises instead of warning. It is on for --dry-run, whose entire job
+    is to surface this, and off for a real render: the estimate is deliberately
+    conservative, and assemble_track now shortens the outro rather than failing,
+    so refusing to render on a projection would cost a sale to avoid a shorter
+    music tail. Returns the list of problems found.
+    """
+    pad_s = float(sf.info(pad_path).duration)
+    rate = timeline.chars_per_sec()
+    print(f"pad check: {os.path.basename(pad_path)} is {pad_s:.0f}s "
+          f"(projecting at {rate:.1f} chars/s)", flush=True)
+
+    problems = []
+    for t in plan:
+        est = timeline.estimate_voice_end(t["segments"], rate)
+        label = f"  track {t['n']}/4 {t['track_key']}: voice ~{est:.0f}s"
+        # Ask the assembler's own bound rather than restating it here, so this
+        # gate cannot drift away from what the render will actually do.
+        try:
+            outro = timeline.resolve_actual_s(t["total_s"], est, pad_s) - est
+        except ValueError as e:
+            problems.append(f"track {t['n']} ({t['track_key']}): {e}")
+            print(f"{label}  ** WILL NOT FIT ** — {e}", flush=True)
+            continue
+        line = (f"{label}, outro ~{outro:.0f}s, "
+                f"headroom {pad_s - est - timeline.FADE_S:.0f}s")
+        if outro < timeline.MIN_OUTRO_S:
+            line += f"  (outro under the {timeline.MIN_OUTRO_S:.0f}s target)"
+        print(line, flush=True)
+
+    if problems and strict:
+        raise ValueError("pad too short for the planned program: "
+                         + "; ".join(problems))
+    return problems
+
+
 def planned_manifest(job_id: str, goal: str, voice_set: str, plan: list) -> dict:
     return {
         "jobId": job_id,
@@ -197,6 +245,7 @@ def run(job_id: str, goal: str, voice_set: str, outdir: str,
     pad_path = os.path.join(ENGINE_DIR, "pads", PADS[goal])
     if not os.path.exists(pad_path):
         raise FileNotFoundError(f"pad not found: {pad_path}")
+    check_pad_headroom(plan, pad_path, strict=dry_run)
     for t in plan:
         shutil.copyfile(
             t["script_src"],
