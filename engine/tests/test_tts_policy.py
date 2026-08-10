@@ -208,3 +208,138 @@ def test_unmatched_wording_degrades_to_retryable_not_to_wrongly_fatal():
     """If ElevenLabs reword the payload the check misses it and the request is
     retried — the old behaviour — rather than a healthy render being refused."""
     assert classify(status=429, body='{"detail":"some new wording"}').kind == "transient"
+
+
+# --------------------------------------------------------------------------
+# Response validation — a 200 is not the same as a usable segment (#8)
+# --------------------------------------------------------------------------
+
+AUDIO_CT = "audio/mpeg"
+
+
+def problem(payload, text="[soft] " + "x" * 240, content_type=AUDIO_CT):
+    """240 chars ~= 20 s ~= 320 KB expected at 128 kbps."""
+    return tts_policy.response_problem(payload, text, content_type)
+
+
+def healthy(text="[soft] " + "x" * 240):
+    """Bytes a correct response would carry for `text`."""
+    seconds = len(text) / tts_policy.chars_per_sec_for_sizing()
+    return b"\xff\xfb" + b"\x00" * int(seconds * tts_policy.BYTES_PER_SEC)
+
+
+def test_a_healthy_response_has_no_problem():
+    assert problem(healthy()) is None
+
+
+def test_an_empty_response_is_rejected():
+    """The failure the issue opens with: np.concatenate([]) raising a NumPy
+    error from inside the decoder, blaming the wrong layer entirely."""
+    reason = problem(b"")
+    assert reason
+    assert "empty" in reason.lower()
+
+
+def test_a_tiny_response_is_rejected():
+    assert problem(b"\xff\xfb" + b"\x00" * 200)
+
+
+def test_an_html_error_page_is_rejected():
+    """Cloudflare can serve one of these with a 200."""
+    page = b"<!DOCTYPE html><html><body>502 Bad Gateway</body></html>"
+    assert problem(page, content_type="text/html")
+    # ...and still, with the header stripped to the stdlib default.
+    assert problem(page, content_type="text/plain")
+
+
+def test_a_definite_non_audio_content_type_is_rejected_even_when_large():
+    """Size alone would pass this; the declared type gives it away."""
+    assert problem(b"x" * 500_000, content_type="application/json")
+
+
+def test_a_textual_body_is_rejected_on_its_own_evidence():
+    """Even with no header at all, a JSON or HTML body is not audio."""
+    assert problem(b"{" + b'"detail":"oops"' * 40_000, content_type="text/plain")
+    assert problem(b"<html>" + b"x" * 400_000, content_type=None)
+
+
+def test_a_missing_content_type_is_tolerated():
+    """http.client reports a *missing* Content-Type as "text/plain", because
+    HTTPMessage inherits email.message.Message whose _default_type is that.
+
+    So this is not a hypothetical: a proxy that strips the header would
+    otherwise make every healthy MP3 look like an error page, and each one is
+    already paid for by the time it is judged. Passing None here — as an earlier
+    version of this test did — never exercises the real default.
+    """
+    import http.client
+    assert http.client.HTTPMessage().get_content_type() == "text/plain", (
+        "the stdlib default changed; the tolerance below may no longer be needed")
+    assert problem(healthy(), content_type="text/plain") is None
+    assert problem(healthy(), content_type=None) is None
+
+
+def test_a_valid_mp3_is_kept_whatever_the_header_says():
+    """The body is the signal. A header-stripping or header-mangling proxy must
+    not cost a segment that has already been bought."""
+    for ct in ("text/plain", None, "application/octet-stream", "binary/octet-stream"):
+        assert problem(healthy(), content_type=ct) is None, ct
+
+
+def test_half_a_sentence_is_rejected():
+    """The outcome the issue calls worse than an empty body: decodable, written
+    to the segment WAV, and shipped — and per #6 nothing downstream notices,
+    because one short segment does not move a whole master's level or length."""
+    assert problem(healthy()[: len(healthy()) // 3])
+
+
+def test_a_slightly_short_response_is_accepted():
+    """The speaking-rate estimate is approximate; the floor must leave room for
+    a voice that simply speaks faster than predicted."""
+    assert problem(healthy()[: int(len(healthy()) * 0.8)]) is None
+
+
+def test_the_floor_scales_with_the_text():
+    """A long segment must not be judged against a short segment's floor."""
+    short_text = "[soft] " + "x" * 40
+    long_text = "[soft] " + "x" * 400
+    # Bytes that are ample for the short line but a fraction of the long one.
+    payload = healthy(short_text)
+    assert problem(payload, text=short_text) is None
+    assert problem(payload, text=long_text)
+
+
+def test_the_shortest_real_segment_is_not_false_rejected():
+    """40 characters is the shortest of the 768 committed segments."""
+    text = "[soft] " + "x" * 33
+    assert problem(healthy(text), text=text) is None
+
+
+def test_a_response_is_rejected_only_far_below_the_estimate():
+    """A healthy response should only trip this if the voice spoke about twice
+    as fast as the conservative estimate — not reachable for speech."""
+    assert tts_policy.MIN_RESPONSE_FRACTION <= 0.5
+
+
+def test_the_reason_names_both_sizes():
+    """Whoever reads this is debugging a paid render."""
+    reason = problem(b"\xff\xfb" + b"\x00" * 500)
+    assert "502" in reason.replace(",", "") or "bytes" in reason.lower(), reason
+
+
+def test_an_absolute_floor_catches_junk_for_a_very_short_line():
+    """Even a one-word segment cannot legitimately be a few hundred bytes."""
+    tiny_text = "[soft] hi"
+    assert problem(b"x" * 50, text=tiny_text)
+
+
+def test_the_absolute_floor_covers_a_degenerate_empty_text():
+    """The only case the text-derived floor cannot reach.
+
+    That floor is `len(text)/rate * BYTES_PER_SEC * fraction`, so an empty or
+    near-empty text predicts ~0 bytes and would accept any non-empty junk. Every
+    real segment is 40+ characters, which is exactly why this needs its own
+    guard rather than being folded into the fraction.
+    """
+    assert tts_policy.response_problem(b"x" * 500, text="") is not None
+    assert tts_policy.response_problem(b"x" * 500, text="a") is not None
