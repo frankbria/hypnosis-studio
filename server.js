@@ -18,11 +18,19 @@ const ENGINE_PY = path.join(__dirname, 'engine', 'venv', 'bin', 'python');
 const WORKER = path.join(__dirname, 'engine', 'render_program.py');
 
 const ACCESS_CODE = process.env.ACCESS_CODE || '';
-// Clamped, not just defaulted. A negative value is truthy, so `|| 30` would not
-// catch it, and it would put the cutoff in the FUTURE — making every terminal
-// job "expired", including one created seconds ago. Someone typing -1 to disable
-// retention would delete every customer purchase on the next sweep.
-const RETENTION_DAYS = Math.max(1, parseInt(process.env.RETENTION_DAYS || '30', 10) || 30);
+// Any value that is not a positive integer falls back to the documented default.
+// A negative is the dangerous case: it is truthy, so `|| 30` never fires, and it
+// puts the cutoff in the FUTURE — making every terminal job "expired", including
+// one created seconds ago. Someone typing -1 to disable retention would delete
+// every customer purchase on the next sweep.
+//
+// Falling back to 30 rather than clamping to 1: for a feature that destroys
+// customer deliverables, nonsense configuration should land on the documented
+// default, never on the most aggressive window the code can express.
+const RETENTION_DAYS = (() => {
+  const n = parseInt(process.env.RETENTION_DAYS || '30', 10);
+  return Number.isInteger(n) && n > 0 ? n : 30;
+})();
 const RETENTION_DRY_RUN = process.env.RETENTION_DRY_RUN === '1';
 const MAX_JOBS_PER_DAY = parseInt(process.env.MAX_JOBS_PER_DAY || '6', 10) || 6;
 
