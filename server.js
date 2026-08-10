@@ -210,6 +210,17 @@ function failToStart(id, detail, error) {
   releaseQuota(id);
 }
 
+// Jobs with a worker process still running. The stale sweep decides a job is
+// dead purely from how long ago status.json was touched, and the assembly stage
+// writes status once per track — a single track can take longer than STALE_MS,
+// so a perfectly healthy render looks stale. Refunding its slot would let the
+// day's cap be exceeded, and every over-cap render spends real credits.
+//
+// (The sweep also *marks that job failed*, which frees the concurrency lock
+// under a live worker. That is issue #11 and is not fixed here; this map exists
+// so the money half cannot be made worse in the meantime.)
+const liveWorkers = new Set();
+
 function startWorker(id, goal, voiceSet) {
   // The whole body is guarded, not just the spawn. bumpQuota() has already run
   // by the time we get here, so anything that throws on the way to a live
@@ -243,10 +254,13 @@ function startWorker(id, goal, voiceSet) {
     return;
   }
   fs.closeSync(logFd); // child holds its own copy of the fd
+  liveWorkers.add(id);
   child.on('error', (e) => {
+    liveWorkers.delete(id);
     failToStart(id, 'worker spawn failed', e);
   });
   child.on('exit', () => {
+    liveWorkers.delete(id);
     const st = readJsonSafe(path.join(jobDir(id), 'status.json'));
     if (!st || (st.state !== 'ready' && st.state !== 'failed')) {
       writeStatus(id, {
@@ -424,7 +438,16 @@ function sweepStaleJobs() {
     const age = Date.now() - new Date(st.updatedAt || 0).getTime();
     if (age > STALE_MS) {
       writeStatus(d.name, { ...st, state: 'failed', error: 'service restarted during render — please start a new one' });
-      releaseQuota(d.name);
+      // Only refund when the worker is genuinely gone. A long assembly stage
+      // makes a live render look stale, and refunding there would hand back a
+      // slot the job is still using — it may yet finish `ready`, and the day's
+      // cap would then be exceeded by a render that spends real credits.
+      if (liveWorkers.has(d.name)) {
+        console.warn('stale sweep hit a job whose worker is still running:', d.name,
+          '- not releasing its quota slot (see #11)');
+      } else {
+        releaseQuota(d.name);
+      }
       console.log('swept stale job', d.name);
     }
   }
@@ -488,7 +511,15 @@ function sweepJobs() {
   sweepStaleJobs();
   sweepExpiredJobs();
 }
+// Overridable for the same reason RENDERS_DIR and ENGINE_PY are: a 60 s tick is
+// right in production and untestable in a unit test, and the sweep's behaviour
+// against a live worker is exactly what needs pinning.
+const SWEEP_MS = (() => {
+  const n = parseInt(process.env.SWEEP_INTERVAL_MS || '60000', 10);
+  return Number.isFinite(n) && n > 0 ? n : 60 * 1000;
+})();
+
 sweepJobs();
-setInterval(sweepJobs, 60 * 1000).unref();
+setInterval(sweepJobs, SWEEP_MS).unref();
 
 server.listen(PORT, '127.0.0.1', () => console.log('hypnosis-studio on 127.0.0.1:' + PORT));

@@ -520,3 +520,61 @@ test('a job that cannot even open its log gives the slot back', async () => {
     } catch { /* best effort */ }
   }
 });
+
+test('the sweep does not refund a slot while the worker is still running', async () => {
+  // The stale sweep judges liveness purely by how long ago status.json was
+  // touched, and the assembly stage writes status once per track — a single
+  // track can take longer than STALE_MS, so a healthy render looks stale.
+  //
+  // Refunding there hands back a slot the job is still using. If it then
+  // finishes `ready`, the day's cap has been silently raised by one, and every
+  // over-cap render spends real ElevenLabs credits.
+  //
+  // (The sweep also marks that job `failed`, which frees the concurrency lock
+  // under a live worker. That is #11 and is not fixed here — this test pins
+  // only that the money half cannot be made worse.)
+  const engine = path.join(os.tmpdir(), `fake-slow-${process.pid}-${Date.now()}.sh`);
+  fs.writeFileSync(engine, `#!/bin/sh
+outdir=""
+while [ $# -gt 0 ]; do
+  case "$1" in --outdir) outdir="$2"; shift 2;; *) shift;; esac
+done
+# A long stage that never touches status.json again, exactly like assembly.
+printf '{"jobId":"x","state":"rendering","stage":"entrainment-bed","progress":0.8,"detail":"mixing","updatedAt":"%s"}' \\
+  "$(date -u -d '-10 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-10M +%Y-%m-%dT%H:%M:%SZ)" \\
+  > "$outdir/status.json"
+sleep 30
+`, { mode: 0o755 });
+
+  // A fast sweep tick, or this test proves nothing: the production interval is
+  // 60 s, so a short wait never reaches a sweep and the assertion holds whether
+  // or not the guard exists.
+  const srv = await startServer({
+    enginePy: engine, maxJobsPerDay: '6', env: { SWEEP_INTERVAL_MS: '300' },
+  });
+  try {
+    const res = await request(srv.port, 'POST', '/api/programs', START);
+    assert.strictEqual(res.status, 202);
+
+    // Several sweep ticks. The worker is alive but its status is already stale,
+    // so every one of them considers this job.
+    await sleep(2000);
+
+    const swept = JSON.parse(fs.readFileSync(
+      path.join(srv.rendersDir,
+        fs.readdirSync(srv.rendersDir).find((n) => n.startsWith('job_')),
+        'status.json'), 'utf8'));
+    assert.strictEqual(swept.state, 'failed',
+      'the sweep never ran, so this test proves nothing (see #11: it should not ' +
+      'be marking a live job failed at all)');
+
+    const q = readQuotaFile(srv.rendersDir);
+    assert.strictEqual(q.count, 1,
+      'the slot was refunded while the worker was still running — the day cap ' +
+      'can now be exceeded by a render that spends real credits');
+    assert.strictEqual(q.jobs.length, 1);
+  } finally {
+    stop(srv);
+    try { fs.unlinkSync(engine); } catch { /* best effort */ }
+  }
+});
