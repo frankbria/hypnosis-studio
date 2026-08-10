@@ -29,6 +29,8 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import butter, hilbert, sosfiltfilt, welch
 
+import timeline
+
 TRACK = sys.argv[1] if len(sys.argv) > 1 else "golden_thread"
 TITLE = sys.argv[2] if len(sys.argv) > 2 else "The Golden Thread - Self Hypnosis (MONO one-ear)"
 PAD_FILE = sys.argv[3] if len(sys.argv) > 3 else "pad_golden.wav"
@@ -40,7 +42,7 @@ TOTAL_S = int(sys.argv[5]) if len(sys.argv) > 5 else 780
 DTYPE = np.float32 if os.environ.get("HYPNO_DTYPE") == "float32" else np.float64
 SKIP_QA = os.environ.get("HYPNO_SKIP_QA") == "1"
 
-SR = 44100
+SR = timeline.SR
 CH = 60 * SR  # chunk size for full-rate curve operations
 
 # ---------- load segments & build voice timeline ----------
@@ -49,7 +51,11 @@ segs = json.load(open(f"{TRACK}_tts_segments.json"))["segments"]
 waves = {}
 for seg in segs:
     y, sr = sf.read(f"{TRACK}_segments/{seg['id']}.wav", dtype=DTYPE)
-    assert sr == SR
+    if sr != SR:
+        # Was a bare assert, which python -O strips. A segment at the wrong rate
+        # would then be placed on the timeline at the wrong length and mixed at
+        # the wrong pitch — shipped to the customer rather than caught.
+        raise ValueError(f"segment {seg['id']} sample rate is {sr}, expected {SR}")
     waves[seg["id"]] = y
 
 positions = []  # (id, start, end, phase)
@@ -85,16 +91,29 @@ SUG_START = [p for p in positions if p[3] == "suggestion"][0][1]
 RES_START = [p for p in positions if p[3] == "resurface"][0][1]
 
 voice_end = positions[-1][2]
-# Adaptive total: TOTAL_S is a minimum. If the voice program (+ minimum music
-# outro) is longer, extend so the final segments never overflow the buffers.
-MIN_OUTRO_S = 75.0
-ACTUAL_S = float(int(max(float(TOTAL_S), voice_end + MIN_OUTRO_S) + 0.999))
-print(f"voice program: {voice_end/60:.2f} min; outro {(ACTUAL_S-voice_end)/60:.2f} min (target {TOTAL_S}s, actual {ACTUAL_S:.0f}s)")
 
-# ---------- load pad, flatten energy ----------
+# ---------- load pad, bound the program by it ----------
+# TOTAL_S is a minimum and the pad is the ceiling. voice_end is the sum of real
+# TTS durations, so it is only knowable here — after the whole track has been
+# paid for. A long program therefore gives up music outro rather than dying at
+# this point with the spend already gone (issue #5).
 pad, sr = sf.read(PAD_FILE, dtype=DTYPE)
-assert len(pad) >= ACTUAL_S * SR, f"pad too short: {len(pad)/SR:.0f}s < {ACTUAL_S:.0f}s"
+if sr != SR:
+    # Every offset in this file is computed at SR, and the bound below now reads
+    # the pad's length the same way — a pad at another rate would silently
+    # mis-measure it. Segments are checked the same way above.
+    raise ValueError(f"pad sample rate is {sr}, expected {SR}: {PAD_FILE}")
+pad_s = len(pad) / SR
+ACTUAL_S = timeline.resolve_actual_s(TOTAL_S, voice_end, pad_s)
+print(f"voice program: {voice_end/60:.2f} min; outro {(ACTUAL_S-voice_end)/60:.2f} min "
+      f"(target {TOTAL_S}s, actual {ACTUAL_S:.0f}s, pad {pad_s:.0f}s)")
+if ACTUAL_S - voice_end < timeline.MIN_OUTRO_S:
+    print(f"  note: outro shortened to {ACTUAL_S - voice_end:.0f}s "
+          f"(prefers {timeline.MIN_OUTRO_S:.0f}s) — bounded by the pad")
+
 pad = pad[: int(ACTUAL_S * SR)]
+
+# ---------- flatten pad energy ----------
 w = 1 * SR
 nwin = len(pad) // w
 win_rms = np.array([np.sqrt(np.mean(pad[i * w:(i + 1) * w] ** 2)) for i in range(nwin)])
@@ -130,7 +149,10 @@ GAIN_BP = [
     (RES_START + 25.0, 6.0),    # gradual return over first resurface segments
     (voice_end, 6.0),
 ]
-bp_t = np.array([p[0] for p in GAIN_BP]); bp_g = np.array([p[1] for p in GAIN_BP])
+# np.interp does not validate that breakpoint times increase — handed a series
+# that steps backwards it silently returns a garbage envelope. RES_START + 25 can
+# overshoot voice_end on a short resurface phase, so pin the order.
+bp_t = np.array(timeline.monotonic([p[0] for p in GAIN_BP])); bp_g = np.array([p[1] for p in GAIN_BP])
 for c0 in range(0, len(voice), CH):
     c1 = min(c0 + CH, len(voice))
     g = 10 ** (np.interp(np.arange(c0, c1) / SR, bp_t, bp_g) / 20)
@@ -169,7 +191,9 @@ TRAJ = [
     (ACTUAL_S - 60, 10.0),
     (ACTUAL_S - 5, 0.0),
 ]
-bp_t = np.array([p[0] for p in TRAJ]); bp_r = np.array([p[1] for p in TRAJ])
+# Same guard as GAIN_BP, and load-bearing here: once ACTUAL_S is clamped against
+# the pad, the ACTUAL_S-relative tail breakpoints fall behind RES_START + 10.
+bp_t = np.array(timeline.monotonic([p[0] for p in TRAJ])); bp_r = np.array([p[1] for p in TRAJ])
 
 
 def bed_chunks():
@@ -229,7 +253,15 @@ if not SKIP_QA:
 
     print("-- QA: bed pulse (tight +/-4 Hz window around carrier) --")
     env_check(CARRIER - 4, CARRIER + 4, SUG_START + 5, min(SUG_END, SUG_START + 240), "suggestion (expect 6.5-9 Hz)")
-    env_check(CARRIER - 4, CARRIER + 4, ACTUAL_S - 240, ACTUAL_S - 60, "outro, no voice (expect clean 10 Hz)")
+    # The music tail is no longer guaranteed to be ~2 min: a program clamped
+    # against the pad can leave as little as the 30 s fade. Keep this window
+    # inside the actual tail so it never reports voiced audio as "no voice".
+    outro_lo = max(voice_end, ACTUAL_S - 240)
+    outro_hi = ACTUAL_S - 60
+    if outro_hi - outro_lo >= 5:
+        env_check(CARRIER - 4, CARRIER + 4, outro_lo, outro_hi, "outro, no voice (expect clean 10 Hz)")
+    else:
+        print(f"  outro window too short to measure ({max(ACTUAL_S - voice_end, 0):.0f}s tail)")
 
     print("-- QA: boosted whisper transcript (sunken middle +14 dB) --")
     boost = mix[int(SUG_START * SR): int(SUG_END * SR)] * 10 ** (14 / 20)
