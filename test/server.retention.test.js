@@ -165,6 +165,36 @@ test('the window is configurable', async () => {
   }
 });
 
+test('a nonsensical RETENTION_DAYS cannot reap everything', async () => {
+  // Found by the GLM reviewer on #88. parseInt('-1') is -1, which is truthy, so
+  // the `|| 30` fallback does not fire and the cutoff lands in the FUTURE —
+  // making every terminal job "older than" it, including one created seconds
+  // ago. An operator typing -1 to "disable" retention would delete every
+  // customer purchase on the next sweep. The clamp is the fix; this is the
+  // regression guard.
+  for (const value of ['-1', '-9999']) {
+    const s = await sweepWith(
+      (d) => {
+        makeJob(d, 'job_brand_new', { state: 'ready', ageDays: 0 });
+        makeJob(d, 'job_yesterday', { state: 'failed', ageDays: 1 });
+      },
+      { RETENTION_DAYS: value },
+    );
+    try {
+      assert.strictEqual(
+        s.exists('job_brand_new'), true,
+        `RETENTION_DAYS=${value} must never reap a job created moments ago`,
+      );
+      assert.strictEqual(
+        s.exists('job_yesterday'), true,
+        `RETENTION_DAYS=${value} must never reap a one-day-old job`,
+      );
+    } finally {
+      s.cleanup();
+    }
+  }
+});
+
 test('logs an auditable line for every reap', async () => {
   const s = await sweepWith((d) => makeJob(d, 'job_audit_me', { state: 'ready', ageDays: 60 }));
   try {
