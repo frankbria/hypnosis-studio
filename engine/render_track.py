@@ -22,6 +22,13 @@ KEY = None
 BRIAN = "nPczCjzI2devNBz1zQrb"
 FRANK = "RsoSo7Gg7GyAtGoPBiqb"
 
+# How many segments may fail on network errors back to back before the
+# standalone CLI stops. Each segment carries its own retry budget, so a sustained
+# outage would otherwise spend 152 x (4 attempts x 120 s + 50 s of backoff)
+# re-establishing that the network is still down. render_program does not need
+# this — it raises on the first TtsError.
+MAX_CONSECUTIVE_TRANSIENT = 3
+
 
 def load_key() -> str:
     """Resolve the ElevenLabs key: env var first, else .env.local in cwd."""
@@ -60,6 +67,41 @@ class TtsError(RuntimeError):
         self.detail = detail
 
 
+def _error_body(err) -> bytes:
+    """An HTTPError's body, or empty if the socket is already gone.
+
+    `e.read()` is a stream read inside an exception handler; if it raises, the
+    exception escapes uncaught and the HTTP status — the thing we actually
+    needed in order to classify — is lost with it.
+    """
+    try:
+        return err.read()
+    except Exception:  # noqa: BLE001 — the status matters more than the body
+        return b""
+
+
+def _write_segment(out_path: str, payload: bytes) -> None:
+    """Save a segment that has already been rendered and paid for.
+
+    Raises TtsError("fatal") rather than letting the OSError reach the retry
+    classifier: retrying would re-buy identical audio and fail to write it
+    again. A partial file is removed so nothing downstream mistakes it for a
+    finished segment.
+    """
+    try:
+        with open(out_path, "wb") as f:
+            f.write(payload)
+    except OSError as e:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        raise TtsError(
+            "fatal",
+            f"the segment was rendered and paid for but could not be written to "
+            f"{out_path}: {e}") from e
+
+
 def tts(voice_id: str, text: str, out_path: str) -> bool:
     """Render one segment to `out_path`. Raises TtsError when it cannot.
 
@@ -83,13 +125,18 @@ def tts(voice_id: str, text: str, out_path: str) -> bool:
                     headers={"xi-api-key": KEY, "Content-Type": "application/json"})
                 with urllib.request.urlopen(req, timeout=120) as r:
                     payload = r.read()
-                with open(out_path, "wb") as f:
-                    f.write(payload)
-                return True
             except urllib.error.HTTPError as e:
-                outcome = tts_policy.classify(status=e.code, body=e.read())
-            except Exception as e:  # noqa: BLE001 — classified, then re-raised
+                outcome = tts_policy.classify(status=e.code, body=_error_body(e))
+            except Exception as e:  # noqa: BLE001 — classified below, not swallowed
                 outcome = tts_policy.classify(exception=e)
+            else:
+                # Only the network call is classified. The write is deliberately
+                # outside that try: a disk-full OSError is an OSError like any
+                # other, so leaving it in would classify a local failure as
+                # transient and buy this segment from ElevenLabs again — up to
+                # four times — to fail writing it again each time.
+                _write_segment(out_path, payload)
+                return True
 
             if outcome.kind in ("auth", "quota"):
                 # Straight out, with no second settings pass: neither a rejected
@@ -159,7 +206,8 @@ def main():
     segs = json.load(open(f"{track}_tts_segments.json"))["segments"]
 
     total_chars = 0
-    for seg in segs:
+    consecutive_transient = 0
+    for i, seg in enumerate(segs):
         vid, tag = register_for(seg)
         text = tag + seg["text"]
         total_chars += len(text)
@@ -177,7 +225,20 @@ def main():
             print(f"FAIL {seg['id']}: {e.detail}")
             if e.kind in ("auth", "quota"):
                 raise
+            if e.kind == "transient":
+                consecutive_transient += 1
+                if consecutive_transient >= MAX_CONSECUTIVE_TRANSIENT:
+                    # Each segment burns its own retry budget, so a sustained
+                    # outage would otherwise spend 152 x (4 x 120 s + 50 s) —
+                    # the better part of a day — proving the network is still
+                    # down. Stop and let the operator retry the run.
+                    raise TtsError(
+                        "transient",
+                        f"{consecutive_transient} segments in a row failed on "
+                        f"network errors; giving up rather than retrying the "
+                        f"remaining {len(segs) - i - 1}") from e
             continue
+        consecutive_transient = 0
         if not ok:
             print(f"FAIL {seg['id']}: both voice-setting variants were rejected")
             continue

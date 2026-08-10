@@ -10,6 +10,7 @@ request that cannot succeed; not retrying the right one throws away a paid
 render because a TCP connection dropped (issue #7).
 """
 import collections
+import http.client
 import re
 
 Outcome = collections.namedtuple("Outcome", "kind retryable detail")
@@ -42,13 +43,26 @@ MAX_ATTEMPTS = len(BACKOFF_S) + 1
 # signal. Without this a quota failure looks like a plain 429 and burns the
 # whole backoff schedule on a request that cannot succeed until someone buys
 # more credits.
-_QUOTA_MARKER = re.compile(r"quota[_ ]?exceeded|exceeds your quota|out of credits",
-                           re.IGNORECASE)
+_QUOTA_MARKER = re.compile(
+    r"quota[_ ]?(?:exceeded|reached|exhausted)"
+    r"|(?:insufficient|exceeded)[_ ]?quota"
+    r"|exceeds your quota"
+    r"|out of credits"
+    r"|credit[_ ]?limit[_ ]?(?:reached|exceeded)",
+    re.IGNORECASE)
 
 # Errors that mean "the connection failed", not "the request was wrong".
 # URLError and socket.timeout are not HTTPError, which is exactly why they used
 # to fall through to a bare `except Exception` and get no retry at all.
-_TRANSIENT_EXCEPTIONS = (TimeoutError, ConnectionError, OSError)
+#
+# IncompleteRead is listed separately because it does NOT inherit from OSError —
+# it is an http.client.HTTPException — yet it means precisely "the connection
+# dropped part-way through the response", which is the definition of transient.
+# Its HTTPException siblings are left fatal on purpose: BadStatusLine and
+# UnknownProtocol describe a peer that is not speaking HTTP properly, and
+# retrying that just spends money on the same confusion.
+_TRANSIENT_EXCEPTIONS = (TimeoutError, ConnectionError, OSError,
+                         http.client.IncompleteRead)
 
 
 def _as_text(body):

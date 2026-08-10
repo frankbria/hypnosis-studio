@@ -281,3 +281,191 @@ def test_no_file_is_written_on_failure(render_track, monkeypatch, tmp_path):
     with pytest.raises(render_track.TtsError):
         render_track.tts("voice", "hi", out)
     assert not os.path.exists(out), "a failed call must not leave a partial file"
+
+
+# --------------------------------------------------------------------------
+# Local I/O must never be billed as a network failure
+# --------------------------------------------------------------------------
+
+def test_a_write_failure_does_not_buy_the_segment_again(
+        render_track, monkeypatch, tmp_path):
+    """A disk-full OSError is an OSError, so leaving the write inside the
+    classified try would mark a *local* failure transient and re-buy identical
+    audio up to four times, failing to write it each time.
+
+    The old code broke immediately here, so getting this wrong would have been a
+    regression in exactly the dimension this issue is about.
+    """
+    fake, out = drive(render_track, monkeypatch, tmp_path, Response(b"audio"))
+
+    def full_disk(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("builtins.open", full_disk)
+    with pytest.raises(render_track.TtsError) as exc:
+        render_track.tts("voice", "hi", out)
+    assert exc.value.kind == "fatal", "a local write failure is not transient"
+    assert fake.calls == 1, "the segment must not be purchased again"
+
+
+def test_a_partial_file_is_removed_after_a_failed_write(
+        render_track, monkeypatch, tmp_path):
+    """Nothing downstream should mistake a half-written file for a segment."""
+    fake, out = drive(render_track, monkeypatch, tmp_path, Response(b"audio"))
+    real_open = open
+
+    def fail_midway(path, mode="r", *a, **k):
+        if mode == "wb":
+            handle = real_open(path, mode, *a, **k)
+            handle.write(b"partial")
+
+            def boom(_data):
+                raise OSError(28, "No space left on device")
+            handle.write = boom
+            return handle
+        return real_open(path, mode, *a, **k)
+
+    monkeypatch.setattr("builtins.open", fail_midway)
+    with pytest.raises(render_track.TtsError):
+        render_track.tts("voice", "hi", out)
+    assert not os.path.exists(out), "a partial segment file must not survive"
+
+
+# --------------------------------------------------------------------------
+# A dropped mid-response read is transient, not fatal
+# --------------------------------------------------------------------------
+
+def test_an_incomplete_read_is_retried(render_track, monkeypatch, tmp_path):
+    """IncompleteRead means the connection died part-way through the body, but
+    it inherits http.client.HTTPException rather than OSError, so it slips past
+    a transient set built only from OSError subclasses."""
+    import http.client
+    fake, out = drive(render_track, monkeypatch, tmp_path,
+                      http.client.IncompleteRead(b"partial"), Response(b"audio"))
+    assert render_track.tts("voice", "hi", out) is True
+    assert fake.calls == 2
+
+
+# --------------------------------------------------------------------------
+# Retry exhaustion on an HTTP status, not just a network exception
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("code", [429, 502, 503, 504])
+def test_a_persistent_retryable_status_exhausts_and_raises(
+        render_track, monkeypatch, tmp_path, code):
+    """The network-exception path already had this; RETRYABLE_STATUSES is where
+    the status set actually matters, and it was unpinned."""
+    fake, out = drive(render_track, monkeypatch, tmp_path, http_error(code))
+    with pytest.raises(render_track.TtsError) as exc:
+        render_track.tts("voice", "hi", out)
+    assert exc.value.kind == "transient"
+    assert fake.calls == tts_policy.MAX_ATTEMPTS, (
+        "a retryable status must not also consume the settings fallback")
+
+
+# --------------------------------------------------------------------------
+# A successful call is unchanged
+# --------------------------------------------------------------------------
+
+def test_a_successful_segment_is_byte_identical(render_track, monkeypatch, tmp_path):
+    """Validation must be read-only — the bytes written are the bytes received."""
+    payload = bytes(range(256)) * 8
+    fake, out = drive(render_track, monkeypatch, tmp_path, Response(payload))
+    assert render_track.tts("voice", "hi", out) is True
+    assert open(out, "rb").read() == payload
+
+
+# --------------------------------------------------------------------------
+# The standalone CLI must not grind through 152 segments during an outage
+# --------------------------------------------------------------------------
+
+def test_main_stops_after_repeated_network_failures(
+        render_track, monkeypatch, tmp_path):
+    """Each segment carries its own retry budget, so a sustained outage would
+    otherwise spend 152 x (4 attempts x 120 s + 50 s backoff) — most of a day —
+    re-establishing that the network is still down.
+
+    render_program does not need this (it raises on the first TtsError); the CLI
+    deliberately skips past one-off failures, which is what makes a bound
+    necessary here.
+    """
+    import json as _json
+    segments = [{"id": f"S{n:02d}", "text": "x", "pause_after_s": 1.0,
+                 "phase": "induction"} for n in range(1, 7)]
+    (tmp_path / "demo_tts_segments.json").write_text(
+        _json.dumps({"segments": segments}))
+
+    fake = Recorder(urllib.error.URLError("network unreachable"))
+    monkeypatch.setattr(render_track.urllib.request, "urlopen", fake)
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "k")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(render_track.sys, "argv", ["render_track.py", "demo"])
+
+    with pytest.raises(render_track.TtsError) as exc:
+        render_track.main()
+
+    assert exc.value.kind == "transient"
+    attempted = render_track.MAX_CONSECUTIVE_TRANSIENT * tts_policy.MAX_ATTEMPTS
+    assert fake.calls == attempted, (
+        f"expected to stop after {render_track.MAX_CONSECUTIVE_TRANSIENT} "
+        f"segments ({attempted} calls), not grind through all 6")
+
+
+def test_main_resets_the_failure_run_after_a_success(
+        render_track, monkeypatch, tmp_path):
+    """Occasional blips spread across a long run are not an outage.
+
+    The failures here are *interleaved* with successes on purpose. Three
+    failures that never occur back to back must not trip the bail — a counter
+    that only ever increments would stop the run on the third isolated blip,
+    which is the bug this pins.
+    """
+    import json as _json
+    segments = [{"id": f"S{n:02d}", "text": "x", "pause_after_s": 1.0,
+                 "phase": "induction"} for n in range(1, 7)]
+    (tmp_path / "demo_tts_segments.json").write_text(
+        _json.dumps({"segments": segments}))
+
+    monkeypatch.setattr(render_track, "mp3_to_float", lambda p: ([0.0], 44100))
+    monkeypatch.setattr(render_track, "treat", lambda y, sr: y)
+    written = []
+    monkeypatch.setattr(render_track.sf, "write",
+                        lambda p, *a, **k: written.append(p))
+
+    # Segments 1, 3 and 5 exhaust their retries; 2, 4 and 6 succeed. That is
+    # MAX_CONSECUTIVE_TRANSIENT failures in total, but never in a row.
+    burst = [urllib.error.URLError("blip")] * tts_policy.MAX_ATTEMPTS
+    sequence = (burst + [Response(b"audio")]) * 3
+    fake = Recorder(*sequence)
+    monkeypatch.setattr(render_track.urllib.request, "urlopen", fake)
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "k")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(render_track.sys, "argv", ["render_track.py", "demo"])
+
+    render_track.main()  # must not raise
+    assert len(written) == 3, (
+        "every segment after a blip should still render; the run of consecutive "
+        "failures is what matters, not the total")
+
+
+# --------------------------------------------------------------------------
+# A broken socket must not cost us the HTTP status
+# --------------------------------------------------------------------------
+
+def test_a_body_that_cannot_be_read_still_classifies_by_status(
+        render_track, monkeypatch, tmp_path):
+    """`e.read()` is a stream read inside an exception handler. If it raises,
+    the exception escapes uncaught and the status — the thing needed to classify
+    — goes with it, turning a clean 'bad key' into an unexplained crash."""
+    err = http_error(401)
+
+    def broken_read():
+        raise ConnectionResetError("socket already gone")
+
+    err.read = broken_read
+    fake, out = drive(render_track, monkeypatch, tmp_path, err)
+
+    with pytest.raises(render_track.TtsError) as exc:
+        render_track.tts("voice", "hi", out)
+    assert exc.value.kind == "auth", "the 401 must survive an unreadable body"
+    assert fake.calls == 1

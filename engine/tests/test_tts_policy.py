@@ -149,7 +149,13 @@ def test_backoff_grows():
 
 
 def test_backoff_is_bounded():
-    """152 segments x a runaway schedule would outlive the job's own timeout."""
+    """One segment's whole retry schedule stays inside two minutes.
+
+    The budget is per segment and a render has 152 of them, so an unbounded
+    schedule multiplies. render_program stops at the first exhausted segment and
+    render_track.main stops after MAX_CONSECUTIVE_TRANSIENT, but the per-segment
+    bound is what keeps either of those from being slow in the first place.
+    """
     assert sum(tts_policy.BACKOFF_S) <= 120
 
 
@@ -174,3 +180,31 @@ def test_every_kind_is_known():
     kinds = {classify(status=s).kind for s in
              (200, 400, 401, 403, 408, 422, 429, 500, 504, 520)}
     assert kinds <= tts_policy.KINDS
+
+
+def test_incomplete_read_is_transient():
+    """It means the connection dropped mid-body, but it inherits HTTPException
+    rather than OSError, so a transient set built from OSError misses it."""
+    import http.client
+    assert classify(exception=http.client.IncompleteRead(b"partial")).retryable
+
+
+def test_a_malformed_peer_stays_fatal():
+    """IncompleteRead's HTTPException siblings describe a peer that is not
+    speaking HTTP properly; retrying spends money on the same confusion."""
+    import http.client
+    assert not classify(exception=http.client.BadStatusLine("garbage")).retryable
+
+
+@pytest.mark.parametrize("body", [
+    "insufficient_quota", "credit limit reached", "quota reached",
+    "quota exhausted", '{"detail":{"status":"quota_exceeded"}}',
+])
+def test_quota_vocabulary_is_broad_enough(body):
+    assert classify(status=429, body=body).kind == "quota"
+
+
+def test_unmatched_wording_degrades_to_retryable_not_to_wrongly_fatal():
+    """If ElevenLabs reword the payload the check misses it and the request is
+    retried — the old behaviour — rather than a healthy render being refused."""
+    assert classify(status=429, body='{"detail":"some new wording"}').kind == "transient"
