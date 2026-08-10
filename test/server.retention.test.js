@@ -130,6 +130,52 @@ async function sweepWith(fixtures, env = {}) {
   };
 }
 
+// ── /api/health exposes whether a render is in flight (issue #4) ─────────────
+// The deploy gate polls this to decide whether restarting is safe, so it must
+// report the same thing the API uses to return 409 busy.
+
+test('health reports rendering:false when nothing is in flight', async () => {
+  const s = await boot();
+  try {
+    await s.ready();
+    const r = await get(s.port, '/api/health');
+    assert.strictEqual(r.status, 200);
+    const body = JSON.parse(r.body);
+    assert.strictEqual(body.ok, true);
+    assert.strictEqual(body.rendering, false, 'an idle server must report rendering:false');
+  } finally {
+    s.stop();
+  }
+});
+
+test('health reports rendering:true while a job is rendering', async () => {
+  const s = await boot();
+  try {
+    await s.ready();
+    // Fresh enough that the stale sweep will not fail it out from under us.
+    makeJob(s.rendersDir, 'job_inflight', { state: 'rendering', ageDays: 0 });
+    const body = JSON.parse((await get(s.port, '/api/health')).body);
+    assert.strictEqual(body.rendering, true, 'an in-flight render must be visible to the deploy gate');
+  } finally {
+    s.stop();
+  }
+});
+
+test('health still answers 200 when the renders dir cannot be read', async (t) => {
+  if (process.getuid && process.getuid() === 0) return t.skip('root ignores chmod');
+  const s = await boot();
+  try {
+    await s.ready();
+    fs.chmodSync(s.rendersDir, 0o000);
+    const r = await get(s.port, '/api/health');
+    assert.strictEqual(r.status, 200, 'health must not 500 — the deploy smoke test depends on it');
+    assert.strictEqual(JSON.parse(r.body).rendering, false, 'unknown means fail-open');
+  } finally {
+    try { fs.chmodSync(s.rendersDir, 0o700); } catch { /* already gone */ }
+    s.stop();
+  }
+});
+
 // ── The thing the issue asks for ─────────────────────────────────────────────
 
 test('reaps terminal jobs older than the window, keeps recent ones', async () => {

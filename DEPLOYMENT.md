@@ -2,7 +2,28 @@
 
 ## Architecture
 
-Push to `main` → GitHub Actions (environment `production`) → SSH (user `deploy`) → `/srv/hypnosis-studio` → `sudo systemctl restart hypnosis-studio` → smoke test on 127.0.0.1:4100.
+Push to `main` → GitHub Actions (environment `production`) → SSH (user `deploy`) → `/srv/hypnosis-studio` → **wait for no render in flight** → `sudo systemctl restart hypnosis-studio` → smoke test on 127.0.0.1:4100.
+
+### The restart gate (`deploy/wait-for-idle.sh`)
+
+`systemctl restart` kills the Python worker along with the service (it is a non-detached child in the
+service cgroup), and the restarted server then marks the orphaned job `failed`. A render takes 15–20
+minutes, so any deploy landing in that window destroys a render the customer paid for.
+
+Before restarting, the deploy polls `/api/health` — which reports `rendering: true|false` from the same
+predicate the API uses to return 409 `busy` — and:
+
+- **waits** while `rendering` is `true`, polling every 15 s;
+- **fails the deploy** if a render is still running after **25 minutes** (`command_timeout` is 30 m to
+  cover it). It refuses to restart rather than destroying the render — re-run the deploy once it finishes;
+- **proceeds** if `rendering` is `false`, if the field is absent, or if health is unreachable.
+
+That last case is deliberate **fail-open**. An absent field means an old server (the one running when
+this first shipped predates it), and unreachable means the service is already down. Waiting wrongly
+would hang every deploy for 25 minutes forever; proceeding wrongly costs at most one render, and only
+when a live render coincides with an unreadable health endpoint.
+
+Override for a one-off: `bash deploy/wait-for-idle.sh <url> <timeout-seconds> <poll-seconds>`.
 
 - **App:** Node 24 (`/usr/local/bin/node` → `/opt/node-v24.11.1`), systemd unit `hypnosis-studio.service`, env `PORT=4100`, binds loopback only
 - **Edge:** nginx vhost `/etc/nginx/sites-available/hypnosis-studio` → `proxy_pass http://127.0.0.1:4100`

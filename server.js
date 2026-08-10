@@ -115,8 +115,14 @@ function writeStatus(id, obj) {
   }
 }
 
+// Also read by /api/health, which the deploy gate polls — so it must not throw.
+// "Cannot tell" reports false, matching the gate's fail-open stance: a deploy
+// that hangs on every push forever is worse than the unlikely case of an
+// unreadable renders dir during a live render.
 function anyJobRendering() {
-  for (const d of fs.readdirSync(RENDERS, { withFileTypes: true })) {
+  let entries;
+  try { entries = fs.readdirSync(RENDERS, { withFileTypes: true }); } catch { return false; }
+  for (const d of entries) {
     if (!d.isDirectory()) continue;
     const st = readJsonSafe(path.join(RENDERS, d.name, 'status.json'));
     if (st && st.state === 'rendering') return true;
@@ -224,7 +230,15 @@ async function handleRequest(req, res) {
   const url = req.url || '/';
 
   if (url === '/api/health') {
-    return sendJson(res, 200, { ok: true, service: 'hypnosis-studio', time: new Date().toISOString() });
+    // `rendering` is what the deploy gate waits on (deploy/wait-for-idle.sh) —
+    // the same predicate the render endpoint uses to return 409 busy, so there
+    // is one source of truth rather than a second implementation in shell.
+    return sendJson(res, 200, {
+      ok: true,
+      service: 'hypnosis-studio',
+      rendering: anyJobRendering(),
+      time: new Date().toISOString(),
+    });
   }
 
   if (url === '/api/programs' && req.method === 'POST') {
