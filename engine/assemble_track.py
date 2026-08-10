@@ -94,6 +94,11 @@ voice_end = positions[-1][2]
 # paid for. A long program therefore gives up music outro rather than dying at
 # this point with the spend already gone (issue #5).
 pad, sr = sf.read(PAD_FILE, dtype=DTYPE)
+if sr != SR:
+    # Every offset in this file is computed at SR, and the bound below now reads
+    # the pad's length the same way — a pad at another rate would silently
+    # mis-measure it. Segments are checked the same way above.
+    raise ValueError(f"pad sample rate is {sr}, expected {SR}: {PAD_FILE}")
 pad_s = len(pad) / SR
 ACTUAL_S = timeline.resolve_actual_s(TOTAL_S, voice_end, pad_s)
 print(f"voice program: {voice_end/60:.2f} min; outro {(ACTUAL_S-voice_end)/60:.2f} min "
