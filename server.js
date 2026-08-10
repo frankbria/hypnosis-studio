@@ -112,8 +112,10 @@ function writeStatus(id, obj) {
   try {
     fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
     fs.renameSync(tmp, p);
+    return true;
   } catch (e) {
     console.error('status write failed for', id, e && e.message);
+    return false;
   }
 }
 
@@ -224,7 +226,7 @@ function failToStart(id, detail, error) {
 // (The sweep also *marks that job failed*, which frees the concurrency lock
 // under a live worker. That is issue #11 and is not fixed here; this map exists
 // so the money half cannot be made worse in the meantime.)
-const liveWorkers = new Set();
+const liveWorkers = new Map();  // jobId -> ChildProcess
 
 // How long a render may run before it is reclaimed regardless of liveness.
 // Liveness alone never recovers a worker wedged forever on a socket, so this is
@@ -240,7 +242,28 @@ const HARD_TIMEOUT_MS = (() => {
 })();
 
 function pidPath(id) {
-  return path.join(jobDir(id), 'worker.pid');
+  return path.join(jobDir(id), 'worker.json');
+}
+
+// A pid on its own is not an identity. Pids are reused, and the reuse case is
+// not hypothetical here: an OOM-kill reboot resets the pid namespace, so a
+// stale low-numbered worker pid from the previous boot names whatever early
+// daemon claimed it on this one. That would make a finished job read as alive
+// forever (the service answers 409 until the ceiling) and, past the ceiling,
+// send SIGTERM/SIGKILL to an innocent process.
+//
+// /proc/<pid>/stat field 22 is the process start time in clock ticks since
+// boot, which is stable for the life of a process and cannot be inherited by a
+// reused pid. `comm` may contain spaces and parentheses, hence the rindex.
+function procStartTime(pid) {
+  try {
+    const raw = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const after = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
+    const t = after[19];
+    return t === undefined ? null : t;
+  } catch {
+    return null;
+  }
 }
 
 // Recorded on disk as well as in liveWorkers, because a job can outlive the
@@ -248,21 +271,44 @@ function pidPath(id) {
 // while the child may still be running. A sidecar rather than a status.json
 // field, because the Python worker rewrites that file wholesale on every
 // transition and would erase it.
-function recordWorkerPid(id, pid) {
+function recordWorker(id, pid) {
   try {
-    fs.writeFileSync(pidPath(id), String(pid));
+    fs.writeFileSync(pidPath(id), JSON.stringify({
+      pid,
+      procStart: procStartTime(pid),
+      // When the job began, for the hard ceiling. status.json's updatedAt
+      // measures *silence*, which a chatty worker resets forever — so it cannot
+      // bound how long a render has actually been running.
+      spawnedAt: Date.now(),
+    }));
   } catch (e) {
-    console.error('could not record worker pid for', id, e && e.message);
+    console.error('could not record worker identity for', id, e && e.message);
   }
 }
 
-function readWorkerPid(id) {
+function readWorkerRecord(id) {
+  const rec = readJsonSafe(pidPath(id));
+  if (!rec || !Number.isFinite(rec.pid) || rec.pid <= 0) return null;
+  return rec;
+}
+
+// Is the recorded pid still the process we started, rather than a reused one?
+// `unknown` when we cannot tell — the callers treat that differently, because
+// the safe answer is not the same for "may I reclaim this" and "may I kill it".
+function recordedWorkerState(id) {
+  const rec = readWorkerRecord(id);
+  if (!rec) return { state: 'gone' };
+  let alive;
   try {
-    const n = parseInt(fs.readFileSync(pidPath(id), 'utf8').trim(), 10);
-    return Number.isFinite(n) && n > 0 ? n : null;
+    process.kill(rec.pid, 0);
+    alive = true;
   } catch {
-    return null;
+    alive = false;
   }
+  if (!alive) return { state: 'gone' };
+  const now = procStartTime(rec.pid);
+  if (rec.procStart === null || now === null) return { state: 'unknown', rec };
+  return now === rec.procStart ? { state: 'ours', rec } : { state: 'gone' };
 }
 
 // Is this job's worker still running?
@@ -272,15 +318,12 @@ function readWorkerPid(id) {
 // fallback for jobs orphaned across a restart. A job with no pid recorded reads
 // as dead, so it stays reclaimable rather than blocking the service forever.
 function workerAlive(id) {
-  if (liveWorkers.has(id)) return true;
-  const pid = readWorkerPid(id);
-  if (pid === null) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  if (liveWorkers.has(id)) return true;          // exact: the child is ours
+  const { state } = recordedWorkerState(id);
+  // `unknown` counts as alive. Getting this wrong in the other direction
+  // reintroduces #11 itself — declaring a running worker dead and letting a
+  // second mixer start beside it.
+  return state === 'ours' || state === 'unknown';
 }
 
 function startWorker(id, goal, voiceSet) {
@@ -316,8 +359,8 @@ function startWorker(id, goal, voiceSet) {
     return;
   }
   fs.closeSync(logFd); // child holds its own copy of the fd
-  liveWorkers.add(id);
-  if (child.pid) recordWorkerPid(id, child.pid);
+  liveWorkers.set(id, child);
+  if (child.pid) recordWorker(id, child.pid);
   child.on('error', (e) => {
     liveWorkers.delete(id);
     failToStart(id, 'worker spawn failed', e);
@@ -521,25 +564,43 @@ function sweepStaleJobs() {
     const st = readJsonSafe(p);
     if (!st || st.state !== 'rendering') continue;
 
-    const age = Date.now() - new Date(st.updatedAt || 0).getTime();
     const alive = workerAlive(d.name);
-
-    if (alive && age <= HARD_TIMEOUT_MS) continue;  // working, however quietly
+    const age = jobAgeMs(d.name, st);
 
     if (alive) {
-      // Past the ceiling and still running: the only path that kills. A wedged
-      // worker holds the concurrency lock forever otherwise.
-      killWorker(d.name);
-      writeStatus(d.name, {
+      // "I cannot tell how old this is" must never reach the kill path. Killing
+      // is the one irreversible thing here, and a missing or unparseable
+      // timestamp used to mean only "mark stale" — now it would destroy a
+      // healthy, paid-for render.
+      if (age === null || !Number.isFinite(age)) {
+        console.warn('cannot determine age for', d.name, '- leaving it alone');
+        continue;
+      }
+      if (age <= HARD_TIMEOUT_MS) continue;   // working, however quietly
+
+      // Past the ceiling and still running: the only path that kills.
+      if (!killWorker(d.name)) {
+        // Could not stop it. Marking the job failed here would free the
+        // concurrency lock and let a second mixer start beside a live one,
+        // which is precisely the bug this issue is about.
+        console.error('job', d.name, 'is past the hard timeout but its worker could not '
+          + 'be stopped - leaving it `rendering` rather than freeing the lock');
+        continue;
+      }
+      if (!writeStatus(d.name, {
         ...st, state: 'failed',
         error: 'the render ran too long and was stopped — please start a new one',
-      });
+      })) continue;   // see below
       console.warn('swept job past the hard timeout:', d.name, `(${Math.round(age / 60000)} min)`);
+    } else if (!writeStatus(d.name, {
+      ...st, state: 'failed',
+      error: 'service restarted during render — please start a new one',
+    })) {
+      // The slot is only returned once the job is genuinely recorded as failed.
+      // Releasing against a status that still says `rendering` would raise the
+      // day's cap while the service stays busy on a job nobody can finish.
+      continue;
     } else {
-      writeStatus(d.name, {
-        ...st, state: 'failed',
-        error: 'service restarted during render — please start a new one',
-      });
       console.log('swept stale job', d.name);
     }
     releaseQuota(d.name);
@@ -549,23 +610,63 @@ function sweepStaleJobs() {
 // SIGTERM, then SIGKILL if it is still there. Never throws: this runs in a timer
 // callback, where a throw is an uncaughtException rather than something the
 // request backstop can catch.
+// Stop a worker. Returns false if we could not — which the caller must respect,
+// because marking the job `failed` frees the concurrency lock and a second
+// render would then start beside a worker that is still going: #11 all over
+// again.
+//
+// Never throws: this runs in a timer callback, where a throw is an
+// uncaughtException rather than something the request backstop can catch.
 function killWorker(id) {
-  const pid = readWorkerPid(id);
-  if (pid === null) return;
+  const child = liveWorkers.get(id);
+  if (child) {
+    // Ours, in this process. No pid lookup and so no reuse risk at all.
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      return false;
+    }
+    setTimeout(() => {
+      try { if (!child.killed) child.kill('SIGKILL'); } catch { /* already gone */ }
+    }, 1000).unref();
+    return true;
+  }
+
+  const { state, rec } = recordedWorkerState(id);
+  if (state === 'gone') return true;      // nothing to stop
+  if (state !== 'ours') {
+    // Cannot prove this pid is still our worker rather than a process that
+    // inherited the number. Signalling it could kill something unrelated.
+    console.error('refusing to signal pid for', id, '- cannot confirm it is our worker');
+    return false;
+  }
+  const { pid, procStart } = rec;
   try {
     process.kill(pid, 'SIGTERM');
   } catch {
-    return; // already gone
+    return true; // exited between the check and the signal
   }
   setTimeout(() => {
+    // Re-verify before escalating: the worker can exit inside this second and
+    // the pid be reused, and SIGKILL against the new owner is exactly the harm
+    // the identity check exists to prevent.
+    if (procStartTime(pid) !== procStart) return;
     try {
-      process.kill(pid, 0);
       process.kill(pid, 'SIGKILL');
       console.warn('worker', pid, 'ignored SIGTERM; killed');
-    } catch {
-      // exited on SIGTERM, which is the normal case
-    }
+    } catch { /* exited on SIGTERM, the normal case */ }
   }, 1000).unref();
+  return true;
+}
+
+// How long this job has actually been running. Falls back to time-since-last-
+// status-write only when there is no spawn record, e.g. a job from before this
+// change. Returns null when it cannot be determined at all.
+function jobAgeMs(id, st) {
+  const rec = readWorkerRecord(id);
+  if (rec && Number.isFinite(rec.spawnedAt)) return Date.now() - rec.spawnedAt;
+  const t = new Date(st.updatedAt || 0).getTime();
+  return Number.isFinite(t) && t > 0 ? Date.now() - t : null;
 }
 // Reclaim finished jobs once they pass the retention window. This DELETES
 // CUSTOMER PURCHASES, so it only removes what it can positively identify as an
