@@ -72,12 +72,20 @@ function readJsonSafe(p) {
   }
 }
 
+// Most callers run in async callbacks (worker error/exit handlers, the sweep
+// timer) where a throw is an uncaughtException, not a rejection the request
+// backstop can catch. A failed status write must never take the process down —
+// the job is already in trouble; losing the server as well helps nobody.
 function writeStatus(id, obj) {
   obj.updatedAt = new Date().toISOString();
   const p = path.join(jobDir(id), 'status.json');
   const tmp = p + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
-  fs.renameSync(tmp, p);
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
+    fs.renameSync(tmp, p);
+  } catch (e) {
+    console.error('status write failed for', id, e && e.message);
+  }
 }
 
 function anyJobRendering() {
@@ -255,6 +263,7 @@ async function handleRequest(req, res) {
     // Headers are already sent, so a mid-stream failure can only be abandoned.
     const stream = fs.createReadStream(filePath);
     stream.on('error', () => res.destroy());
+    res.on('error', () => stream.destroy()); // client aborted mid-download
     return stream.pipe(res);
   }
 

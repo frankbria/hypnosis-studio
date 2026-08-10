@@ -33,10 +33,10 @@ function freePort() {
 
 // Raw http.request so the literal path reaches the server unnormalized —
 // fetch()/URL would re-encode or reject some of these before they hit the wire.
-function req(rawPath, method = 'GET') {
+function req(rawPath, method = 'GET', port = PORT) {
   return new Promise((resolve, reject) => {
     const r = http.request(
-      { host: '127.0.0.1', port: PORT, path: rawPath, method, timeout: 5000 },
+      { host: '127.0.0.1', port, path: rawPath, method, timeout: 5000 },
       (res) => {
         let body = '';
         res.on('data', (c) => (body += c));
@@ -159,6 +159,57 @@ test('an unexpected throw yields 500 and the server survives', async () => {
     path.join(dir, 'manifest.json'),
     JSON.stringify({ tracks: [{ n: 1, mp3: 'gone.mp3', wav: 'gone.wav' }] }),
   );
+});
+
+// ── A failing status write must not exit the process ─────────────────────────
+// writeStatus() is called from the worker's error/exit handlers and from the
+// boot/interval sweep — all async callbacks OUTSIDE the request promise chain,
+// where a throw is an uncaughtException the request backstop never sees. A
+// read-only job directory reproduces that deterministically: the boot sweep
+// finds a stale "rendering" job and cannot write the failed status.
+test('a failing status write does not kill the process', { skip: process.getuid && process.getuid() === 0 ? 'root ignores chmod' : false }, async () => {
+  const id = 'job_test_readonly';
+  const dir = path.join(RENDERS, id);
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'status.json'),
+    JSON.stringify({
+      jobId: id,
+      state: 'rendering',
+      updatedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(), // stale
+    }),
+  );
+  fs.chmodSync(dir, 0o500); // readable, not writable
+
+  const port = await freePort();
+  const proc = spawn(process.execPath, ['server.js'], {
+    cwd: ROOT,
+    env: { ...process.env, PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    const deadline = Date.now() + 10000;
+    for (;;) {
+      if (proc.exitCode !== null) {
+        assert.fail(`server exited (${proc.exitCode}) because a status write failed`);
+      }
+      try {
+        const r = await req('/api/health', 'GET', port);
+        if (r.status === 200) break;
+      } catch {
+        /* not listening yet */
+      }
+      if (Date.now() > deadline) assert.fail('server did not start within 10s');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.strictEqual(proc.exitCode, null, 'server must survive an unwritable job dir');
+  } finally {
+    if (proc.exitCode === null) proc.kill('SIGKILL');
+    fs.chmodSync(dir, 0o700);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── Paths that were already handled correctly — guard against regressions ────
