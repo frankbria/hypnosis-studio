@@ -163,8 +163,10 @@ function writeQuota(q) {
   try {
     fs.writeFileSync(tmp, JSON.stringify(q));
     fs.renameSync(tmp, p);
+    return true;
   } catch (e) {
     console.error('quota write failed:', e && e.message);
+    return false;
   }
 }
 
@@ -187,13 +189,40 @@ function releaseQuota(id) {
   if (!q.jobs.includes(id)) return false;
   q.jobs = q.jobs.filter((j) => j !== id);
   q.count = Math.max(0, q.count - 1);
-  writeQuota(q);
+  // Report what actually landed. A swallowed write would otherwise log a
+  // release that did not happen, and the slot stays spent for the day with the
+  // log insisting otherwise.
+  if (!writeQuota(q)) {
+    console.error('quota slot for', id, 'could not be released (write failed)');
+    return false;
+  }
   console.log('released quota slot for failed job', id);
   return true;
 }
 
+// Every way a job can fail before it is even running writes the same status and
+// returns the same slot. One place, so the two callers cannot drift.
+function failToStart(id, detail, error) {
+  writeStatus(id, {
+    jobId: id, state: 'failed', stage: null, progress: 0,
+    detail, error: String(error),
+  });
+  releaseQuota(id);
+}
+
 function startWorker(id, goal, voiceSet) {
-  const logFd = fs.openSync(path.join(jobDir(id), 'worker.log'), 'a');
+  // The whole body is guarded, not just the spawn. bumpQuota() has already run
+  // by the time we get here, so anything that throws on the way to a live
+  // child leaks a slot for the rest of the day — and opening worker.log can
+  // genuinely throw, e.g. if the retention sweep removes the directory in
+  // between. That is the same leak this issue exists to close.
+  let logFd;
+  try {
+    logFd = fs.openSync(path.join(jobDir(id), 'worker.log'), 'a');
+  } catch (e) {
+    failToStart(id, 'could not open worker log', e);
+    return;
+  }
   let child;
   try {
     child = spawn(ENGINE_PY, [
@@ -210,20 +239,12 @@ function startWorker(id, goal, voiceSet) {
     });
   } catch (e) {
     fs.closeSync(logFd);
-    writeStatus(id, {
-      jobId: id, state: 'failed', stage: null, progress: 0,
-      detail: 'worker spawn failed', error: String(e),
-    });
-    releaseQuota(id);
+    failToStart(id, 'worker spawn failed', e);
     return;
   }
   fs.closeSync(logFd); // child holds its own copy of the fd
   child.on('error', (e) => {
-    writeStatus(id, {
-      jobId: id, state: 'failed', stage: null, progress: 0,
-      detail: 'worker spawn failed', error: String(e),
-    });
-    releaseQuota(id);
+    failToStart(id, 'worker spawn failed', e);
   });
   child.on('exit', () => {
     const st = readJsonSafe(path.join(jobDir(id), 'status.json'));

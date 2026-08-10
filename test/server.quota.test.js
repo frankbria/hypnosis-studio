@@ -117,6 +117,45 @@ async function waitForQuota(rendersDir, predicate, ms = 4000) {
 
 const START = { accessCode: 'testcode', goal: 'river', voiceSet: 'male' };
 
+/** An engine that writes a `ready` status and exits 0. */
+function makeSucceedingEngine(label) {
+  const p = path.join(os.tmpdir(), `fake-engine-${label}-${process.pid}-${Date.now()}.sh`);
+  fs.writeFileSync(p, `#!/bin/sh
+outdir=""
+while [ $# -gt 0 ]; do
+  case "$1" in --outdir) outdir="$2"; shift 2;; *) shift;; esac
+done
+printf '{"jobId":"x","state":"ready","stage":"mastering-qa","progress":1,"detail":"done","updatedAt":"%s"}' \\
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$outdir/status.json"
+exit 0
+`, { mode: 0o755 });
+  return p;
+}
+
+/**
+ * Wait until no job is left `rendering`.
+ *
+ * The server refuses a second job while one is in flight, so sleeping a fixed
+ * interval between requests makes a test that passes on a quiet machine and
+ * returns 409 on a loaded one. Poll the thing the server actually gates on.
+ */
+async function waitForIdle(rendersDir, ms = 5000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    const busy = fs.readdirSync(rendersDir)
+      .filter((n) => n.startsWith('job_'))
+      .some((n) => {
+        try {
+          const st = JSON.parse(fs.readFileSync(path.join(rendersDir, n, 'status.json'), 'utf8'));
+          return st.state === 'rendering';
+        } catch { return false; }
+      });
+    if (!busy) return true;
+    await sleep(50);
+  }
+  return false;
+}
+
 // --------------------------------------------------------------------------
 // The bug
 // --------------------------------------------------------------------------
@@ -144,6 +183,7 @@ test('a broken engine cannot burn the whole day', async () => {
       const res = await request(srv.port, 'POST', '/api/programs', START);
       assert.strictEqual(res.status, 202, `request ${i + 1} was refused: ${res.body}`);
       await waitForQuota(srv.rendersDir, (v) => v && v.count === 0);
+      assert.ok(await waitForIdle(srv.rendersDir), 'a render never left `rendering`');
     }
     const q = readQuotaFile(srv.rendersDir);
     assert.strictEqual(q.count, 0);
@@ -156,11 +196,14 @@ test('a broken engine cannot burn the whole day', async () => {
 // Idempotency — the exit handler and the stale sweep both declare jobs failed
 // --------------------------------------------------------------------------
 
-test('a slot is never refunded twice', async () => {
+test('two failed renders each give their slot back', async () => {
   const srv = await startServer({ maxJobsPerDay: '6' });
   try {
-    // Two jobs fail. If either refund double-counted, the total would go
-    // negative — which would silently hand out extra capacity every day.
+    // NOTE: this does not pin idempotency, and must not be read as if it did.
+    // With every job failing the count is already 0, so a stray second
+    // decrement is clamped away and invisible. The guard is pinned by
+    // "a double refund cannot hand back a slot another job is holding".
+    // What this does check is that two failures in a row both refund.
     await request(srv.port, 'POST', '/api/programs', START);
     await waitForQuota(srv.rendersDir, (v) => v && v.count === 0);
     await request(srv.port, 'POST', '/api/programs', START);
@@ -168,7 +211,6 @@ test('a slot is never refunded twice', async () => {
 
     const q = readQuotaFile(srv.rendersDir);
     assert.strictEqual(q.count, 0, 'count went wrong after two failures');
-    assert.ok(q.count >= 0, 'the counter must never go negative');
     assert.deepStrictEqual(q.jobs, [], 'the ledger should be empty once both refunds land');
   } finally {
     stop(srv);
@@ -206,21 +248,12 @@ test('the stale sweep refunding a job the exit handler already refunded is a no-
 
 test('a successful render consumes exactly one slot', async () => {
   // An engine that writes a `ready` status and exits 0.
-  const fake = path.join(os.tmpdir(), `fake-engine-${Date.now()}.sh`);
-  fs.writeFileSync(fake, `#!/bin/sh
-outdir=""
-while [ $# -gt 0 ]; do
-  case "$1" in --outdir) outdir="$2"; shift 2;; *) shift;; esac
-done
-printf '{"jobId":"x","state":"ready","stage":"mastering-qa","progress":1,"detail":"done","updatedAt":"%s"}' \\
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$outdir/status.json"
-exit 0
-`, { mode: 0o755 });
+  const fake = makeSucceedingEngine('ok');
 
   const srv = await startServer({ enginePy: fake });
   try {
     await request(srv.port, 'POST', '/api/programs', START);
-    await sleep(1500);
+    assert.ok(await waitForIdle(srv.rendersDir), 'the render never finished');
     const q = readQuotaFile(srv.rendersDir);
     assert.strictEqual(q.count, 1, 'a completed render must still cost its slot');
     assert.strictEqual(q.jobs.length, 1, 'the slot should still be held');
@@ -235,23 +268,14 @@ exit 0
 // --------------------------------------------------------------------------
 
 test('the daily cap still refuses once the slots are genuinely held', async () => {
-  const fake = path.join(os.tmpdir(), `fake-ok-${Date.now()}.sh`);
-  fs.writeFileSync(fake, `#!/bin/sh
-outdir=""
-while [ $# -gt 0 ]; do
-  case "$1" in --outdir) outdir="$2"; shift 2;; *) shift;; esac
-done
-printf '{"jobId":"x","state":"ready","stage":"mastering-qa","progress":1,"detail":"done","updatedAt":"%s"}' \\
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$outdir/status.json"
-exit 0
-`, { mode: 0o755 });
+  const fake = makeSucceedingEngine('cap');
 
   const srv = await startServer({ enginePy: fake, maxJobsPerDay: '2' });
   try {
     for (let i = 0; i < 2; i += 1) {
       const res = await request(srv.port, 'POST', '/api/programs', START);
-      assert.strictEqual(res.status, 202);
-      await sleep(700);
+      assert.strictEqual(res.status, 202, `request ${i + 1} was refused: ${res.body}`);
+      assert.ok(await waitForIdle(srv.rendersDir), 'a render never finished');
     }
     const res = await request(srv.port, 'POST', '/api/programs', START);
     assert.strictEqual(res.status, 429, 'the cap should still bind on successful renders');
@@ -420,11 +444,79 @@ test('a quota file whose count and ledger disagree cannot go negative', async ()
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   try {
-    await sleep(1500);
-    const q = JSON.parse(fs.readFileSync(path.join(rendersDir, '.quota.json'), 'utf8'));
+    // Assert the release actually happened first. Seeding count at 0 means
+    // `count >= 0` is true before anything runs, so checking it alone passes
+    // whether or not the clamp exists — or whether the sweep ever fired.
+    const deadline = Date.now() + 4000;
+    let q = null;
+    while (Date.now() < deadline) {
+      q = JSON.parse(fs.readFileSync(path.join(rendersDir, '.quota.json'), 'utf8'));
+      if (q.jobs.length === 0) break;
+      await sleep(50);
+    }
+    assert.deepStrictEqual(q.jobs, [], 'the release never ran; the clamp is untested');
     assert.ok(q.count >= 0, `count went negative: ${q.count}`);
   } finally {
     try { proc.kill('SIGKILL'); } catch { /* already gone */ }
     try { fs.rmSync(rendersDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
+test('a job that cannot even open its log gives the slot back', async () => {
+  // bumpQuota() runs before startWorker(), so anything that throws on the way
+  // to a live child leaks a slot for the rest of the day. Opening worker.log is
+  // the one such step that is not obviously fallible — but it is: the retention
+  // sweep can remove the directory underneath it, and the directory may not be
+  // writable.
+  //
+  // Forced deterministically with a umask of 0222: mkdirSync then produces a
+  // mode-555 job directory, so creating worker.log inside it genuinely fails.
+  // That is a real condition rather than a stubbed throw.
+  //
+  // 0222 rather than something broader on purpose — a umask that also stripped
+  // read permission would make .quota.json itself unreadable and break the
+  // mechanism under test instead of the step under test. mkdirSync runs *before*
+  // bumpQuota, so it cannot leak; this is specifically the gap between taking
+  // the slot and having a running worker.
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    return; // root ignores the permission bits, so the condition cannot be made
+  }
+
+  const rendersDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quota-nolog-'));
+  const port = await freePort();
+  const proc = spawn(process.execPath,
+    ['-e', 'process.umask(0o222); require(process.argv[1]);', path.join(ROOT, 'server.js')], {
+      cwd: ROOT,
+      env: {
+        ...process.env, PORT: String(port), RENDERS_DIR: rendersDir,
+        ACCESS_CODE: 'testcode', MAX_JOBS_PER_DAY: '6', ENGINE_PY: '/bin/false',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  try {
+    await sleep(1200);
+    await request(port, 'POST', '/api/programs', START);
+
+    const deadline = Date.now() + 4000;
+    let q = null;
+    while (Date.now() < deadline) {
+      try {
+        q = JSON.parse(fs.readFileSync(path.join(rendersDir, '.quota.json'), 'utf8'));
+      } catch { q = null; }
+      if (q && q.count === 0) break;
+      await sleep(50);
+    }
+    assert.ok(q, 'no quota file was written at all');
+    assert.strictEqual(q.count, 0,
+      'the slot was taken and never returned when the worker could not start');
+    assert.deepStrictEqual(q.jobs, []);
+  } finally {
+    try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+    try {
+      for (const n of fs.readdirSync(rendersDir)) {
+        try { fs.chmodSync(path.join(rendersDir, n), 0o755); } catch { /* not a dir */ }
+      }
+      fs.rmSync(rendersDir, { recursive: true, force: true });
+    } catch { /* best effort */ }
   }
 });
