@@ -74,6 +74,28 @@ sleep ${seconds}
   return p;
 }
 
+/**
+ * A worker that IGNORES SIGTERM, so the SIGKILL escalation is actually reached.
+ *
+ * Every other engine here is `sleep`, which honours SIGTERM — which is exactly
+ * why a dead-code escalation survived the suite.
+ */
+function makeStubbornEngine(seconds = 60) {
+  const p = path.join(os.tmpdir(), `stubborn-engine-${process.pid}-${Date.now()}.sh`);
+  fs.writeFileSync(p, `#!/bin/sh
+trap '' TERM
+outdir=""
+while [ $# -gt 0 ]; do
+  case "$1" in --outdir) outdir="$2"; shift 2;; *) shift;; esac
+done
+old=$(date -u -d '-30 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-30M +%Y-%m-%dT%H:%M:%SZ)
+printf '{"jobId":"x","state":"rendering","stage":"entrainment-bed","progress":0.8,"detail":"mixing","updatedAt":"%s"}' "$old" > "$outdir/status.json"
+echo $$ > "$outdir/test-worker.pid"
+while true; do sleep 1; done
+`, { mode: 0o755 });
+  return p;
+}
+
 async function startServer({ enginePy, rendersDir, sweepMs = '300', env = {} } = {}) {
   const dir = rendersDir || fs.mkdtempSync(path.join(os.tmpdir(), 'sweep-'));
   const port = await freePort();
@@ -479,5 +501,46 @@ test('an unreadable timestamp never reaches the kill path', async () => {
       'a job with an unreadable timestamp was swept, and its worker signalled');
   } finally {
     stop(srv);
+  }
+});
+
+test('a worker that ignores SIGTERM is still killed', async () => {
+  // The escalation exists for exactly this. It was dead code: it gated on
+  // `child.killed`, which means "a signal was delivered" and is true the instant
+  // kill() returns — so SIGKILL never fired for a job this server started.
+  //
+  // Invisible to every other test here, because they all use `sleep`, which
+  // honours SIGTERM and dies on the first signal.
+  const engine = makeStubbornEngine(60);
+  const srv = await startServer({ enginePy: engine, env: { HARD_TIMEOUT_MS: '1200' } });
+  let workerPid = null;
+  try {
+    await request(srv.port, 'POST', '/api/programs', START);
+    const [id] = jobs(srv.rendersDir);
+
+    const found = Date.now() + 4000;
+    while (Date.now() < found) {
+      try {
+        workerPid = parseInt(fs.readFileSync(
+          path.join(srv.rendersDir, id, 'test-worker.pid'), 'utf8').trim(), 10);
+        break;
+      } catch { await sleep(50); }
+    }
+    assert.ok(workerPid, 'the stubborn worker never started');
+
+    // Ceiling, then SIGTERM (ignored), then a second later SIGKILL.
+    const deadline = Date.now() + 10000;
+    let alive = true;
+    while (Date.now() < deadline) {
+      try { process.kill(workerPid, 0); } catch { alive = false; break; }
+      await sleep(100);
+    }
+    assert.strictEqual(alive, false,
+      'a worker that ignores SIGTERM survived the hard ceiling — the lock is ' +
+      'freed while it keeps mixing, which is the OOM #11 is about');
+  } finally {
+    if (workerPid) { try { process.kill(workerPid, 'SIGKILL'); } catch { /* gone */ } }
+    stop(srv);
+    try { fs.unlinkSync(engine); } catch { /* best effort */ }
   }
 });

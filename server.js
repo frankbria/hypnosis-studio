@@ -627,7 +627,16 @@ function killWorker(id) {
       return false;
     }
     setTimeout(() => {
-      try { if (!child.killed) child.kill('SIGKILL'); } catch { /* already gone */ }
+      // `child.killed` means "a signal was delivered", not "the process died" —
+      // it is true the instant kill() returns, so gating on it made this
+      // escalation dead code and a SIGTERM-resistant worker survived the only
+      // path that is supposed to be able to stop it. exitCode/signalCode stay
+      // null until the child actually exits, which is the question being asked.
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      try {
+        child.kill('SIGKILL');
+        console.warn('worker for', id, 'ignored SIGTERM; killed');
+      } catch { /* exited in between */ }
     }, 1000).unref();
     return true;
   }
