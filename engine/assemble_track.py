@@ -175,12 +175,15 @@ print(f"carrier auto-scan: {CARRIER:.0f} Hz (band {BAND[0]:.0f}-{BAND[1]:.0f})")
 
 sos_notch = butter(2, [(CARRIER - 10) / (SR / 2), (CARRIER + 10) / (SR / 2)],
                    btype="bandstop", output="sos")
-# The pad is not filtered here: pad_rms was taken before the flattening loop and
-# welch() ran above, so nothing downstream reads it again — `del pad` on the next
-# line was its only remaining reference. sosfiltfilt promotes a float32 input to
-# float64 against these coefficients, so that discarded pass cost a full-length
-# float64 result plus the filter's internal temporaries, held live while the same
-# storm ran for `mix` (issue #12).
+# There used to be a `pad = sosfiltfilt(sos_notch, pad)` here whose result was
+# never read: pad_rms was taken before the flattening loop and welch() ran above,
+# so `del pad` below was the only thing that touched it again. sosfiltfilt
+# promotes a float32 input to float64 against these coefficients, so that
+# discarded pass cost a full-length float64 array plus the filter's internal
+# temporaries, held live while the same storm ran for `mix` (issue #12).
+#
+# `del pad` now releases the flattened pad rather than that filtered copy. Either
+# way the array goes; dropping the statement would pin it across bed synthesis.
 #
 # The .astype restores DTYPE for the same reason every other full-rate operation
 # in this file does. Without it HYPNO_DTYPE=float32 — added specifically to halve

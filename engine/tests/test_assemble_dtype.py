@@ -52,30 +52,44 @@ def test_the_pad_is_not_filtered_into_the_void(source):
 def test_every_full_rate_assignment_restores_the_dtype(source):
     """A guard for the next one added, not just the one that was wrong.
 
-    Only whole-array operations matter — the chunked writes into `pad[c0:c1]`
-    and friends already carry the cast, and this catches a new full-rate
-    rebinding of `mix` or `pad` that forgets it.
+    Any rebinding of a full-rate array whose right-hand side calls something has
+    to say what dtype it lands in — a call may promote, and one that does
+    silently reverts everything downstream. Reading a file or allocating
+    establishes the dtype instead of restoring it, so those are exempt.
+
+    Matching on "the RHS contains a call" rather than "the RHS starts with a
+    call", because `mix = (sosfiltfilt(...))` and `mix = f(x) + voice` are the
+    same hazard written differently.
     """
     offenders = []
     for ln in source.splitlines():
-        m = re.match(r"^\s*(mix|pad|voice)\s*=\s*(\w+)\(", ln)
+        m = re.match(r"^\s*(mix|pad|voice)\s*=\s*(.+)$", ln)
         if not m:
             continue
-        name, fn = m.groups()
-        # Reading a file or allocating establishes the dtype rather than
-        # needing it restored.
-        if fn in ("sf", "np", "float", "int"):
+        name, rhs = m.group(1), m.group(2)
+        # A slice of the same array preserves dtype, even though the index
+        # expression may itself contain a call: `pad = pad[: int(x * SR)]`.
+        if re.match(rf"\s*{name}\s*\[", rhs):
             continue
-        if "dtype=" in ln or "astype(DTYPE" in ln or "zeros_like" in ln:
+        if not re.search(r"\w\(", rhs):
+            continue                      # no call: no promotion to undo
+        if re.match(r"\s*(sf\.read|np\.zeros|np\.zeros_like)", rhs):
+            continue                      # establishes the dtype
+        if "dtype=" in ln or "astype(DTYPE" in ln:
             continue
         offenders.append(ln.strip())
     assert not offenders, (
-        "these rebind a full-rate array without restoring DTYPE, which silently "
-        f"reverts everything downstream to float64: {offenders}")
+        "these rebind a full-rate array through a call without pinning DTYPE, "
+        f"which silently reverts everything downstream to float64: {offenders}")
 
 
-def test_the_chunked_operations_still_carry_the_cast(source):
-    """The ones that were already right — a regression fence, since they are the
-    pattern the failing line was inconsistent with."""
+def test_the_dtype_restoration_count_does_not_regress(source):
+    """A blunt tripwire on the pattern being eroded.
+
+    Deliberately not called a per-operation fence: it counts *all* occurrences,
+    so swapping one cast for another elsewhere leaves the total unchanged and
+    this stays green. The floor is the current count, so any net removal trips
+    it — which is the most this assertion can honestly claim.
+    """
     casts = source.count("astype(DTYPE, copy=False)")
-    assert casts >= 5, f"only {casts} DTYPE restorations left; several have gone missing"
+    assert casts >= 6, f"only {casts} DTYPE restorations left; the pattern is eroding"
