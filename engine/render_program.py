@@ -364,9 +364,19 @@ def run(job_id: str, goal: str, voice_set: str, outdir: str,
                 continue
             job.update(stage, progress, detail)
             raw_path = os.path.join(raw_dir, f"{seg['id']}.mp3")
-            if not render_track.tts(vid, tag + seg["text"], raw_path):
+            try:
+                rendered = render_track.tts(vid, tag + seg["text"], raw_path)
+            except render_track.TtsError as e:
+                # Carry the classification into status.json: "your key was
+                # rejected" and "the network dropped four times" used to be the
+                # same message, and they need different responses.
                 raise RuntimeError(
-                    f"TTS failed for segment {seg['id']} (track {t['n']})")
+                    f"TTS failed for segment {seg['id']} (track {t['n']}) "
+                    f"[{e.kind}]: {e.detail}") from e
+            if not rendered:
+                raise RuntimeError(
+                    f"TTS failed for segment {seg['id']} (track {t['n']}) "
+                    f"[unsupported_settings]: both voice-setting variants were rejected")
             y, sr = render_track.mp3_to_float(raw_path)
             sf.write(out_path, render_track.treat(y, sr), sr, subtype="PCM_16")
             time.sleep(0.5)

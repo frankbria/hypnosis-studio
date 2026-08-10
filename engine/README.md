@@ -18,6 +18,35 @@ Requires `.env.local` in the working directory:
 ELEVENLABS_API_KEY=sk_...
 ```
 
+### When a TTS call fails
+
+`tts()` classifies every failure (`tts_policy.py`) and the classification reaches
+`status.json`, so a failed job says *why*:
+
+| kind | Meaning | Behaviour |
+|---|---|---|
+| `transient` | network drop, timeout, 408/429/5xx, Cloudflare 520-524, `IncompleteRead` | retried on a 5/15/30 s backoff, 4 attempts |
+| `auth` | 401/403 — the key was rejected | stops immediately, **1 request** |
+| `quota` | the account is out of credits | stops immediately, **1 request** |
+| `unsupported_settings` | 422 — the API rejected `speed` | retried once with the reduced settings |
+| `fatal` | anything else, including a local write failure | stops immediately |
+
+Two rules worth knowing, because both cost money when broken:
+
+- **Only the network call is classified.** The file write sits outside it, so a
+  full disk raises `fatal` rather than being retried — retrying would buy the
+  same audio again and fail to save it again.
+- **Quota is read from the response body, not the status code.** ElevenLabs
+  report exhaustion inside the JSON detail and under more than one status, so a
+  quota failure would otherwise look like a retryable 429 and burn the whole
+  backoff waiting for credits only a purchase can supply.
+
+The standalone CLI (`render_track.py <track>`) skips past a single failed
+segment but stops after `MAX_CONSECUTIVE_FAILURES` in a row — a sustained
+outage would otherwise spend 152 × (4 × 120 s + 50 s) proving the network is
+still down, and a full disk would buy all 152 segments and save none.
+`render_program.py` does not need this: it fails the job on the first error.
+
 ## Stage 2 — `assemble_track.py <track> "<Title>" <pad.wav> <kw1,kw2> [total_s]`
 
 - Flattens pad energy (per-second RMS correction, clamped ±8 dB)
