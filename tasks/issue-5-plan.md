@@ -87,13 +87,39 @@ test for the breakpoint guard.
 
 ## Decisions taken autonomously
 
-1. **`DEFAULT_CHARS_PER_SEC = 11.0`, env-overridable.** Derived from the ~12.75
-   chars/s implied by this issue's own headroom figure, with ~15% conservative
-   margin (slower estimate ⇒ longer predicted program ⇒ fails safe). Left as a
-   knob because real TTS rate drifts with model, voice and prompt tag, and there
-   is no committed render data to calibrate against — pads and renders are
-   gitignored. Tune the constant when real manifests exist.
+1. **`DEFAULT_CHARS_PER_SEC = 12.0`, env-overridable** (`HYPNO_CHARS_PER_SEC`).
+   Derived from the ~12.75 chars/s implied by this issue's own headroom figure.
+   Left as a knob because real TTS rate drifts with model, voice and prompt tag,
+   and there is no committed render data to calibrate against — pads and renders
+   are gitignored. Tune it when real manifests exist.
+
+   *Revised during review.* The first version used 11.0 on "conservative fails
+   safe" reasoning. That was the wrong trade: this projection only **warns**
+   (`resolve_actual_s` is the actual protection, and it runs at render time with
+   the real durations), and at 11.0 the gate flagged river tracks 1 and 3 as
+   short-outro when at the true rate both get the full 75 s. A warning that fires
+   on healthy content is one operators learn to skip past. 12.0 keeps ~6 % margin
+   under the measured rate and the conservatism test still anchors it.
 2. **New module rather than extending `job_files.py`** — see above.
 3. **Monotonic breakpoint guard is in scope** even though the issue does not name
    it: the clamp is what makes the non-monotonic case reachable, so shipping the
    clamp without it would trade a loud failure for silent audio corruption.
+4. **The pad sample-rate check is unconditional, not gated on `strict`.** Raised
+   by review. `strict` gates the *projection*, which is deliberately conservative
+   and may be wrong in the safe direction — hence warn-only on a real render. A
+   wrong sample rate is not a projection: the assembler refuses that pad outright,
+   so letting it past the pre-spend gate buys a whole track of TTS for a render
+   that cannot succeed.
+5. **`SR` moved into `timeline.py`.** The pre-spend gate and the assembler both
+   need it, and if they disagreed the gate would validate against a rate the
+   assembler does not use.
+
+## Follow-ups deliberately not done here
+
+- The segment-level QA outro window narrows to nothing on very tight tails, so
+  the most at-risk tracks get the least bed-pulse QA. Correct behaviour (the old
+  code measured voiced audio and called it "outro, no voice"), but it deserves
+  its own issue.
+- This repo has **no CI test job**: `deploy.yml` only runs on push to `main` and
+  runs no tests; `glm-review.yml` is review-only. The 61 engine tests and 32 JS
+  tests therefore run locally only. Worth its own infra issue.
