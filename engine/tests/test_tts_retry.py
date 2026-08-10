@@ -58,7 +58,11 @@ def render_track(monkeypatch, tmp_path):
 
     if _stub_if_missing("numpy", ndarray=object):
         stubbed.append("numpy")
-    for name in ("soundfile", "av", "scipy"):
+    # soundfile needs `write`: main() saves the treated segment through it, and
+    # monkeypatch.setattr refuses to patch an attribute that does not exist.
+    if _stub_if_missing("soundfile", write=lambda *a, **k: None):
+        stubbed.append("soundfile")
+    for name in ("av", "scipy"):
         if _stub_if_missing(name):
             stubbed.append(name)
     if _stub_if_missing("scipy.signal",
