@@ -28,7 +28,7 @@ jobs:
           host: ${{ secrets.host }}
           username: ${{ secrets.user }}
           key: ${{ secrets.ssh_key }}
-          source: "server.js,package.json,engine/**,web/dist/**"
+          source: "server.js,package.json,engine/**,web/dist/**,deploy/**"
           target: "/srv/hypnosis-studio/"
 
       - name: Restart service and smoke test
@@ -37,7 +37,13 @@ jobs:
           host: ${{ secrets.host }}
           username: ${{ secrets.user }}
           key: ${{ secrets.ssh_key }}
+          command_timeout: 30m
           script: |
+            set -e
+            # Never restart mid-render: systemd kills the worker with the
+            # service, destroying a render the customer paid for. Fails the
+            # deploy rather than restarting if one is still running (#4).
+            bash /srv/hypnosis-studio/deploy/wait-for-idle.sh http://127.0.0.1:4100/api/health
             sudo /bin/systemctl restart hypnosis-studio
             sleep 2
             sudo /bin/systemctl is-active hypnosis-studio
