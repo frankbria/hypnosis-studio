@@ -146,6 +146,31 @@ MIN_RESPONSE_FRACTION = 0.5
 ABSOLUTE_MIN_BYTES = 2000
 
 
+# Types that positively identify a non-audio body. Deliberately a small, closed
+# set: `text/plain` is NOT in it, because that is what http.client reports for a
+# *missing* Content-Type, and a header-stripping proxy must not cost us a
+# segment that has already been bought.
+_DEFINITELY_NOT_AUDIO = frozenset({
+    "text/html", "application/json", "application/xml", "text/xml",
+    "application/problem+json",
+})
+
+# How an HTML page, a JSON error or an XML fault starts. MP3 frames start with
+# a sync word (0xFF) or an "ID3" tag, so none of these can begin a real one.
+_TEXTUAL_PREFIXES = (b"<", b"{", b"[")
+
+
+def _looks_textual(payload):
+    """True when the body is obviously markup or JSON rather than audio.
+
+    Sniffing the body rather than trusting the header, because the header is
+    whatever the last proxy decided and the body is what ElevenLabs actually
+    sent. Only positive evidence of text counts — an unrecognised binary blob is
+    left to the size check, since falsely rejecting audio re-bills a segment.
+    """
+    return (payload or b"").lstrip()[:1] in _TEXTUAL_PREFIXES
+
+
 def chars_per_sec_for_sizing():
     """Speaking rate used to predict a response's size.
 
@@ -168,11 +193,20 @@ def response_problem(payload, text, content_type=None):
     if size == 0:
         return "the response body was empty — no audio was returned"
 
-    # An HTML error page behind a 200 is a real failure mode at a CDN edge.
-    # Absent or generic types are tolerated: not every proxy sets one, and size
-    # still governs.
-    if content_type and not (content_type.startswith("audio/")
-                             or content_type == "application/octet-stream"):
+    # An error page behind a 200 is a real failure mode at a CDN edge. The body
+    # is the signal, not the header: headers are rewritten by proxies, payloads
+    # are not, and rejecting a good response costs a segment that has already
+    # been paid for.
+    if _looks_textual(payload):
+        return (f"the response body is text, not audio ({size} bytes) — "
+                f"probably an error page served with a 200")
+
+    # The header only gets to reject when it says something definite. A missing
+    # Content-Type reads as "text/plain", because http.client.HTTPMessage
+    # inherits email.message.Message, whose _default_type is text/plain — so
+    # treating that as a rejection would discard a perfectly good MP3 whenever a
+    # proxy strips the header.
+    if content_type and content_type in _DEFINITELY_NOT_AUDIO:
         return (f"the response was {content_type}, not audio "
                 f"({size} bytes) — probably an error page")
 

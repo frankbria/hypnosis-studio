@@ -248,16 +248,42 @@ def test_an_html_error_page_is_rejected():
     """Cloudflare can serve one of these with a 200."""
     page = b"<!DOCTYPE html><html><body>502 Bad Gateway</body></html>"
     assert problem(page, content_type="text/html")
+    # ...and still, with the header stripped to the stdlib default.
+    assert problem(page, content_type="text/plain")
 
 
-def test_a_non_audio_content_type_is_rejected_even_when_large():
-    """Size alone would pass this; only the declared type gives it away."""
+def test_a_definite_non_audio_content_type_is_rejected_even_when_large():
+    """Size alone would pass this; the declared type gives it away."""
     assert problem(b"x" * 500_000, content_type="application/json")
 
 
+def test_a_textual_body_is_rejected_on_its_own_evidence():
+    """Even with no header at all, a JSON or HTML body is not audio."""
+    assert problem(b"{" + b'"detail":"oops"' * 40_000, content_type="text/plain")
+    assert problem(b"<html>" + b"x" * 400_000, content_type=None)
+
+
 def test_a_missing_content_type_is_tolerated():
-    """Not every proxy sets it; size still governs."""
+    """http.client reports a *missing* Content-Type as "text/plain", because
+    HTTPMessage inherits email.message.Message whose _default_type is that.
+
+    So this is not a hypothetical: a proxy that strips the header would
+    otherwise make every healthy MP3 look like an error page, and each one is
+    already paid for by the time it is judged. Passing None here — as an earlier
+    version of this test did — never exercises the real default.
+    """
+    import http.client
+    assert http.client.HTTPMessage().get_content_type() == "text/plain", (
+        "the stdlib default changed; the tolerance below may no longer be needed")
+    assert problem(healthy(), content_type="text/plain") is None
     assert problem(healthy(), content_type=None) is None
+
+
+def test_a_valid_mp3_is_kept_whatever_the_header_says():
+    """The body is the signal. A header-stripping or header-mangling proxy must
+    not cost a segment that has already been bought."""
+    for ct in ("text/plain", None, "application/octet-stream", "binary/octet-stream"):
+        assert problem(healthy(), content_type=ct) is None, ct
 
 
 def test_half_a_sentence_is_rejected():

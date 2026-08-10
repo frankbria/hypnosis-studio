@@ -62,9 +62,13 @@ def render_track(monkeypatch, tmp_path):
     # monkeypatch.setattr refuses to patch an attribute that does not exist.
     if _stub_if_missing("soundfile", write=lambda *a, **k: None):
         stubbed.append("soundfile")
-    for name in ("av", "scipy"):
-        if _stub_if_missing(name):
-            stubbed.append(name)
+    # av needs open/AudioResampler for the decoder tests to patch them;
+    # monkeypatch.setattr refuses to patch an attribute that does not exist.
+    if _stub_if_missing("av", open=lambda *a, **k: None,
+                        AudioResampler=lambda **k: None):
+        stubbed.append("av")
+    if _stub_if_missing("scipy"):
+        stubbed.append("scipy")
     if _stub_if_missing("scipy.signal",
                         lfilter=lambda *a, **k: None,
                         fftconvolve=lambda *a, **k: None):
@@ -118,7 +122,7 @@ class _Headers:
 class Response:
     """A urlopen success: a context manager whose read() returns audio bytes."""
 
-    def __init__(self, payload=b"ID3fake-mp3-bytes", content_type="audio/mpeg"):
+    def __init__(self, payload=b"ID3fake-mp3-bytes", content_type="text/plain"):
         self.payload = payload
         self.headers = _Headers(content_type)
 
@@ -531,8 +535,13 @@ def test_main_stops_when_every_segment_fails_to_persist(
 # A 200 is not the same as a usable segment (#8)
 # --------------------------------------------------------------------------
 
-def sized_response(text, fraction=1.0, content_type="audio/mpeg"):
-    """A response carrying `fraction` of the audio `text` should produce."""
+def sized_response(text, fraction=1.0, content_type="text/plain"):
+    """A response carrying `fraction` of the audio `text` should produce.
+
+    content_type defaults to "text/plain" on purpose: that is what
+    http.client reports when the header is absent, so it is the realistic
+    default rather than the friendly one.
+    """
     seconds = len(text) / tts_policy.chars_per_sec_for_sizing()
     n = int(seconds * tts_policy.BYTES_PER_SEC * fraction)
     return Response(b"\xff\xfb" + b"\x00" * n, content_type=content_type)
