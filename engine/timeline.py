@@ -15,6 +15,11 @@ to fit the pad, and only refuse when there is not even room for the fade.
 """
 import os
 
+# Every offset in the assembler is computed at this rate, so a pad or segment at
+# any other rate silently mis-measures the whole timeline. Defined here so the
+# pre-spend gate and the assembler cannot disagree about it.
+SR = 44100
+
 # The assembler opens on 1.5 s of pad before the first word.
 LEAD_IN_S = 1.5
 
@@ -38,13 +43,19 @@ WHISPER_TAG = "[whispering] "
 # Calibration: river track 1 is 6457 tagged characters over 337 s of scripted
 # pauses. Working back from the ~40 s of headroom reported in issue #5 implies
 # about 12.75 chars/s for eleven_v3 at speed 0.85. The default sits below that
-# deliberately — a slower assumed rate predicts a *longer* program, so the
-# dry-run gate errs toward warning rather than toward silently overrunning.
+# so a slower-than-expected render is predicted rather than missed.
+#
+# Not *far* below, though. This projection only warns; the real protection is
+# resolve_actual_s, which bounds the program at render time whatever the rate
+# turns out to be. Over-tightening it here just makes the gate flag scripts that
+# ship fine today — at 11.0 it called river tracks 1 and 3 short-outro when at
+# the true rate both get the full 75 s — and a warning that cries wolf is one
+# operators learn to skip past.
 #
 # It stays a knob because the real rate drifts with model, voice and prompt tag,
 # and there is no committed render data to calibrate against (pads and renders
 # are gitignored). Re-derive it from real manifests when they exist.
-DEFAULT_CHARS_PER_SEC = 11.0
+DEFAULT_CHARS_PER_SEC = 12.0
 CHARS_PER_SEC_ENV = "HYPNO_CHARS_PER_SEC"
 
 
@@ -80,10 +91,10 @@ def resolve_actual_s(total_s, voice_end, pad_s):
     Raises ValueError — not an assert, which `python -O` strips — when the pad
     cannot carry the voice program plus the closing fade.
     """
+    # min(ceil(want), floor(pad)) — round the two sides in opposite directions.
+    # Rounding the *result* up instead would let a 959.5 s pad land on 960 and
+    # overrun the buffer this bound exists to protect, so the pad is floored.
     want_s = float(int(max(float(total_s), voice_end + MIN_OUTRO_S) + 0.999))
-    # Ceil first, clamp second. Clamping before that rounding would let a 959.5 s
-    # pad round back up to 960 and overrun the buffer this bound exists to
-    # protect, so the pad is floored to a whole second rather than the result.
     actual_s = min(want_s, float(int(pad_s)))
     if actual_s < voice_end + FADE_S:
         raise ValueError(
@@ -102,8 +113,11 @@ def estimate_voice_end(segments, chars_per_sec=None):
     is `pause_after_s` — doubled through the suggestion phase. `voice_end` is the
     end of the last segment, so that segment's trailing pause is not part of it.
 
-    The 2 s register-change overlaps the assembler applies are ignored; they only
-    ever pull segments earlier, so ignoring them keeps this an over-estimate.
+    What makes this an over-estimate is the conservative rate, nothing else. The
+    assembler's 2 s register-change overlaps are ignored because they do not move
+    `voice_end`: they shift the *first* suggestion and resurface segments earlier
+    and leave the positions after them alone, so the last segment only moves when
+    the resurface phase is a single segment — and then only earlier.
     """
     rate = chars_per_sec if chars_per_sec is not None else _rate_from_env()
     if rate <= 0:
@@ -129,6 +143,16 @@ def monotonic(values):
     trajectories are built from phase boundaries and from ACTUAL_S, and a program
     clamped tight against the pad puts the ACTUAL_S-relative tail *behind* the
     resurface breakpoints. Run every breakpoint series through this first.
+
+    IMPORTANT for anyone adding a breakpoint: flattening is only silent-safe
+    because every pair that can currently invert carries the *same* y-value —
+    `(RES_START + 25, 6.0)` against `(voice_end, 6.0)` in GAIN_BP, and
+    `(ACTUAL_S - 60, 10.0)` against `(RES_START + 10, 10.0)` in TRAJ. Collapsing
+    those to a duplicate x is a flat segment, which np.interp handles cleanly. A
+    new breakpoint that can invert against a neighbour with a *different* y would
+    instead collapse to a step discontinuity — an audible click, again with no
+    error. Keep inverting pairs equal-valued, or bound the new breakpoint so it
+    cannot cross its neighbour in the first place.
     """
     out = []
     running = None

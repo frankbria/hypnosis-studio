@@ -281,12 +281,16 @@ def test_rate_reads_the_env_override(monkeypatch):
     assert timeline.chars_per_sec() == 13.5
 
 
-@pytest.mark.parametrize("bad", ["0", "-3", "fast", ""])
+@pytest.mark.parametrize("bad", ["0", "-3", "fast", "1e-9x"])
 def test_bad_rate_override_is_rejected_not_silently_ignored(monkeypatch, bad):
     """Silently falling back would make a mis-set knob look like it worked."""
     monkeypatch.setenv("HYPNO_CHARS_PER_SEC", bad)
-    if bad == "":
-        assert timeline.chars_per_sec() == timeline.DEFAULT_CHARS_PER_SEC
-    else:
-        with pytest.raises(ValueError):
-            timeline.chars_per_sec()
+    with pytest.raises(ValueError):
+        timeline.chars_per_sec()
+
+
+def test_empty_rate_override_falls_back_to_the_default(monkeypatch):
+    """An empty value is 'unset', not 'invalid' — exporting an unset shell
+    variable is a normal thing to do and should not fail a render."""
+    monkeypatch.setenv("HYPNO_CHARS_PER_SEC", "")
+    assert timeline.chars_per_sec() == timeline.DEFAULT_CHARS_PER_SEC

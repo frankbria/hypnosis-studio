@@ -42,7 +42,7 @@ TOTAL_S = int(sys.argv[5]) if len(sys.argv) > 5 else 780
 DTYPE = np.float32 if os.environ.get("HYPNO_DTYPE") == "float32" else np.float64
 SKIP_QA = os.environ.get("HYPNO_SKIP_QA") == "1"
 
-SR = 44100
+SR = timeline.SR
 CH = 60 * SR  # chunk size for full-rate curve operations
 
 # ---------- load segments & build voice timeline ----------
@@ -51,7 +51,11 @@ segs = json.load(open(f"{TRACK}_tts_segments.json"))["segments"]
 waves = {}
 for seg in segs:
     y, sr = sf.read(f"{TRACK}_segments/{seg['id']}.wav", dtype=DTYPE)
-    assert sr == SR
+    if sr != SR:
+        # Was a bare assert, which python -O strips. A segment at the wrong rate
+        # would then be placed on the timeline at the wrong length and mixed at
+        # the wrong pitch — shipped to the customer rather than caught.
+        raise ValueError(f"segment {seg['id']} sample rate is {sr}, expected {SR}")
     waves[seg["id"]] = y
 
 positions = []  # (id, start, end, phase)

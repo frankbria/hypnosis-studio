@@ -9,8 +9,10 @@ in test_timeline.py.
 render_program imports soundfile at module level and render_track (which pulls
 numpy/scipy/av), so both are stubbed to import it at all.
 """
+import glob
 import inspect
 import os
+import shutil
 import sys
 import types
 
@@ -52,9 +54,10 @@ def render_program():
     sys.modules.pop("render_program", None)
 
 
-def set_pad_duration(render_program, seconds):
-    """Point the stubbed soundfile at a pad of the given length."""
-    render_program.sf.info = lambda *a, **k: types.SimpleNamespace(duration=seconds)
+def set_pad_duration(render_program, seconds, samplerate=timeline.SR):
+    """Point the stubbed soundfile at a pad of the given length and rate."""
+    render_program.sf.info = lambda *a, **k: types.SimpleNamespace(
+        duration=seconds, samplerate=samplerate)
 
 
 def track(n=1, chars=1000, pauses=0.0, total_s=780, key="river"):
@@ -107,8 +110,13 @@ def test_refusal_names_the_track_and_both_durations(render_program):
             "pad.wav", strict=True)
     msg = str(exc.value)
     assert "river_track3" in msg
-    assert "960" in msg
-    assert str(int(timeline.FADE_S)) in msg
+    assert "960" in msg, f"pad length missing: {msg}"
+    assert str(int(timeline.FADE_S)) in msg, f"fade length missing: {msg}"
+    # The projected voice length is the other half of "both durations" — without
+    # it the operator cannot tell how far over the track actually is.
+    est = timeline.estimate_voice_end(
+        track(chars=20000, pauses=400.0)["segments"], timeline.chars_per_sec())
+    assert f"{est:.1f}" in msg, f"projected voice length missing: {msg}"
 
 
 def test_every_track_is_checked_not_just_the_first(render_program):
@@ -119,6 +127,88 @@ def test_every_track_is_checked_not_just_the_first(render_program):
          track(n=3, chars=20000, pauses=400.0)],
         "pad.wav", strict=False)
     assert len(problems) == 2
+
+
+def test_wrong_sample_rate_is_refused_before_spending(render_program):
+    """A 48 kHz pad reports a perfectly normal duration.
+
+    sf.info gives duration as frames/samplerate, so a 960 s pad at 48 kHz still
+    reads 960 s and passes every length check. The assembler will refuse it, but
+    the assembler runs *after* the whole track has been bought.
+    """
+    set_pad_duration(render_program, 960.0, samplerate=48000)
+    with pytest.raises(ValueError) as exc:
+        render_program.check_pad_headroom([track()], "pad.wav", strict=True)
+    assert "48000" in str(exc.value)
+
+
+def test_wrong_sample_rate_is_fatal_even_when_not_strict(render_program):
+    """strict gates a projection; this is a certainty.
+
+    The estimate can be wrong in a safe direction, which is why a real render
+    only warns on it. A wrong sample rate is not an estimate — the render cannot
+    succeed — so it must stop the job on the real path too, not just --dry-run.
+    """
+    set_pad_duration(render_program, 960.0, samplerate=22050)
+    with pytest.raises(ValueError):
+        render_program.check_pad_headroom([track()], "pad.wav", strict=False)
+
+
+def test_matching_sample_rate_passes(render_program):
+    set_pad_duration(render_program, 960.0, samplerate=timeline.SR)
+    assert render_program.check_pad_headroom(
+        [track(chars=1000)], "pad.wav", strict=True) == []
+
+
+def staged_engine(render_program, tmp_path, goal="river", pad_name="pad_15.wav"):
+    """Point render_program at a throwaway ENGINE_DIR holding the real scripts.
+
+    run() resolves both scripts and the pad relative to ENGINE_DIR, so relocating
+    it is what makes run() callable end-to-end in a test. The scripts are the
+    real committed ones; only the pad is a stub, since sf.info is stubbed and
+    nothing reads its bytes on the dry-run path.
+    """
+    engine = tmp_path / "engine"
+    (engine / "scripts").mkdir(parents=True)
+    (engine / "pads").mkdir()
+    for src in glob.glob(os.path.join(ENGINE, "scripts", f"{goal}*_tts_segments.json")):
+        shutil.copy(src, engine / "scripts" / os.path.basename(src))
+    (engine / "pads" / pad_name).write_bytes(b"stub")
+    render_program.ENGINE_DIR = str(engine)
+    return engine
+
+
+def test_dry_run_actually_refuses_an_undersized_pad(render_program, tmp_path):
+    """End-to-end through run(), not source inspection.
+
+    The ordering tests below assert on the *text* of run(); this one proves the
+    refusal really propagates out of run() — it would still catch a future
+    try/except that swallowed the error, or a helper extraction that moved the
+    call.
+    """
+    staged_engine(render_program, tmp_path)
+    set_pad_duration(render_program, 300.0)  # far too short for a ~900 s program
+    with pytest.raises(ValueError) as exc:
+        render_program.run("job1", "river", "male",
+                           str(tmp_path / "out"), dry_run=True)
+    assert "pad too short" in str(exc.value)
+
+
+def test_dry_run_succeeds_when_the_pad_fits(render_program, tmp_path):
+    """The same path must not refuse a pad that is actually fine."""
+    staged_engine(render_program, tmp_path)
+    set_pad_duration(render_program, 960.0)
+    render_program.run("job2", "river", "male",
+                       str(tmp_path / "out2"), dry_run=True)
+
+
+def test_run_refuses_a_wrong_rate_pad_end_to_end(render_program, tmp_path):
+    staged_engine(render_program, tmp_path)
+    set_pad_duration(render_program, 960.0, samplerate=48000)
+    with pytest.raises(ValueError) as exc:
+        render_program.run("job3", "river", "male",
+                           str(tmp_path / "out3"), dry_run=True)
+    assert "48000" in str(exc.value)
 
 
 def test_check_runs_before_any_tts_spend(render_program):

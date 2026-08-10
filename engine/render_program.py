@@ -180,7 +180,17 @@ def check_pad_headroom(plan: list, pad_path: str, strict: bool) -> list:
     so refusing to render on a projection would cost a sale to avoid a shorter
     music tail. Returns the list of problems found.
     """
-    pad_s = float(sf.info(pad_path).duration)
+    info = sf.info(pad_path)
+    # Unconditional, even when strict is off: `strict` gates a *projection*,
+    # which may be wrong in the safe direction. A wrong sample rate is not a
+    # projection — the assembler will refuse this pad outright, so letting it
+    # through buys a whole track of TTS for a render that cannot succeed.
+    # sf.info reports duration as frames/samplerate, so the duration alone looks
+    # perfectly normal for a 48 kHz pad; only the rate itself gives it away.
+    if info.samplerate != timeline.SR:
+        raise ValueError(f"pad sample rate is {info.samplerate}, expected "
+                         f"{timeline.SR}: {pad_path}")
+    pad_s = float(info.duration)
     rate = timeline.chars_per_sec()
     print(f"pad check: {os.path.basename(pad_path)} is {pad_s:.0f}s "
           f"(projecting at {rate:.1f} chars/s)", flush=True)
