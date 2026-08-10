@@ -263,16 +263,24 @@ if not SKIP_QA:
     else:
         print(f"  outro window too short to measure ({max(ACTUAL_S - voice_end, 0):.0f}s tail)")
 
-    print("-- QA: boosted whisper transcript (sunken middle +14 dB) --")
-    boost = mix[int(SUG_START * SR): int(SUG_END * SR)] * 10 ** (14 / 20)
-    boost = np.clip(boost, -1, 1)
-    sf.write(f"qa_whisper_boost_{TRACK}.wav", boost, SR, subtype="PCM_16")
-    from faster_whisper import WhisperModel
-    model = WhisperModel("base", device="cpu", compute_type="int8")
-    segs_t, _ = model.transcribe(f"qa_whisper_boost_{TRACK}.wav", language="en")
-    text = " ".join(s.text for s in segs_t)
-    print("  transcript:", text[:600])
-    hits = sum(1 for w in KEYWORDS if w in text.lower())
-    print(f"  keyword hits: {hits}/{len(KEYWORDS)}")
+    # Diagnostic, not a gate — the shippability gate lives in render_program and
+    # deliberately needs none of this (issue #6). faster_whisper is not in the
+    # prod venv, so importing it at module scope made HYPNO_SKIP_QA=0 fail a job
+    # whose masters were perfectly good.
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        print("-- QA: transcript check skipped (faster_whisper not installed) --")
+    else:
+        print("-- QA: boosted whisper transcript (sunken middle +14 dB) --")
+        boost = mix[int(SUG_START * SR): int(SUG_END * SR)] * 10 ** (14 / 20)
+        boost = np.clip(boost, -1, 1)
+        sf.write(f"qa_whisper_boost_{TRACK}.wav", boost, SR, subtype="PCM_16")
+        model = WhisperModel("base", device="cpu", compute_type="int8")
+        segs_t, _ = model.transcribe(f"qa_whisper_boost_{TRACK}.wav", language="en")
+        text = " ".join(s.text for s in segs_t)
+        print("  transcript:", text[:600])
+        hits = sum(1 for w in KEYWORDS if w in text.lower())
+        print(f"  keyword hits: {hits}/{len(KEYWORDS)}")
 else:
     print("\n-- QA skipped (HYPNO_SKIP_QA=1) --")

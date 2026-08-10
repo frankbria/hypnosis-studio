@@ -26,7 +26,46 @@ ELEVENLABS_API_KEY=sk_...
 - Carrier auto-scan (300–400 Hz quietest slot) + ±10 Hz notch, then an isochronic bed on a theta→alpha arc at pad_rms −29 dB
 - 30 s fade-out, master to −20 dB RMS, soft clip; writes WAV + MP3
 - **Track length is bounded by the pad** — see below
-- QA: per-minute RMS profile, bed-pulse check, faster-whisper transcript of the sunken suggestion layer with keyword hit count
+- Diagnostics (`HYPNO_SKIP_QA=0`, off in production): per-minute RMS profile, bed-pulse check, faster-whisper transcript of the sunken suggestion layer with keyword hit count. These **print**; they do not gate anything, and the transcript step is skipped with a notice when `faster_whisper` is not installed. The gate that decides whether a track ships is in `render_program.py` — see below.
+
+## The delivery QA gate
+
+`render_program.py` opens every finished master and refuses to publish a job
+whose audio is not shippable. It runs in production by default — there is no
+flag to turn it off — and needs nothing beyond soundfile/numpy.
+
+It runs in the `mastering-qa` stage **before the manifest is written**, so a
+rejected job is never listed as deliverable, and its per-segment intermediates
+survive for debugging (cleanup sits after the manifest write and is unreachable
+on that path). Thresholds live in `qa.py`:
+
+| Check | Threshold | Catches |
+|---|---|---|
+| WAV RMS | −30 to −12 dB | silence, near-silence, failed normalisation |
+| WAV RMS finiteness | NaN / +inf rejected | corrupt audio |
+| WAV duration | ≥ 50 % of planned | a badly truncated WAV |
+| MP3 size | ≥ 3000 bytes/s | a grossly truncated MP3, without decoding |
+| MP3 decoded length | ≥ 98 % of the WAV | any partial MP3 truncation |
+
+Why the audio has to be opened at all: the master normalisation divides by
+`(rms + 1e-12)`, so a zero input yields a zero output with no error. Before this
+gate existed the only checks were "both files exist" and "the duration is
+readable", and an all-silent track passed both.
+
+Two measured facts drive the MP3 numbers, both counter-intuitive:
+
+- **The MP3 encoder is VBR.** Silence costs ~3990 bytes/s, real content ~9100.
+  The byte floor therefore has to sit *below* silence, which means it only
+  catches gross truncation — a file cut to half its bytes still measures
+  4539 bytes/s.
+- **MP3 length lies.** For a 780 s track cut to 50 %, `sf.info().duration`
+  reports 780.0 s (it reads the Xing header) and `sf.blocks()` yields 780.0 s of
+  full-energy audio, repeating content past the real end so even the RMS looks
+  normal. Only `SoundFile.read` in a loop stops at the true 390.1 s, which is
+  what `measure_audio()` uses. WAV is unaffected — every API agrees there.
+
+The gate does **not** verify that the audio is the *right* audio. A pad-only
+render with the voice layer missing normalises to the same −20 dB and passes.
 
 ## Track length and the pad
 

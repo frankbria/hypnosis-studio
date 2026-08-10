@@ -54,10 +54,10 @@ def test_cleanup_is_wired_in(render_program):
     assert callable(render_program.job_files.prune_intermediates)
 
 
-def test_prune_runs_after_the_manifest_and_before_ready(render_program):
+def test_prune_runs_after_the_manifest_and_before_ready(render_program, code_only):
     import inspect
 
-    src = inspect.getsource(render_program.run)
+    src = code_only(inspect.getsource(render_program.run))
 
     manifest_at = src.index('write_json_atomic(os.path.join(outdir, "manifest.json")')
     prune_at = src.index("prune_intermediates(outdir)")
@@ -70,7 +70,7 @@ def test_prune_runs_after_the_manifest_and_before_ready(render_program):
     assert prune_at < ready_at, "the job should be finalised before it is marked ready"
 
 
-def test_prune_is_not_reachable_on_the_failure_path(render_program):
+def test_prune_is_not_reachable_on_the_failure_path(render_program, code_only):
     """A failed job must keep its segments for debugging.
 
     run() raises on any failure, and the cleanup call sits after every raise in
@@ -78,7 +78,7 @@ def test_prune_is_not_reachable_on_the_failure_path(render_program):
     """
     import inspect
 
-    src = inspect.getsource(render_program.run)
+    src = code_only(inspect.getsource(render_program.run))
     prune_at = src.index("prune_intermediates(outdir)")
     raises_after_prune = [
         i for i in range(prune_at, len(src)) if src.startswith("raise ", i)
