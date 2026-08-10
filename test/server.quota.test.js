@@ -578,3 +578,36 @@ sleep 30
     try { fs.unlinkSync(engine); } catch { /* best effort */ }
   }
 });
+
+test('a render is refused if its slot cannot be recorded', async () => {
+  // writeQuota swallows its errors so a failed *release* cannot take the
+  // process down. bumpQuota must not inherit that: before the refactor this was
+  // a bare writeFileSync that threw and aborted the request. Carrying on
+  // regardless would let the day's cap be bypassed entirely — every render
+  // unrecorded, and every one spending real credits.
+  //
+  // Injected by pre-creating .quota.json.tmp as a *directory*, so the tmp write
+  // fails with EISDIR while everything else about the request works.
+  const rendersDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quota-nowrite-'));
+  fs.mkdirSync(path.join(rendersDir, '.quota.json.tmp'));
+
+  const port = await freePort();
+  const proc = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
+    cwd: ROOT,
+    env: {
+      ...process.env, PORT: String(port), RENDERS_DIR: rendersDir,
+      ACCESS_CODE: 'testcode', MAX_JOBS_PER_DAY: '6', ENGINE_PY: '/bin/false',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    await sleep(1200);
+    const res = await request(port, 'POST', '/api/programs', START);
+    assert.strictEqual(res.status, 503,
+      'a render whose slot could not be recorded must not be started');
+    assert.match(res.body, /storage_unavailable/);
+  } finally {
+    try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+    try { fs.rmSync(rendersDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});

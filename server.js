@@ -170,11 +170,16 @@ function writeQuota(q) {
   }
 }
 
+// Returns false if the slot could not be recorded. The caller must not start a
+// worker then: before writeQuota existed this was a bare writeFileSync that
+// threw and aborted the request, and quietly carrying on instead would let the
+// day's cap be bypassed entirely — every render unrecorded, every one spending
+// credits — on a full or unwritable renders volume.
 function bumpQuota(id) {
   const q = readQuota();
   q.count += 1;
   q.jobs.push(id);
-  writeQuota(q);
+  return writeQuota(q);
 }
 
 // Give a slot back. Only a job still listed in today's ledger can return one,
@@ -341,7 +346,17 @@ async function handleRequest(req, res) {
       jobId, state: 'rendering', stage: 'scripting', progress: 0,
       detail: 'Queued',
     });
-    bumpQuota(jobId);
+    if (!bumpQuota(jobId)) {
+      // No spend. A render whose slot was never recorded is one the cap cannot
+      // see, and the volume that could not take 80 bytes of JSON is not going
+      // to hold ~500 MB of audio either.
+      writeStatus(jobId, {
+        jobId, state: 'failed', stage: null, progress: 0,
+        detail: 'could not record the render against the daily quota',
+        error: 'quota storage unavailable',
+      });
+      return sendJson(res, 503, { error: 'storage_unavailable' });
+    }
     startWorker(jobId, body.goal, body.voiceSet);
     return sendJson(res, 202, { jobId, state: 'rendering' });
   }
