@@ -1,0 +1,56 @@
+name: GLM Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths-ignore:
+      - "**/*.md"
+      - ".gitignore"
+
+jobs:
+  review:
+    # Only review substantial changes (5+ files, or 20+ additions, or 20+ deletions)
+    if: |
+      github.event.pull_request.changed_files >= 5 ||
+      github.event.pull_request.additions >= 20 ||
+      github.event.pull_request.deletions >= 20
+    uses: frankbria/glm-review/.github/workflows/review.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    secrets:
+      ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+    with:
+      extra_instructions: |
+        Hypnosis Studio: a zero-dependency Node HTTP server (server.js) fronting a
+        Python audio render pipeline (engine/), plus a Vite/React SPA (web/).
+
+        Weight these repo-specific failure modes heavily:
+
+        1. server.js runs request handling inside an async function. An unhandled
+           rejection EXITS THE PROCESS — this has already caused a production
+           outage from one anonymous GET. Flag any new throw reachable from a
+           request that is not guarded, and note that throws inside fs callbacks
+           and timer callbacks are uncaughtException, NOT rejections the
+           request-level .catch() can see.
+
+        2. engine/ spends real money. One render is ~17-22k characters of
+           ElevenLabs TTS and 15-20 minutes. Flag anything that spends credits
+           before validating, retries a non-retryable error, or discards
+           already-purchased work on failure.
+
+        3. engine/assemble_track.py builds a timeline consumed by np.interp,
+           which does NOT validate that its breakpoints are increasing. A
+           non-monotonic or non-contiguous phase silently produces a garbage gain
+           envelope with no error at all — only bad audio. Flag anything that
+           could make phase boundaries overlap or go backwards.
+
+        4. Money and quota paths in server.js (the daily cap, the single-render
+           busy lock, quota accounting) are global rather than per-user. Flag
+           races, double-spend, and anything that consumes quota on a failure.
+
+        5. The frontend must never show a success state for something that did
+           not happen. Flag any path where a server error can render as a
+           completed purchase or a ready program.
