@@ -11,16 +11,43 @@ const { spawn } = require('child_process');
 
 const PORT = process.env.PORT || 4100;
 const DIST = path.join(__dirname, 'web', 'dist');
-const RENDERS = path.join(__dirname, 'renders');
+// Overridable so the renders root can be a mounted volume (see the container
+// work) and so tests never point a retention window at a real renders/ dir.
+//
+// Resolved to absolute deliberately: jobDir() is handed to the worker as
+// --outdir, and the worker runs abspath() against its OWN cwd (__dirname). A
+// relative value would resolve differently on each side, so the worker would
+// write where the server never looks — the render would appear to hang, then be
+// swept as stale, discarding work the customer paid for.
+const RENDERS = path.resolve(process.env.RENDERS_DIR || path.join(__dirname, 'renders'));
 const ENGINE_PY = path.join(__dirname, 'engine', 'venv', 'bin', 'python');
 const WORKER = path.join(__dirname, 'engine', 'render_program.py');
 
 const ACCESS_CODE = process.env.ACCESS_CODE || '';
+// Any value that is not a positive integer falls back to the documented default.
+// A negative is the dangerous case: it is truthy, so `|| 30` never fires, and it
+// puts the cutoff in the FUTURE — making every terminal job "expired", including
+// one created seconds ago. Someone typing -1 to disable retention would delete
+// every customer purchase on the next sweep.
+//
+// Falling back to 30 rather than clamping to 1: for a feature that destroys
+// customer deliverables, nonsense configuration should land on the documented
+// default, never on the most aggressive window the code can express.
+const RETENTION_DAYS = (() => {
+  const n = parseInt(process.env.RETENTION_DAYS || '30', 10);
+  return Number.isInteger(n) && n > 0 ? n : 30;
+})();
+const RETENTION_DRY_RUN = process.env.RETENTION_DRY_RUN === '1';
 const MAX_JOBS_PER_DAY = parseInt(process.env.MAX_JOBS_PER_DAY || '6', 10) || 6;
 
 const VALID_GOALS = new Set(['polymath', 'golden_thread', 'inner_studio', 'open_gate', 'river']);
 const VALID_VOICE_SETS = new Set(['male', 'female']);
 const SAFE_ID = /^[A-Za-z0-9_-]+$/;
+// Stricter than SAFE_ID, and only used by the retention sweep. Every job id is
+// minted as 'job_' + ... , so requiring the prefix means the sweep can never
+// select a directory the job store did not create — SAFE_ID alone would happily
+// match something like "backups".
+const JOB_DIR_RE = /^job_[A-Za-z0-9_-]+$/;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -316,7 +343,66 @@ function sweepStaleJobs() {
     }
   }
 }
-sweepStaleJobs();
-setInterval(sweepStaleJobs, 60 * 1000).unref();
+// Reclaim finished jobs once they pass the retention window. This DELETES
+// CUSTOMER PURCHASES, so it only removes what it can positively identify as an
+// expired job and skips anything ambiguous — an orphaned directory costing a few
+// KB forever is a far better outcome than one wrongly-reaped order.
+function dirSize(dir) {
+  let total = 0;
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return 0; }
+  for (const e of entries) {
+    const p = path.join(dir, e.name);
+    try {
+      if (e.isDirectory()) total += dirSize(p);
+      else if (e.isFile()) total += fs.statSync(p).size;
+    } catch { /* raced; the byte count is only a log line */ }
+  }
+  return total;
+}
+
+function sweepExpiredJobs() {
+  const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  let entries;
+  try { entries = fs.readdirSync(RENDERS, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    // Only real directories named like a job. Dirent.isDirectory() uses lstat
+    // semantics, so it is already false for a symlink. (fs.rmSync on a symlink
+    // removes the link and leaves the target intact — verified — so the risk
+    // here is deleting a link we did not create, not destroying its target.)
+    // JOB_DIR_RE then requires the 'job_' prefix the job store mints, so
+    // nothing the server did not create can ever be selected.
+    if (!e.isDirectory() || !JOB_DIR_RE.test(e.name)) continue;
+    const dir = path.join(RENDERS, e.name);
+
+    const st = readJsonSafe(path.join(dir, 'status.json'));
+    if (!st) continue;                                        // orphan or corrupt — leave it
+    if (st.state !== 'ready' && st.state !== 'failed') continue; // never touch an active job
+    const updated = Date.parse(st.updatedAt);
+    if (!Number.isFinite(updated) || updated >= cutoff) continue;
+
+    const ageDays = ((Date.now() - updated) / (24 * 60 * 60 * 1000)).toFixed(1);
+    const bytes = dirSize(dir);
+    if (RETENTION_DRY_RUN) {
+      console.log(`retention: would reap ${e.name} (${st.state}, ${ageDays}d, ${(bytes / 1e6).toFixed(0)} MB)`);
+      continue;
+    }
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      console.log(`retention: reaped ${e.name} (${st.state}, ${ageDays}d, ${(bytes / 1e6).toFixed(0)} MB freed)`);
+    } catch (err) {
+      console.error(`retention: could not reap ${e.name}:`, err && err.message);
+    }
+  }
+}
+
+// Order matters: failing a stale job refreshes its updatedAt, so its retention
+// clock starts from the terminal state rather than from when it hung.
+function sweepJobs() {
+  sweepStaleJobs();
+  sweepExpiredJobs();
+}
+sweepJobs();
+setInterval(sweepJobs, 60 * 1000).unref();
 
 server.listen(PORT, '127.0.0.1', () => console.log('hypnosis-studio on 127.0.0.1:' + PORT));
