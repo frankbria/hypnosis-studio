@@ -129,18 +129,26 @@ def tts(voice_id: str, text: str, out_path: str) -> bool:
                     headers={"xi-api-key": KEY, "Content-Type": "application/json"})
                 with urllib.request.urlopen(req, timeout=120) as r:
                     payload = r.read()
+                    content_type = r.headers.get_content_type()
             except urllib.error.HTTPError as e:
                 outcome = tts_policy.classify(status=e.code, body=_error_body(e))
             except Exception as e:  # noqa: BLE001 — classified below, not swallowed
                 outcome = tts_policy.classify(exception=e)
             else:
-                # Only the network call is classified. The write is deliberately
-                # outside that try: a disk-full OSError is an OSError like any
-                # other, so leaving it in would classify a local failure as
-                # transient and buy this segment from ElevenLabs again — up to
-                # four times — to fail writing it again each time.
-                _write_segment(out_path, payload)
-                return True
+                # A 200 is not the same as a usable segment: a truncated or
+                # empty body used to be written and reported as success (#8).
+                bad = tts_policy.response_problem(payload, text, content_type)
+                if bad:
+                    outcome = tts_policy.Outcome("transient", True, bad)
+                else:
+                    # Only the network call is classified. The write is
+                    # deliberately outside that try: a disk-full OSError is an
+                    # OSError like any other, so leaving it in would classify a
+                    # local failure as transient and buy this segment from
+                    # ElevenLabs again — up to four times — to fail writing it
+                    # again each time.
+                    _write_segment(out_path, payload)
+                    return True
 
             if outcome.kind in ("auth", "quota"):
                 # Straight out, with no second settings pass: neither a rejected
@@ -170,13 +178,25 @@ def tts(voice_id: str, text: str, out_path: str) -> bool:
 
 
 def mp3_to_float(src: str):
-    inp = av.open(src)
-    stream = inp.streams.audio[0]
+    try:
+        inp = av.open(src)
+        stream = inp.streams.audio[0]
+    except Exception as e:  # noqa: BLE001 — av raises several unrelated types
+        raise TtsError(
+            "fatal", f"{src} could not be opened as audio: {e}") from e
+
     resampler = av.AudioResampler(format="flt", layout="mono", rate=44100)
     chunks = []
     for frame in inp.decode(stream):
         for r in resampler.resample(frame):
             chunks.append(r.to_ndarray().astype(np.float64))
+    if not chunks:
+        # np.concatenate([]) raises "need at least one array to concatenate",
+        # which surfaces outside any TTS handling and blames NumPy for an
+        # ElevenLabs problem (#8).
+        raise TtsError(
+            "fatal", f"{src} decoded to no audio — the response was empty or "
+                     f"not playable MP3")
     return np.concatenate(chunks, axis=1).reshape(-1), 44100
 
 

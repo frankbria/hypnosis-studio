@@ -101,11 +101,26 @@ class Recorder:
         return result
 
 
+# Big enough to clear the response-size floor for the short texts used here.
+# Before #8 any bytes at all counted as a segment; now a toy payload is
+# (correctly) treated as a truncated response.
+AUDIO = b"\xff\xfb" + b"\x00" * 8000
+
+
+class _Headers:
+    def __init__(self, content_type):
+        self._ct = content_type
+
+    def get_content_type(self):
+        return self._ct
+
+
 class Response:
     """A urlopen success: a context manager whose read() returns audio bytes."""
 
-    def __init__(self, payload=b"ID3fake-mp3-bytes"):
+    def __init__(self, payload=b"ID3fake-mp3-bytes", content_type="audio/mpeg"):
         self.payload = payload
+        self.headers = _Headers(content_type)
 
     def __enter__(self):
         return self
@@ -134,10 +149,10 @@ def drive(render_track, monkeypatch, tmp_path, *results):
 # --------------------------------------------------------------------------
 
 def test_a_successful_call_writes_the_file_once(render_track, monkeypatch, tmp_path):
-    fake, out = drive(render_track, monkeypatch, tmp_path, Response(b"audio"))
+    fake, out = drive(render_track, monkeypatch, tmp_path, Response(AUDIO))
     assert render_track.tts("voice", "hello", out) is True
     assert fake.calls == 1
-    assert open(out, "rb").read() == b"audio"
+    assert open(out, "rb").read() == AUDIO
 
 
 # --------------------------------------------------------------------------
@@ -153,7 +168,7 @@ def test_a_successful_call_writes_the_file_once(render_track, monkeypatch, tmp_p
 def test_a_network_failure_is_retried(render_track, monkeypatch, tmp_path, exc):
     """Previously these hit `except Exception: break` and were never retried —
     the single likeliest way a 152-request render dies."""
-    fake, out = drive(render_track, monkeypatch, tmp_path, exc, Response(b"audio"))
+    fake, out = drive(render_track, monkeypatch, tmp_path, exc, Response(AUDIO))
     assert render_track.tts("voice", "hi", out) is True
     assert fake.calls == 2, "the second attempt should have succeeded"
 
@@ -170,7 +185,7 @@ def test_network_failures_eventually_give_up(render_track, monkeypatch, tmp_path
 
 def test_a_late_recovery_still_succeeds(render_track, monkeypatch, tmp_path):
     fake, out = drive(render_track, monkeypatch, tmp_path,
-                      TimeoutError("t"), TimeoutError("t"), Response(b"ok"))
+                      TimeoutError("t"), TimeoutError("t"), Response(AUDIO))
     assert render_track.tts("voice", "hi", out) is True
     assert fake.calls == 3
 
@@ -182,7 +197,7 @@ def test_a_late_recovery_still_succeeds(render_track, monkeypatch, tmp_path):
 @pytest.mark.parametrize("code", [429, 500, 503, 504, 522])
 def test_retryable_statuses_are_retried(render_track, monkeypatch, tmp_path, code):
     fake, out = drive(render_track, monkeypatch, tmp_path,
-                      http_error(code), Response(b"audio"))
+                      http_error(code), Response(AUDIO))
     assert render_track.tts("voice", "hi", out) is True
     assert fake.calls == 2
 
@@ -192,7 +207,7 @@ def test_backoff_is_actually_waited(render_track, monkeypatch, tmp_path):
     waits = []
     monkeypatch.setattr(render_track.time, "sleep", waits.append)
     fake, out = drive(render_track, monkeypatch, tmp_path,
-                      http_error(503), http_error(503), Response(b"a"))
+                      http_error(503), http_error(503), Response(AUDIO))
     render_track.tts("voice", "hi", out)
     assert waits == [tts_policy.backoff_seconds(0), tts_policy.backoff_seconds(1)]
 
@@ -240,7 +255,7 @@ def test_a_permanent_client_error_does_not_get_a_second_settings_pass(
 def test_422_falls_back_to_the_reduced_settings(render_track, monkeypatch, tmp_path):
     """The outer loop exists for exactly this: the API rejecting `speed`."""
     fake, out = drive(render_track, monkeypatch, tmp_path,
-                      http_error(422), Response(b"audio"))
+                      http_error(422), Response(AUDIO))
     assert render_track.tts("voice", "hi", out) is True
     assert fake.calls == 2
 
@@ -252,7 +267,7 @@ def test_the_fallback_request_drops_the_speed_parameter(render_track, monkeypatc
         sent.append(__import__("json").loads(req.data.decode()))
         if len(sent) == 1:
             raise http_error(422)
-        return Response(b"audio")
+        return Response(AUDIO)
 
     monkeypatch.setattr(render_track.urllib.request, "urlopen", capture)
     render_track.tts("voice", "hi", str(tmp_path / "s.mp3"))
@@ -271,7 +286,7 @@ def test_a_network_failure_after_the_fallback_is_still_retried(
         render_track, monkeypatch, tmp_path):
     """422 then a blip: the retry budget applies to the second pass too."""
     fake, out = drive(render_track, monkeypatch, tmp_path,
-                      http_error(422), TimeoutError("t"), Response(b"audio"))
+                      http_error(422), TimeoutError("t"), Response(AUDIO))
     assert render_track.tts("voice", "hi", out) is True
     assert fake.calls == 3
 
@@ -300,7 +315,7 @@ def test_a_write_failure_does_not_buy_the_segment_again(
     The old code broke immediately here, so getting this wrong would have been a
     regression in exactly the dimension this issue is about.
     """
-    fake, out = drive(render_track, monkeypatch, tmp_path, Response(b"audio"))
+    fake, out = drive(render_track, monkeypatch, tmp_path, Response(AUDIO))
 
     def full_disk(*a, **k):
         raise OSError(28, "No space left on device")
@@ -315,7 +330,7 @@ def test_a_write_failure_does_not_buy_the_segment_again(
 def test_a_partial_file_is_removed_after_a_failed_write(
         render_track, monkeypatch, tmp_path):
     """Nothing downstream should mistake a half-written file for a segment."""
-    fake, out = drive(render_track, monkeypatch, tmp_path, Response(b"audio"))
+    fake, out = drive(render_track, monkeypatch, tmp_path, Response(AUDIO))
     real_open = open
 
     def fail_midway(path, mode="r", *a, **k):
@@ -345,7 +360,7 @@ def test_an_incomplete_read_is_retried(render_track, monkeypatch, tmp_path):
     a transient set built only from OSError subclasses."""
     import http.client
     fake, out = drive(render_track, monkeypatch, tmp_path,
-                      http.client.IncompleteRead(b"partial"), Response(b"audio"))
+                      http.client.IncompleteRead(b"partial"), Response(AUDIO))
     assert render_track.tts("voice", "hi", out) is True
     assert fake.calls == 2
 
@@ -439,7 +454,7 @@ def test_main_resets_the_failure_run_after_a_success(
     # Segments 1, 3 and 5 exhaust their retries; 2, 4 and 6 succeed. That is
     # MAX_CONSECUTIVE_FAILURES failures in total, but never in a row.
     burst = [urllib.error.URLError("blip")] * tts_policy.MAX_ATTEMPTS
-    sequence = (burst + [Response(b"audio")]) * 3
+    sequence = (burst + [Response(AUDIO)]) * 3
     fake = Recorder(*sequence)
     monkeypatch.setattr(render_track.urllib.request, "urlopen", fake)
     monkeypatch.setenv("ELEVENLABS_API_KEY", "k")
@@ -489,7 +504,7 @@ def test_main_stops_when_every_segment_fails_to_persist(
     (tmp_path / "demo_tts_segments.json").write_text(
         _json.dumps({"segments": segments}))
 
-    fake = Recorder(Response(b"audio"))
+    fake = Recorder(Response(AUDIO))
     monkeypatch.setattr(render_track.urllib.request, "urlopen", fake)
     real_open = open
 
@@ -510,3 +525,120 @@ def test_main_stops_when_every_segment_fails_to_persist(
     assert fake.calls == render_track.MAX_CONSECUTIVE_FAILURES, (
         f"a persistent write failure must stop after "
         f"{render_track.MAX_CONSECUTIVE_FAILURES} billed segments, not all 6")
+
+
+# --------------------------------------------------------------------------
+# A 200 is not the same as a usable segment (#8)
+# --------------------------------------------------------------------------
+
+def sized_response(text, fraction=1.0, content_type="audio/mpeg"):
+    """A response carrying `fraction` of the audio `text` should produce."""
+    seconds = len(text) / tts_policy.chars_per_sec_for_sizing()
+    n = int(seconds * tts_policy.BYTES_PER_SEC * fraction)
+    return Response(b"\xff\xfb" + b"\x00" * n, content_type=content_type)
+
+
+LINE = "[soft] " + "x" * 240
+
+
+def test_a_truncated_response_is_retried_not_written(
+        render_track, monkeypatch, tmp_path):
+    """The headline case: a decodable half-sentence used to be written and
+    reported as success, and per #6 nothing downstream would notice."""
+    fake, out = drive(render_track, monkeypatch, tmp_path,
+                      sized_response(LINE, 0.2), sized_response(LINE))
+    assert render_track.tts("voice", LINE, out) is True
+    assert fake.calls == 2, "the short body should have been retried"
+    assert len(open(out, "rb").read()) > 100_000, "the full response was written"
+
+
+def test_an_empty_200_is_retried(render_track, monkeypatch, tmp_path):
+    fake, out = drive(render_track, monkeypatch, tmp_path,
+                      Response(b""), sized_response(LINE))
+    assert render_track.tts("voice", LINE, out) is True
+    assert fake.calls == 2
+
+
+def test_a_persistently_truncated_response_gives_up(
+        render_track, monkeypatch, tmp_path):
+    fake, out = drive(render_track, monkeypatch, tmp_path, Response(b""))
+    with pytest.raises(render_track.TtsError) as exc:
+        render_track.tts("voice", LINE, out)
+    assert exc.value.kind == "transient"
+    assert fake.calls == tts_policy.MAX_ATTEMPTS
+    assert not os.path.exists(out), "nothing should have been written"
+
+
+def test_an_html_error_page_with_a_200_is_retried(
+        render_track, monkeypatch, tmp_path):
+    page = Response(b"<html>502 Bad Gateway</html>" * 200, content_type="text/html")
+    fake, out = drive(render_track, monkeypatch, tmp_path, page,
+                      sized_response(LINE))
+    assert render_track.tts("voice", LINE, out) is True
+    assert fake.calls == 2
+
+
+def test_a_healthy_response_is_written_unchanged(
+        render_track, monkeypatch, tmp_path):
+    """Criterion: a successful segment is byte-identical to today's output."""
+    good = sized_response(LINE)
+    fake, out = drive(render_track, monkeypatch, tmp_path, good)
+    assert render_track.tts("voice", LINE, out) is True
+    assert fake.calls == 1
+    assert open(out, "rb").read() == good.payload
+
+
+def test_validation_does_not_add_a_settings_pass(
+        render_track, monkeypatch, tmp_path):
+    """A short body is a transport problem, not a settings problem — it must not
+    fall through to the speed=None pass and silently change the voice."""
+    fake, out = drive(render_track, monkeypatch, tmp_path, Response(b""))
+    with pytest.raises(render_track.TtsError):
+        render_track.tts("voice", LINE, out)
+    assert fake.calls == tts_policy.MAX_ATTEMPTS
+
+
+# --------------------------------------------------------------------------
+# The decoder blames the right layer
+# --------------------------------------------------------------------------
+
+def test_an_empty_file_gives_a_tts_error_not_a_numpy_traceback(
+        render_track, tmp_path):
+    """np.concatenate([]) raises "need at least one array to concatenate" from
+    inside the decoder, which surfaces outside any TTS handling and blames
+    NumPy for an ElevenLabs problem."""
+    pytest.importorskip("av")
+    empty = tmp_path / "empty.mp3"
+    empty.write_bytes(b"")
+    with pytest.raises(render_track.TtsError) as exc:
+        render_track.mp3_to_float(str(empty))
+    assert exc.value.kind == "fatal"
+    assert "concatenate" not in str(exc.value), "the NumPy error must not leak"
+    assert str(empty) in str(exc.value), "the error should name the file"
+
+
+def test_a_file_that_decodes_to_no_frames_is_a_tts_error(
+        render_track, monkeypatch, tmp_path):
+    """The empty-chunk guard specifically.
+
+    An empty *file* is caught earlier, when av.open fails. This is the other
+    shape: a container that opens cleanly and yields no audio frames, which is
+    what reaches `np.concatenate([])`.
+    """
+    class NoFrames:
+        class streams:
+            audio = [object()]
+
+        def decode(self, stream):
+            return iter(())
+
+    monkeypatch.setattr(render_track.av, "open", lambda src: NoFrames())
+    monkeypatch.setattr(render_track.av, "AudioResampler",
+                        lambda **k: type("R", (), {"resample": lambda s, f: []})())
+
+    src = tmp_path / "silent.mp3"
+    src.write_bytes(b"\xff\xfb" + b"\x00" * 100)
+    with pytest.raises(render_track.TtsError) as exc:
+        render_track.mp3_to_float(str(src))
+    assert exc.value.kind == "fatal"
+    assert "concatenate" not in str(exc.value)

@@ -122,6 +122,74 @@ def classify(status=None, exception=None, body=""):
     return Outcome("fatal", False, f"HTTP {status}: {text[:200]}")
 
 
+# The request asks for output_format=mp3_44100_128, so a healthy response is
+# 128 kbps CBR. Written down as the assumption it is: if ElevenLabs ever serve
+# VBR for that format the floor goes loose rather than wrong — it would
+# under-reject, never over-reject.
+BYTES_PER_SEC = 16000
+
+# How much of the predicted size a response must reach. The prediction comes
+# from the text being sent, so it scales with the segment: 40 characters (the
+# shortest of the 768 committed) predicts ~53 KB, 443 (the longest) ~591 KB.
+#
+# A fixed byte floor would only catch empty-and-tiny. This catches the case the
+# issue calls worse — a decodable half-sentence that is written to the segment
+# WAV and ships, which per #6 nothing downstream notices, since one short
+# segment does not move a whole master's level or length.
+#
+# At 0.5 a healthy response only trips this if the voice spoke faster than
+# ~24 chars/s, double the estimate and nearly double the ~12.75 measured.
+MIN_RESPONSE_FRACTION = 0.5
+
+# A second, text-independent floor, so junk is caught even for a one-word line
+# whose predicted size is small.
+ABSOLUTE_MIN_BYTES = 2000
+
+
+def chars_per_sec_for_sizing():
+    """Speaking rate used to predict a response's size.
+
+    Imported lazily so this module stays stdlib-only at import time: timeline
+    owns the rate and its calibration, and duplicating the constant here is how
+    the two silently drift apart.
+    """
+    import timeline
+    return timeline.chars_per_sec()
+
+
+def response_problem(payload, text, content_type=None):
+    """Why this response is not a usable segment, or None if it is.
+
+    `tts()` used to write whatever arrived and return True, so a truncated or
+    empty 200 — a proxy hiccup, a mid-stream abort, an error page served with
+    the wrong status — was recorded as success (issue #8).
+    """
+    size = len(payload or b"")
+    if size == 0:
+        return "the response body was empty — no audio was returned"
+
+    # An HTML error page behind a 200 is a real failure mode at a CDN edge.
+    # Absent or generic types are tolerated: not every proxy sets one, and size
+    # still governs.
+    if content_type and not (content_type.startswith("audio/")
+                             or content_type == "application/octet-stream"):
+        return (f"the response was {content_type}, not audio "
+                f"({size} bytes) — probably an error page")
+
+    if size < ABSOLUTE_MIN_BYTES:
+        return (f"the response was {size} bytes, below the "
+                f"{ABSOLUTE_MIN_BYTES}-byte floor — too small to be a segment")
+
+    expected_s = len(text) / chars_per_sec_for_sizing()
+    floor = expected_s * BYTES_PER_SEC * MIN_RESPONSE_FRACTION
+    if size < floor:
+        return (f"the response was {size} bytes for {len(text)} characters, "
+                f"under the {floor:.0f}-byte floor for ~{expected_s:.0f}s of "
+                f"speech — the audio looks truncated")
+
+    return None
+
+
 def backoff_seconds(attempt):
     """Seconds to wait before retry number `attempt` (0-based), clamped."""
     if attempt < 0:
