@@ -15,6 +15,8 @@ import soundfile as sf
 import av
 from scipy.signal import lfilter, fftconvolve
 
+import tts_policy
+
 KEY = None
 
 BRIAN = "nPczCjzI2devNBz1zQrb"
@@ -43,30 +45,76 @@ def register_for(seg: dict):
     return BRIAN, "[soft] "
 
 
+class TtsError(RuntimeError):
+    """A TTS call that will not succeed by being repeated.
+
+    `kind` is a tts_policy classification — auth, quota, transient (retries
+    exhausted) or fatal — so the caller can put a cause in status.json instead of
+    the bare "TTS failed for segment S01" that a dead key and a dropped
+    connection used to share.
+    """
+
+    def __init__(self, kind: str, detail: str):
+        super().__init__(detail)
+        self.kind = kind
+        self.detail = detail
+
+
 def tts(voice_id: str, text: str, out_path: str) -> bool:
+    """Render one segment to `out_path`. Raises TtsError when it cannot.
+
+    Two things the previous version got wrong, both from one control flow:
+    network errors are not HTTPError, so they hit a bare `except Exception` and
+    were never retried — across 152 sequential requests that is the *likeliest*
+    failure. And the inner `break` exited only the retry loop, so every
+    permanent error, a dead API key included, fell through to a second complete
+    attempt with the fallback settings.
+    """
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format=mp3_44100_128"
     settings_full = {"stability": 0.5, "similarity_boost": 0.75, "speed": 0.85}
     settings_nospeed = {"stability": 0.5, "similarity_boost": 0.75}
+
     for settings in (settings_full, settings_nospeed):
         body = {"text": text, "model_id": "eleven_v3", "voice_settings": settings}
-        req = urllib.request.Request(url, data=json.dumps(body).encode(),
-                                     headers={"xi-api-key": KEY, "Content-Type": "application/json"})
-        for retry in range(3):
+        for attempt in range(tts_policy.MAX_ATTEMPTS):
             try:
+                req = urllib.request.Request(
+                    url, data=json.dumps(body).encode(),
+                    headers={"xi-api-key": KEY, "Content-Type": "application/json"})
                 with urllib.request.urlopen(req, timeout=120) as r:
-                    open(out_path, "wb").write(r.read())
+                    payload = r.read()
+                with open(out_path, "wb") as f:
+                    f.write(payload)
                 return True
             except urllib.error.HTTPError as e:
-                msg = e.read().decode()[:200]
-                if e.code in (429, 500, 502, 503) and retry < 2:
-                    print(f"  HTTP {e.code}, retrying in 5s...")
-                    time.sleep(5)
-                    continue
-                print(f"  HTTP {e.code}: {msg}")
-                break
-            except Exception as e:
-                print(f"  error: {e}")
-                break
+                outcome = tts_policy.classify(status=e.code, body=e.read())
+            except Exception as e:  # noqa: BLE001 — classified, then re-raised
+                outcome = tts_policy.classify(exception=e)
+
+            if outcome.kind in ("auth", "quota"):
+                # Straight out, with no second settings pass: neither a rejected
+                # key nor an empty account is fixed by a different request body,
+                # and every extra attempt is another billable call.
+                raise TtsError(outcome.kind, outcome.detail)
+
+            if outcome.kind == "unsupported_settings":
+                print(f"  {outcome.detail}", flush=True)
+                break  # the one case the settings fallback exists for
+
+            if outcome.retryable and attempt < tts_policy.MAX_ATTEMPTS - 1:
+                wait = tts_policy.backoff_seconds(attempt)
+                print(f"  {outcome.detail} — retrying in {wait}s "
+                      f"(attempt {attempt + 2}/{tts_policy.MAX_ATTEMPTS})", flush=True)
+                time.sleep(wait)
+                continue
+
+            if outcome.retryable:
+                raise TtsError("transient",
+                               f"{outcome.detail} — gave up after "
+                               f"{tts_policy.MAX_ATTEMPTS} attempts")
+            raise TtsError(outcome.kind, outcome.detail)
+
+    # Both settings passes were rejected as unsupported.
     return False
 
 
@@ -120,9 +168,18 @@ def main():
         if os.path.exists(out_path):
             print(f"skip {seg['id']} (exists)")
             continue
-        ok = tts(vid, text, raw_path)
+        try:
+            ok = tts(vid, text, raw_path)
+        except TtsError as e:
+            # A dead key or an empty account fails every remaining segment the
+            # same way, so there is nothing to be gained by grinding through
+            # them; a one-off fatal is still worth skipping past.
+            print(f"FAIL {seg['id']}: {e.detail}")
+            if e.kind in ("auth", "quota"):
+                raise
+            continue
         if not ok:
-            print(f"FAIL {seg['id']}")
+            print(f"FAIL {seg['id']}: both voice-setting variants were rejected")
             continue
         y, sr = mp3_to_float(raw_path)
         sf.write(out_path, treat(y, sr), sr, subtype="PCM_16")
