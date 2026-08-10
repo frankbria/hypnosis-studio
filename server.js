@@ -20,7 +20,9 @@ const DIST = path.join(__dirname, 'web', 'dist');
 // write where the server never looks — the render would appear to hang, then be
 // swept as stale, discarding work the customer paid for.
 const RENDERS = path.resolve(process.env.RENDERS_DIR || path.join(__dirname, 'renders'));
-const ENGINE_PY = path.join(__dirname, 'engine', 'venv', 'bin', 'python');
+// Overridable for the same reason RENDERS_DIR is: the tests need a worker they
+// control. Defaults to the engine venv the deploy creates.
+const ENGINE_PY = process.env.ENGINE_PY || path.join(__dirname, 'engine', 'venv', 'bin', 'python');
 const WORKER = path.join(__dirname, 'engine', 'render_program.py');
 
 const ACCESS_CODE = process.env.ACCESS_CODE || '';
@@ -134,21 +136,109 @@ function quotaPath() {
   return path.join(RENDERS, '.quota.json');
 }
 
+// `jobs` is the ledger of ids that currently hold a slot today. It is what
+// makes releasing one idempotent: the worker-exit handler and the stale sweep
+// can both declare the same job failed, and they genuinely race — a worker can
+// exit at the moment the sweep decides it is stale.
+//
+// It also gets day-correctness for free. This function discards the file when
+// `day` is not today, so yesterday's ids vanish with it and a job that fails
+// after midnight cannot refund against today's allowance — which a bare
+// `count -= 1` would happily do.
 function readQuota() {
   const today = new Date().toISOString().slice(0, 10);
   const q = readJsonSafe(quotaPath());
-  if (q && q.day === today && typeof q.count === 'number') return q;
-  return { day: today, count: 0 };
+  if (q && q.day === today && typeof q.count === 'number') {
+    return { day: today, count: q.count, jobs: Array.isArray(q.jobs) ? q.jobs : [] };
+  }
+  return { day: today, count: 0, jobs: [] };
 }
 
-function bumpQuota() {
+// Written the way writeStatus writes status.json. The file is now touched on
+// both sides of every job, and a torn write would either reopen the day's
+// allowance or close it for good.
+function writeQuota(q) {
+  const p = quotaPath();
+  const tmp = p + '.tmp';
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(q));
+    fs.renameSync(tmp, p);
+    return true;
+  } catch (e) {
+    console.error('quota write failed:', e && e.message);
+    return false;
+  }
+}
+
+// Returns false if the slot could not be recorded. The caller must not start a
+// worker then: before writeQuota existed this was a bare writeFileSync that
+// threw and aborted the request, and quietly carrying on instead would let the
+// day's cap be bypassed entirely — every render unrecorded, every one spending
+// credits — on a full or unwritable renders volume.
+function bumpQuota(id) {
   const q = readQuota();
   q.count += 1;
-  fs.writeFileSync(quotaPath(), JSON.stringify(q));
+  q.jobs.push(id);
+  return writeQuota(q);
 }
 
+// Give a slot back. Only a job still listed in today's ledger can return one,
+// so a second call — from the other of the two failure paths, or from a sweep
+// re-running — finds nothing and does nothing.
+//
+// A quota file written before this ledger existed has no `jobs`, so releases
+// against it are no-ops: the cap still binds, and the day rolls over to a file
+// that has the ledger.
+function releaseQuota(id) {
+  const q = readQuota();
+  if (!q.jobs.includes(id)) return false;
+  q.jobs = q.jobs.filter((j) => j !== id);
+  q.count = Math.max(0, q.count - 1);
+  // Report what actually landed. A swallowed write would otherwise log a
+  // release that did not happen, and the slot stays spent for the day with the
+  // log insisting otherwise.
+  if (!writeQuota(q)) {
+    console.error('quota slot for', id, 'could not be released (write failed)');
+    return false;
+  }
+  console.log('released quota slot for failed job', id);
+  return true;
+}
+
+// Every way a job can fail before it is even running writes the same status and
+// returns the same slot. One place, so the two callers cannot drift.
+function failToStart(id, detail, error) {
+  writeStatus(id, {
+    jobId: id, state: 'failed', stage: null, progress: 0,
+    detail, error: String(error),
+  });
+  releaseQuota(id);
+}
+
+// Jobs with a worker process still running. The stale sweep decides a job is
+// dead purely from how long ago status.json was touched, and the assembly stage
+// writes status once per track — a single track can take longer than STALE_MS,
+// so a perfectly healthy render looks stale. Refunding its slot would let the
+// day's cap be exceeded, and every over-cap render spends real credits.
+//
+// (The sweep also *marks that job failed*, which frees the concurrency lock
+// under a live worker. That is issue #11 and is not fixed here; this map exists
+// so the money half cannot be made worse in the meantime.)
+const liveWorkers = new Set();
+
 function startWorker(id, goal, voiceSet) {
-  const logFd = fs.openSync(path.join(jobDir(id), 'worker.log'), 'a');
+  // The whole body is guarded, not just the spawn. bumpQuota() has already run
+  // by the time we get here, so anything that throws on the way to a live
+  // child leaks a slot for the rest of the day — and opening worker.log can
+  // genuinely throw, e.g. if the retention sweep removes the directory in
+  // between. That is the same leak this issue exists to close.
+  let logFd;
+  try {
+    logFd = fs.openSync(path.join(jobDir(id), 'worker.log'), 'a');
+  } catch (e) {
+    failToStart(id, 'could not open worker log', e);
+    return;
+  }
   let child;
   try {
     child = spawn(ENGINE_PY, [
@@ -165,20 +255,17 @@ function startWorker(id, goal, voiceSet) {
     });
   } catch (e) {
     fs.closeSync(logFd);
-    writeStatus(id, {
-      jobId: id, state: 'failed', stage: null, progress: 0,
-      detail: 'worker spawn failed', error: String(e),
-    });
+    failToStart(id, 'worker spawn failed', e);
     return;
   }
   fs.closeSync(logFd); // child holds its own copy of the fd
+  liveWorkers.add(id);
   child.on('error', (e) => {
-    writeStatus(id, {
-      jobId: id, state: 'failed', stage: null, progress: 0,
-      detail: 'worker spawn failed', error: String(e),
-    });
+    liveWorkers.delete(id);
+    failToStart(id, 'worker spawn failed', e);
   });
   child.on('exit', () => {
+    liveWorkers.delete(id);
     const st = readJsonSafe(path.join(jobDir(id), 'status.json'));
     if (!st || (st.state !== 'ready' && st.state !== 'failed')) {
       writeStatus(id, {
@@ -187,6 +274,9 @@ function startWorker(id, goal, voiceSet) {
         detail: 'worker crashed', error: 'worker crashed',
       });
     }
+    // The customer has nothing either way, so a crash and a clean failure are
+    // not worth charging differently for. A `ready` job keeps its slot.
+    if (!st || st.state !== 'ready') releaseQuota(id);
   });
 }
 
@@ -256,7 +346,17 @@ async function handleRequest(req, res) {
       jobId, state: 'rendering', stage: 'scripting', progress: 0,
       detail: 'Queued',
     });
-    bumpQuota();
+    if (!bumpQuota(jobId)) {
+      // No spend. A render whose slot was never recorded is one the cap cannot
+      // see, and the volume that could not take 80 bytes of JSON is not going
+      // to hold ~500 MB of audio either.
+      writeStatus(jobId, {
+        jobId, state: 'failed', stage: null, progress: 0,
+        detail: 'could not record the render against the daily quota',
+        error: 'quota storage unavailable',
+      });
+      return sendJson(res, 503, { error: 'storage_unavailable' });
+    }
     startWorker(jobId, body.goal, body.voiceSet);
     return sendJson(res, 202, { jobId, state: 'rendering' });
   }
@@ -353,6 +453,16 @@ function sweepStaleJobs() {
     const age = Date.now() - new Date(st.updatedAt || 0).getTime();
     if (age > STALE_MS) {
       writeStatus(d.name, { ...st, state: 'failed', error: 'service restarted during render — please start a new one' });
+      // Only refund when the worker is genuinely gone. A long assembly stage
+      // makes a live render look stale, and refunding there would hand back a
+      // slot the job is still using — it may yet finish `ready`, and the day's
+      // cap would then be exceeded by a render that spends real credits.
+      if (liveWorkers.has(d.name)) {
+        console.warn('stale sweep hit a job whose worker is still running:', d.name,
+          '- not releasing its quota slot (see #11)');
+      } else {
+        releaseQuota(d.name);
+      }
       console.log('swept stale job', d.name);
     }
   }
@@ -416,7 +526,15 @@ function sweepJobs() {
   sweepStaleJobs();
   sweepExpiredJobs();
 }
+// Overridable for the same reason RENDERS_DIR and ENGINE_PY are: a 60 s tick is
+// right in production and untestable in a unit test, and the sweep's behaviour
+// against a live worker is exactly what needs pinning.
+const SWEEP_MS = (() => {
+  const n = parseInt(process.env.SWEEP_INTERVAL_MS || '60000', 10);
+  return Number.isFinite(n) && n > 0 ? n : 60 * 1000;
+})();
+
 sweepJobs();
-setInterval(sweepJobs, 60 * 1000).unref();
+setInterval(sweepJobs, SWEEP_MS).unref();
 
 server.listen(PORT, '127.0.0.1', () => console.log('hypnosis-studio on 127.0.0.1:' + PORT));
