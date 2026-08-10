@@ -43,6 +43,7 @@ import soundfile as sf
 import job_files
 import qa
 import render_track
+import segment_cache
 import timeline
 
 # ---------- registries ----------
@@ -340,6 +341,8 @@ def run(job_id: str, goal: str, voice_set: str, outdir: str,
     # ---- 2. voicing + whisper-layer (all 4 tracks, global progress) ----
     render_track.load_key()  # resolve once; tts() reads the module global
     voices = VOICE_SETS[voice_set]
+    cache_dir = segment_cache.configured_dir(os.path.dirname(outdir))
+    cache_hits = 0
     done = 0
     for t in plan:
         raw_dir = os.path.join(outdir, f"{t['track_key']}_segments_raw")
@@ -362,6 +365,22 @@ def run(job_id: str, goal: str, voice_set: str, outdir: str,
             if os.path.exists(out_path):
                 job.update(stage, progress, f"{detail} already rendered")
                 continue
+            # The per-job check above is scoped to this job's directory, and the
+            # server mints a fresh one on every POST — so on its own it does
+            # nothing for a customer retry. The shared cache is what makes a
+            # retry, or a second customer picking the same goal and voice, free.
+            cached = segment_cache.lookup(cache_dir, vid, tag, seg["text"])
+            if cached:
+                try:
+                    shutil.copyfile(cached, out_path)
+                    job.update(stage, progress, f"{detail} from cache")
+                    cache_hits += 1
+                    continue
+                except OSError as e:
+                    # Fall through and buy it; a broken cache must not be able to
+                    # fail a paid render.
+                    print(f"segment cache: could not reuse {cached}: {e}",
+                          flush=True)
             job.update(stage, progress, detail)
             raw_path = os.path.join(raw_dir, f"{seg['id']}.mp3")
             try:
@@ -379,6 +398,10 @@ def run(job_id: str, goal: str, voice_set: str, outdir: str,
                     f"[unsupported_settings]: both voice-setting variants were rejected")
             y, sr = render_track.mp3_to_float(raw_path)
             sf.write(out_path, render_track.treat(y, sr), sr, subtype="PCM_16")
+            # Cached as soon as it exists, not when the job succeeds. A job that
+            # dies at segment 150 of 152 is exactly the scenario this issue is
+            # about, and promoting only on success would cache nothing for it.
+            segment_cache.store(cache_dir, vid, tag, seg["text"], out_path)
             time.sleep(0.5)
 
     # ---- 3. entrainment-bed (assembly subprocess, per track) ----
@@ -417,6 +440,11 @@ def run(job_id: str, goal: str, voice_set: str, outdir: str,
     job.update("entrainment-bed", P_BED_END, "All 4 entrainment beds mixed")
 
     # ---- 4. mastering-qa ----
+    if cache_hits:
+        print(f"segment cache: {cache_hits}/{total_segs} segments reused "
+              f"({cache_hits / total_segs:.0%} of the program not re-purchased)",
+              flush=True)
+
     job.update("mastering-qa", P_BED_END, "Locating masters")
     manifest = planned_manifest(job_id, goal, voice_set, plan)
     planned_by_n = {t["n"]: float(t["total_s"]) for t in plan}
@@ -468,6 +496,17 @@ def run(job_id: str, goal: str, voice_set: str, outdir: str,
     if removed:
         print(f"cleanup: removed {removed} intermediate dirs "
               f"({freed / 1e6:.0f} MB)", flush=True)
+
+    # Bound the cache now the job has finished growing it. Swept here rather
+    # than on a timer because it only ever grows during a render, so a periodic
+    # sweep would have nothing to do between them.
+    try:
+        evicted, reclaimed = segment_cache.sweep(cache_dir)
+        if evicted:
+            print(f"segment cache: evicted {evicted} least-recently-used "
+                  f"segments ({reclaimed / 1e6:.0f} MB)", flush=True)
+    except Exception as e:  # noqa: BLE001 — a full cache must not fail a done job
+        print(f"segment cache: sweep failed: {e}", flush=True)
 
     job.ready()
     total_min = sum(e["durationSec"] for e in manifest["tracks"]) / 60
