@@ -151,8 +151,17 @@ function startWorker(id, goal, voiceSet) {
 
 // ---- static serving ----
 function serveStatic(req, res, urlPath) {
-  let rel = decodeURIComponent(urlPath.split('?')[0]);
+  let rel;
+  try {
+    rel = decodeURIComponent(urlPath.split('?')[0]);
+  } catch {
+    // Syntactically valid but undecodable escapes (e.g. /%80) throw URIError.
+    // nginx forwards these untouched, so they reach us verbatim.
+    return send(res, 400, 'bad request');
+  }
   if (rel === '/') rel = '/index.html';
+  // A NUL survives decoding and makes fs.readFile throw synchronously.
+  if (rel.includes('\0')) return send(res, 400, 'bad request');
   const filePath = path.normalize(path.join(DIST, rel));
   if (!filePath.startsWith(DIST)) return send(res, 403, 'forbidden');
 
@@ -176,7 +185,7 @@ function serveStatic(req, res, urlPath) {
   });
 }
 
-const server = http.createServer(async (req, res) => {
+async function handleRequest(req, res) {
   const url = req.url || '/';
 
   if (url === '/api/health') {
@@ -229,13 +238,24 @@ const server = http.createServer(async (req, res) => {
     if (!allowed.includes(name)) return sendJson(res, 404, { error: 'unknown file' });
     const filePath = path.join(jobDir(id), name);
     const ext = path.extname(name).toLowerCase();
+    // The manifest can outlive the files it lists — retention sweeps delete job
+    // dirs, so a listed master may simply be gone.
+    let size;
+    try {
+      size = fs.statSync(filePath).size;
+    } catch {
+      return sendJson(res, 404, { error: 'unknown file' });
+    }
     res.writeHead(200, {
       'Content-Type': MIME[ext] || 'application/octet-stream',
       'Content-Disposition': `attachment; filename="${name}"`,
-      'Content-Length': fs.statSync(filePath).size,
+      'Content-Length': size,
     });
     if (req.method === 'HEAD') return res.end();
-    return fs.createReadStream(filePath).pipe(res);
+    // Headers are already sent, so a mid-stream failure can only be abandoned.
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', () => res.destroy());
+    return stream.pipe(res);
   }
 
   const jobMatch = url.match(/^\/api\/jobs\/([A-Za-z0-9_-]+)$/);
@@ -255,6 +275,16 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'method not allowed');
   serveStatic(req, res, url);
+}
+
+// An async handler's unhandled rejection exits the process, so every route needs
+// a backstop. handleRequest is async, so synchronous throws surface here too.
+const server = http.createServer((req, res) => {
+  handleRequest(req, res).catch((e) => {
+    console.error('request failed:', req.method, req.url, e && e.message);
+    if (res.headersSent) return res.destroy();
+    sendJson(res, 500, { error: 'internal error' });
+  });
 });
 
 // On boot (and then every 60 s), fail any job whose status is stuck at
