@@ -360,6 +360,46 @@ test('the seizure warning appears before purchase, not only in the footer', () =
     'the warning appears after the consent label rather than before it');
 });
 
+test('every door shows the seizure warning, not just the one it was added to', () => {
+  // Landing.tsx holds two independent door components. The warning was first
+  // added only to PerformanceLanding, so /healing rendered no seizure warning at
+  // all — and a file-scoped `LANDING.includes('SAFETY_WARNING')` passed anyway,
+  // because the constant *was* in the file. A browser on /healing found it.
+  //
+  // So assert per component. Each door either renders the warning itself or
+  // renders a shared component that does.
+  const src = codeOnly(LANDING);
+
+  // Each component's body runs to the next top-level function, NOT to the next
+  // *door*. Bounding by door let HealingLanding — the last one — run to EOF and
+  // swallow the `Landing` dispatcher below it, which renders
+  // `<PerformanceLanding`. The check then "passed" by finding the other door's
+  // tag inside healing's slice, and stayed green when the fix was reverted.
+  //
+  // The `export (default )?` alternation matters for the same reason: the
+  // dispatcher is `export default function Landing`, so a bare /^function/
+  // does not treat it as a boundary and healing's slice runs to EOF anyway.
+  const fns = [...src.matchAll(/^(?:export\s+(?:default\s+)?)?function (\w+)/gm)].map((m, i, all) => ({
+    name: m[1],
+    body: src.slice(m.index, all[i + 1] ? all[i + 1].index : src.length),
+  }));
+
+  const carriers = fns
+    .filter((fn) => /\{SAFETY_WARNING\}/.test(fn.body))
+    .map((fn) => fn.name);
+  assert.ok(carriers.length > 0, 'no component in Landing.tsx renders SAFETY_WARNING');
+
+  for (const door of ['PerformanceLanding', 'HealingLanding']) {
+    const fn = fns.find((f) => f.name === door);
+    assert.ok(fn, `${door} no longer exists — update this test`);
+
+    const direct = /\{SAFETY_WARNING\}/.test(fn.body);
+    const viaShared = carriers.some((c) => c !== door && fn.body.includes(`<${c}`));
+    assert.ok(direct || viaShared,
+      `${door} never reaches the seizure warning — that door ships without it`);
+  }
+});
+
 test('the general disclaimer still exists alongside it', () => {
   // #65 wants the disclaimer kept, just no longer the sole carrier.
   const data = fs.readFileSync(path.join(WEB, 'lib', 'data.ts'), 'utf8');

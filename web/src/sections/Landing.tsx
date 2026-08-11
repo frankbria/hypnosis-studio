@@ -112,10 +112,25 @@ function BrandButton({ onHome }: { onHome: () => void }) {
 }
 
 
+/**
+ * The safety block, rendered by *both* doors.
+ *
+ * SAFETY_WARNING lives here rather than in each door because it was originally
+ * added only to PerformanceLanding — healing renders a different component, so
+ * the seizure warning silently did not exist on the healing door at all, which
+ * is the door whose audience is most likely to have a relevant history. A
+ * file-scoped test could not see that; a browser on /healing could.
+ *
+ * Anchoring it to the component both doors already render makes the divergence
+ * structurally impossible instead of fixed once.
+ */
 function DisclaimerSection() {
   return (
     <section id="disclaimer" className="scroll-mt-24 px-6 py-16">
-      <div className="mx-auto max-w-3xl">
+      <div className="mx-auto max-w-3xl space-y-4">
+        <p className="rounded-2xl border border-amber-200/25 bg-amber-100/[0.06] px-7 py-5 text-sm leading-relaxed text-white/75">
+          {SAFETY_WARNING}
+        </p>
         <div className="flex gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-7">
           <Info className="mt-0.5 size-4 shrink-0 text-[#d4b87f]/70" />
           <p className="text-xs leading-relaxed text-white/60">{DISCLAIMER}</p>
