@@ -370,6 +370,25 @@ export const SAFETY_WARNING =
 export const DISCLAIMER =
   'Hypnosis Studio audio is for relaxation and personal development. It is not medical or psychological treatment and is not a substitute for professional care. Never listen while driving or operating machinery. If you have a history of seizures, severe mental illness, or are under 18, consult a qualified professional before use.'
 
+/**
+ * The attestation, checked separately from the disclaimer (#20).
+ *
+ * DISCLAIMER names three real contraindications — a history of seizures, severe
+ * mental illness, and being under 18 — but it named them inside a single
+ * checkbox that also covered everything else. One box acknowledging a paragraph
+ * attests to nothing in particular; the contraindications were doing no work.
+ *
+ * Phrased in the first person and about *this* buyer, so ticking it is a
+ * statement rather than an acknowledgement that text exists. It does not bar
+ * anyone: the condition is having spoken to a professional, which is exactly
+ * what DISCLAIMER already asks for. Barring people would push them to lie; this
+ * asks them to have done the thing.
+ */
+export const ATTESTATION =
+  'I am 18 or older. I do not have a history of seizures or a severe mental ' +
+  'illness — or if I do, I have spoken to a qualified professional about using ' +
+  'hypnosis audio.'
+
 /** The healing door's non-medical stance — shown on the chooser card, healing landing, and wizard footer. */
 export const HEALING_NONMEDICAL =
   'Not medicine. Not treatment. Always alongside — never instead of — medical care.'
