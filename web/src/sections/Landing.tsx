@@ -212,6 +212,13 @@ function HowMadeSection({ onNavigate }: { onNavigate?: (path: string) => void })
               } else if (onNavigate) {
                 event.preventDefault()
                 onNavigate('/performance')
+                // The link says "See the tiers", so landing at the top of the
+                // performance page is the wrong destination. onNavigate is a
+                // state change, so #pricing does not exist until React has
+                // committed — scroll on the next frame, once it does.
+                requestAnimationFrame(() =>
+                  document.getElementById('pricing')?.scrollIntoView({ behavior: 'smooth' }),
+                )
               }
             }}
             className="text-violet-300 underline underline-offset-2"
