@@ -313,7 +313,7 @@ export const PRICING: PricingTier[] = [
       'Any one catalog title — four tracks',
       'Your choice of voice',
       'WAV + MP3, studio-mastered',
-      'Downloads in seconds · 30-day access',
+      'Ready in about twenty minutes · 30-day access',
     ],
   },
   {

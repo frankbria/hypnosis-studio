@@ -178,15 +178,16 @@ function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 
           className="animate-glow absolute left-1/2 top-24 -z-10 h-[420px] w-[720px] -translate-x-1/2 rounded-full bg-violet-500/10 blur-3xl"
         />
         <div className="mx-auto max-w-3xl text-center">
-          <Eyebrow>Performance · personalized self-hypnosis audio</Eyebrow>
+          <Eyebrow>Performance · self-hypnosis programs</Eyebrow>
           <h1 className="font-display mt-6 text-5xl leading-[1.08] text-[#e8e6f0] md:text-7xl">
-            Hypnosis, written for one mind.{' '}
-            <em className="text-violet-300">Yours.</em>
+            A four-track self-hypnosis program, built for{' '}
+            <em className="text-violet-300">one outcome.</em>
           </h1>
           <p className="mx-auto mt-6 max-w-xl text-base leading-relaxed text-white/55 md:text-lg">
-            A personalized four-track self-hypnosis program for learning,
-            focus, creativity, and seeing opportunity — scripted and voiced for
-            your goal, delivered as studio-mastered audio.
+            Written for a single goal, revised, then locked — the same four
+            tracks every listener gets. Two AI voices render from that one
+            script and land in exact time with each other: a narrator to follow,
+            a whisper underneath. Ready in about twenty minutes.
           </p>
           <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <Button
@@ -487,7 +488,7 @@ function HealingLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 'doo
           </h2>
           <p className="mt-4 max-w-xl text-sm leading-relaxed text-white/50">
             Every practice is a four-track program — induction, deepening,
-            suggestion, integration — rendered fresh in the voice you choose.
+            suggestion, integration — in the voice set you choose.
           </p>
           <div className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {goals.map((goal) => (

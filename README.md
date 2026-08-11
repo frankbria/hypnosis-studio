@@ -1,6 +1,6 @@
 # Hypnosis Studio
 
-Personalized self-hypnosis program generator: the user picks a goal and a voice, and we script, voice, and master a multi-track audio program with entrainment beds — delivered as a simple download.
+Self-hypnosis program generator: the user picks a goal and a voice, and we script, voice, and master a multi-track audio program with entrainment beds — delivered as a simple download.
 
 ## Status
 
