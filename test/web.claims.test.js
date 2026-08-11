@@ -406,3 +406,48 @@ test('the general disclaimer still exists alongside it', () => {
   assert.match(data, /export const DISCLAIMER/);
   assert.match(data, /not medical or psychological treatment/i);
 });
+
+// --------------------------------------------------------------------------
+// The privacy page must not overstate (#21)
+// --------------------------------------------------------------------------
+
+test('every third-party origin the site actually requests is disclosed', () => {
+  // The privacy copy says "no analytics, no advertising tags, no third-party
+  // scripts". That was written from reading index.html, which is clean — but
+  // index.css opens with an @import from fonts.googleapis.com, and Vite leaves
+  // it in the emitted CSS. So every visitor's browser requests a stylesheet
+  // from Google, disclosing their IP, while the page said nothing left the box.
+  //
+  // Assert against the real sources rather than against a remembered audit, so
+  // adding a CDN cannot silently falsify the policy.
+  const sources = ['index.css', path.join('..', 'index.html')]
+    .map((f) => path.join(WEB, f))
+    .filter((f) => fs.existsSync(f))
+    .map((f) => fs.readFileSync(f, 'utf8'))
+    .join('\n');
+
+  const found = [...new Set(
+    [...sources.matchAll(/https?:\/\/([a-z0-9.-]+)/gi)].map((m) => m[1].toLowerCase()),
+  )].filter((h) => !h.endsWith('hypnosisstudio.com') && h !== 'localhost');
+
+  const legal = fs.readFileSync(path.join(WEB, 'lib', 'legal.ts'), 'utf8');
+  const declared = [...legal.matchAll(/'([a-z0-9.-]+\.[a-z]{2,})'/gi)].map((m) =>
+    m[1].toLowerCase(),
+  );
+
+  for (const host of found) {
+    assert.ok(declared.includes(host),
+      `${host} is requested at runtime but not declared in THIRD_PARTY_ORIGINS — ` +
+      'the privacy page claims no third-party requests');
+  }
+
+  // And a declared origin must actually be described in prose, not just listed
+  // in an array nobody renders.
+  if (found.length > 0) {
+    assert.match(legal, /export const FONT_NOTICE/,
+      'a third-party request exists with no disclosure copy');
+    const page = fs.readFileSync(path.join(WEB, 'sections', 'Legal.tsx'), 'utf8');
+    assert.match(codeOnly(page), /\{FONT_NOTICE\}/,
+      'the disclosure exists as a constant but the privacy page never renders it');
+  }
+});
