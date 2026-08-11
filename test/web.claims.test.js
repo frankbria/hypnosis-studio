@@ -527,3 +527,77 @@ test('the render-failure message is true whether or not payment is live', () => 
   assert.match(text, /if you were charged/i,
     'the assurance asserts a charge state instead of being true in both');
 });
+
+// --------------------------------------------------------------------------
+// Age and health attestation (#20)
+// --------------------------------------------------------------------------
+
+test('the attestation is a separate checkbox, not a clause in the disclaimer', () => {
+  const data = fs.readFileSync(path.join(WEB, 'lib', 'data.ts'), 'utf8');
+  assert.match(data, /export const ATTESTATION/,
+    'the attestation does not exist independently of DISCLAIMER');
+
+  const wizard = codeOnly(WIZARD());
+  // Two distinct checkbox ids, so this cannot be satisfied by relabelling the
+  // existing consent box.
+  for (const id of ['wizard-consent', 'wizard-attestation']) {
+    assert.ok(wizard.includes(`id="${id}"`), `${id} checkbox is missing`);
+  }
+  assert.match(wizard, /\{ATTESTATION\}/, 'the attestation text is never rendered');
+
+  // The box must be bound to its OWN state. Wiring `checked` to `agreed` while
+  // `onCheckedChange` sets `attested` leaves a checkbox that displays the other
+  // box's state — it renders, the gate still works, and it is visibly wrong.
+  const box = wizard.slice(wizard.indexOf('id="wizard-attestation"'));
+  const block = box.slice(0, box.indexOf('/>'));
+  assert.match(block, /checked=\{attested\}/,
+    'the attestation checkbox does not display its own state');
+  assert.match(block, /setAttested\(/,
+    'the attestation checkbox does not update its own state');
+});
+
+test('generation stays disabled until BOTH boxes are checked', () => {
+  // Separate booleans rather than one combined flag: a single flag can be
+  // satisfied by the disclaimer alone, which is the state #20 was filed about.
+  const wizard = codeOnly(WIZARD());
+  assert.match(wizard, /const \[attested, setAttested\] = useState\(false\)/,
+    'the attestation has no state of its own');
+
+  const gate = wizard.match(/disabled=\{![^}]*accessCode\.trim\(\)\}/);
+  assert.ok(gate, 'could not find the generate gate');
+  assert.match(gate[0], /!agreed/, 'the gate no longer requires the disclaimer');
+  assert.match(gate[0], /!attested/, 'the gate does not require the attestation');
+});
+
+test('the attestation resets when the wizard restarts', () => {
+  // A stale `true` would carry one person's attestation into the next person's
+  // session on a shared machine.
+  const wizard = codeOnly(WIZARD());
+  const at = wizard.indexOf('setAgreed(false)');
+  assert.ok(at > 0, 'the reset path no longer clears consent');
+  assert.match(wizard.slice(at, at + 120), /setAttested\(false\)/,
+    'the attestation is not cleared alongside consent on reset');
+});
+
+test('the attestation states the contraindications the disclaimer names', () => {
+  const data = fs.readFileSync(path.join(WEB, 'lib', 'data.ts'), 'utf8');
+  const at = data.indexOf('export const ATTESTATION');
+  // Join adjacent string literals before matching. The constant is written as
+  // `'…severe mental ' + 'illness…'`, so /mental illness/ tests the source
+  // layout rather than the sentence the customer reads — it would fail on
+  // correct copy purely because of where the line wrapped.
+  const text = data.slice(at, data.indexOf('\n\n', at)).replace(/'\s*\+\s*'/g, '');
+  assert.match(text, /18/, 'the attestation does not cover age');
+  assert.match(text, /seizure/i, 'the attestation does not cover seizures');
+  assert.match(text, /mental illness/i, 'the attestation does not cover mental illness');
+  // First person: it must be a statement by the buyer, not a restatement of
+  // what the disclaimer says, which is what one blanket box already did.
+  // Must OPEN in the first person. An alternation over "I am | I do not |
+  // I have" passed a second-person rewrite whose tail still read "…I have
+  // spoken to a professional" — one first-person clause survived and satisfied
+  // the whole check while the attestation itself had become an instruction.
+  assert.match(text, /=\s*\n?\s*'I\s/,
+    'the attestation does not open in the first person — it reads as an instruction, not a statement');
+  assert.ok(!/\byou (should|must|need to)\b/i.test(text),
+    'the attestation tells the reader what to do instead of stating what is true of them');
+});

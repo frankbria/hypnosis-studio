@@ -21,6 +21,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { AudioPreviewButton } from '@/components/AudioPreviewButton'
 import { useAudioPreview } from '@/hooks/use-audio-preview'
 import {
+  ATTESTATION,
   DISCLAIMER,
   GENERATION_STAGES,
   GENERATION_TOTAL_MS,
@@ -405,6 +406,7 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
   const [customText, setCustomText] = useState('')
   const [voiceSetId, setVoiceSetId] = useState<VoiceSet['id'] | null>(null)
   const [agreed, setAgreed] = useState(false)
+  const [attested, setAttested] = useState(false)
   const [accessCode, setAccessCode] = useState('')
   const [codeError, setCodeError] = useState<string | null>(null)
   const [jobResult, setJobResult] = useState<JobResult | null>(null)
@@ -426,6 +428,7 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
     setCustomText('')
     setVoiceSetId(null)
     setAgreed(false)
+    setAttested(false)
     setCodeError(null)
     setJobResult(null)
     goTo(0)
@@ -726,6 +729,21 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
                   </span>
                 </label>
 
+                <label
+                  htmlFor="wizard-attestation"
+                  className="mt-3 flex cursor-pointer items-start gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-6"
+                >
+                  <Checkbox
+                    id="wizard-attestation"
+                    checked={attested}
+                    onCheckedChange={(value) => setAttested(value === true)}
+                    className="mt-0.5 border-white/25 data-[state=checked]:border-violet-300 data-[state=checked]:bg-violet-300 data-[state=checked]:text-[#0b0b12]"
+                  />
+                  <span className="text-xs leading-relaxed text-white/60">
+                    {ATTESTATION}
+                  </span>
+                </label>
+
                 <p className="mt-4 text-xs leading-relaxed text-white/60">
                   {RENDER_FAILURE_GUARANTEE}{' '}
                   <a
@@ -984,7 +1002,7 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
             {step === 2 && (
               <Button
                 onClick={() => goTo(3)}
-                disabled={!agreed || !accessCode.trim()}
+                disabled={!agreed || !attested || !accessCode.trim()}
                 className="bg-primary text-primary-foreground hover:bg-violet-300 disabled:opacity-30"
               >
                 Generate my program
