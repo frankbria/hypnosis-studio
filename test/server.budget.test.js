@@ -367,3 +367,162 @@ test('a double refund cannot take back characters another job is holding', async
     stop(srv);
   }
 });
+
+// --------------------------------------------------------------------------
+// The cache key must match Python's, byte for byte
+// --------------------------------------------------------------------------
+
+test('the segment cache key matches the one Python writes', async () => {
+  // The budget only charges for segments not already in the cache, so it has to
+  // recompute the key segment_cache.key() uses. If the two ever diverge, every
+  // segment looks uncached and the studio is charged for work already bought —
+  // silently, and in the direction that refuses free renders.
+  const crypto = require('node:crypto');
+  const { execFileSync } = require('node:child_process');
+
+  const cases = [
+    ['nPczCjzI2devNBz1zQrb', '[soft] ', 'Let your shoulders soften.'],
+    ['RsoSo7Gg7GyAtGoPBiqb', '[whispering] ', 'You are already doing it.'],
+    ['v', '[soft] ', ''],                       // empty text
+    ['v', '[soft] ', 'unicode: café — ünïcödé'], // multi-byte
+    ['ab', 'c', 'x'],                            // the concatenation-collision pair
+    ['a', 'bc', 'x'],
+  ];
+
+  function nodeKey(voiceId, tag, text) {
+    const h = crypto.createHash('sha256');
+    for (const field of [voiceId, tag, text]) {
+      const raw = Buffer.from(field, 'utf8');
+      h.update(String(raw.length), 'ascii');
+      h.update(Buffer.from([0]));
+      h.update(raw);
+    }
+    return h.digest('hex');
+  }
+
+  let out;
+  try {
+    out = execFileSync('python3', [
+      '-c',
+      'import sys, json; sys.path.insert(0, "engine"); import segment_cache;'
+      + 'print(json.dumps([segment_cache.key(*a) for a in json.load(sys.stdin)]))',
+    ], { cwd: ROOT, input: JSON.stringify(cases), encoding: 'utf8' });
+  } catch (e) {
+    // No python3 here; the server-side half is still exercised below.
+    console.log('skipping cross-language check:', e.message);
+    return;
+  }
+
+  const pythonKeys = JSON.parse(out);
+  cases.forEach((args, i) => {
+    assert.strictEqual(nodeKey(...args), pythonKeys[i],
+      `key diverged for ${JSON.stringify(args)} — the budget would charge for `
+      + 'segments that are already cached');
+  });
+});
+
+test('a repeat render of a fully cached goal costs nothing', async () => {
+  // The false-refusal this guards against: after #9 a second render of the same
+  // (goal, voiceSet) buys no segments at all, so charging it the full script
+  // would refuse a render that is free.
+  const crypto = require('node:crypto');
+  const rendersDir = fs.mkdtempSync(path.join(os.tmpdir(), 'budget-cached-'));
+  const cache = path.join(rendersDir, 'segment-cache');
+
+  const VOICES = { narrator: 'nPczCjzI2devNBz1zQrb', whisper: 'RsoSo7Gg7GyAtGoPBiqb' };
+  function key(voiceId, tag, text) {
+    const h = crypto.createHash('sha256');
+    for (const field of [voiceId, tag, text]) {
+      const raw = Buffer.from(field, 'utf8');
+      h.update(String(raw.length), 'ascii');
+      h.update(Buffer.from([0]));
+      h.update(raw);
+    }
+    return h.digest('hex');
+  }
+  // Pre-populate every segment of river/male.
+  for (const suffix of ['', '_track2', '_track3', '_track4']) {
+    const p = path.join(ROOT, 'engine', 'scripts', `river${suffix}_tts_segments.json`);
+    for (const seg of JSON.parse(fs.readFileSync(p, 'utf8')).segments) {
+      const whisper = seg.phase === 'suggestion';
+      const k = key(whisper ? VOICES.whisper : VOICES.narrator,
+        whisper ? '[whispering] ' : '[soft] ', String(seg.text || ''));
+      const dir = path.join(cache, k.slice(0, 2));
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${k}.wav`), Buffer.from('RIFF'));
+    }
+  }
+
+  // A budget far too small for a full river render.
+  const srv = await startServer({
+    budget: '100', rendersDir, enginePy: makeEngine(),
+  });
+  try {
+    const res = await request(srv.port, 'POST', '/api/programs', START('river'));
+    assert.strictEqual(res.status, 202,
+      'a fully cached render costs nothing and must not be refused for budget');
+    await sleep(900);
+    const b = readBudgetFile(rendersDir);
+    assert.strictEqual(b.chars, 0, 'a fully cached render must not be charged');
+  } finally {
+    stop(srv);
+  }
+});
+
+test('a partially cached render is charged only for what it will buy', async () => {
+  const crypto = require('node:crypto');
+  const rendersDir = fs.mkdtempSync(path.join(os.tmpdir(), 'budget-partial-'));
+  const cache = path.join(rendersDir, 'segment-cache');
+  const VOICES = { narrator: 'nPczCjzI2devNBz1zQrb', whisper: 'RsoSo7Gg7GyAtGoPBiqb' };
+  function key(voiceId, tag, text) {
+    const h = crypto.createHash('sha256');
+    for (const field of [voiceId, tag, text]) {
+      const raw = Buffer.from(field, 'utf8');
+      h.update(String(raw.length), 'ascii');
+      h.update(Buffer.from([0]));
+      h.update(raw);
+    }
+    return h.digest('hex');
+  }
+  // Cache only track 1's segments.
+  const seeded = new Set();
+  const p = path.join(ROOT, 'engine', 'scripts', 'river_tts_segments.json');
+  for (const seg of JSON.parse(fs.readFileSync(p, 'utf8')).segments) {
+    const whisper = seg.phase === 'suggestion';
+    const tag = whisper ? '[whispering] ' : '[soft] ';
+    const k = key(whisper ? VOICES.whisper : VOICES.narrator, tag, String(seg.text || ''));
+    seeded.add(k);
+    const dir = path.join(cache, k.slice(0, 2));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${k}.wav`), Buffer.from('RIFF'));
+  }
+
+  // The expectation has to be computed the way the server does, over all four
+  // tracks — not as "the size of track 1". Segments recur across tracks (the
+  // disclaimer is reused verbatim), and a content-keyed cache deduplicates them,
+  // so seeding track 1 also covers every identical segment elsewhere. Assuming
+  // otherwise overstates the charge by ~980 characters here.
+  let expected = 0;
+  for (const suffix of ['', '_track2', '_track3', '_track4']) {
+    const sp = path.join(ROOT, 'engine', 'scripts', `river${suffix}_tts_segments.json`);
+    for (const seg of JSON.parse(fs.readFileSync(sp, 'utf8')).segments) {
+      const whisper = seg.phase === 'suggestion';
+      const tag = whisper ? '[whispering] ' : '[soft] ';
+      const k = key(whisper ? VOICES.whisper : VOICES.narrator, tag, String(seg.text || ''));
+      if (!seeded.has(k)) expected += tag.length + String(seg.text || '').length;
+    }
+  }
+
+  const srv = await startServer({ budget: '500000', rendersDir, enginePy: makeEngine() });
+  try {
+    await request(srv.port, 'POST', '/api/programs', START('river'));
+    await sleep(900);
+    const b = readBudgetFile(rendersDir);
+    assert.ok(expected < goalChars('river'),
+      'the fixture caches nothing; this test would prove nothing');
+    assert.strictEqual(b.chars, expected,
+      'the charge should cover exactly the segments not already in the cache');
+  } finally {
+    stop(srv);
+  }
+});

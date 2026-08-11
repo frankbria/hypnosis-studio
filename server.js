@@ -52,6 +52,12 @@ const VALID_GOALS = new Set(['polymath', 'golden_thread', 'inner_studio', 'open_
 //
 // Default sized to a Pro allocation (~500k characters, ~25 programs). Set it to
 // match the plan actually being paid for.
+// Mirrors VOICE_SETS in render_program.py — the ids that end up in the cache key.
+const VOICE_SETS = {
+  male: { narrator: 'nPczCjzI2devNBz1zQrb', whisper: 'RsoSo7Gg7GyAtGoPBiqb' },
+  female: { narrator: 'EXAVITQu4vr4xnSDxMaL', whisper: 'pFZP5JQG7iQjIQuC4Bku' },
+};
+
 const MONTHLY_CHAR_BUDGET = (() => {
   const n = parseInt(process.env.MONTHLY_CHAR_BUDGET || '500000', 10);
   return Number.isFinite(n) && n > 0 ? n : 500000;
@@ -181,6 +187,59 @@ function anyJobRendering() {
   return false;
 }
 
+// The cache key Python writes, recomputed here. Must stay byte-identical to
+// segment_cache.key(): sha256 over each field as <utf8 length> NUL <utf8 bytes>.
+// A cross-language test pins the two together, because a silent divergence
+// would make every segment look uncached and charge for work already paid for.
+function segmentCacheKey(voiceId, tag, text) {
+  const h = crypto.createHash('sha256');
+  for (const field of [voiceId, tag, text]) {
+    const raw = Buffer.from(field, 'utf8');
+    h.update(String(raw.length), 'ascii');
+    h.update(Buffer.from([0]));
+    h.update(raw);
+  }
+  return h.digest('hex');
+}
+
+function segmentCacheDir() {
+  return process.env.SEGMENT_CACHE_DIR || path.join(RENDERS, 'segment-cache');
+}
+
+// What this render would actually buy. Since #9 a segment already in the shared
+// cache costs nothing, and a repeat of the same (goal, voiceSet) buys nothing at
+// all — charging the full script there would refuse renders that are free, which
+// is a lost sale rather than a saved credit.
+//
+// Falls back to the full size if anything about the cache cannot be read: over-
+// charging delays a sale, under-charging overruns the plan, and only one of
+// those is recoverable.
+function uncachedChars(goal, voiceSet) {
+  const voices = VOICE_SETS[voiceSet];
+  if (!voices) return GOAL_CHARS[goal];
+  const cache = segmentCacheDir();
+  let total = 0;
+  try {
+    for (const suffix of ['', '_track2', '_track3', '_track4']) {
+      const p = path.join(__dirname, 'engine', 'scripts', `${goal}${suffix}_tts_segments.json`);
+      const script = readJsonSafe(p);
+      if (!script || !Array.isArray(script.segments)) return GOAL_CHARS[goal];
+      for (const seg of script.segments) {
+        const whisper = seg.phase === 'suggestion';
+        const tag = whisper ? '[whispering] ' : '[soft] ';
+        const voiceId = whisper ? voices.whisper : voices.narrator;
+        const cost = tag.length + String(seg.text || '').length;
+        const key = segmentCacheKey(voiceId, tag, String(seg.text || ''));
+        const entry = path.join(cache, key.slice(0, 2), `${key}.wav`);
+        if (!fs.existsSync(entry)) total += cost;
+      }
+    }
+  } catch {
+    return GOAL_CHARS[goal];
+  }
+  return total;
+}
+
 function budgetPath() {
   return path.join(RENDERS, '.budget.json');
 }
@@ -218,10 +277,10 @@ function budgetRemaining() {
   return Math.max(0, MONTHLY_CHAR_BUDGET - readBudget().chars);
 }
 
-function chargeBudget(id, goal) {
+function chargeBudget(id, cost) {
   const b = readBudget();
-  b.chars += GOAL_CHARS[goal];
-  b.jobs[id] = GOAL_CHARS[goal];
+  b.chars += cost;
+  b.jobs[id] = cost;
   return writeBudget(b);
 }
 
@@ -569,7 +628,7 @@ async function handleRequest(req, res) {
     // until the plan resets or is raised" — which is why it is a 503 and not a
     // second 429. #25 needs that second one for its own preflight.
     if (readQuota().count >= MAX_JOBS_PER_DAY) return sendJson(res, 429, { error: 'daily_cap' });
-    const cost = GOAL_CHARS[body.goal];
+    const cost = uncachedChars(body.goal, body.voiceSet);
     if (budgetRemaining() < cost) {
       console.warn('refusing render: needs', cost, 'characters,', budgetRemaining(), 'left this month');
       return sendJson(res, 503, {
@@ -584,7 +643,7 @@ async function handleRequest(req, res) {
       jobId, state: 'rendering', stage: 'scripting', progress: 0,
       detail: 'Queued',
     });
-    if (!chargeBudget(jobId, body.goal)) {
+    if (!chargeBudget(jobId, cost)) {
       // Same reasoning as the quota below: a render the budget cannot see is a
       // render the budget cannot bound.
       writeStatus(jobId, {

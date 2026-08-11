@@ -273,9 +273,38 @@ function GeneratingStep({
         })
         return
       }
-      if (res.status !== 202) {
-        // Unexpected response (e.g. static host returning 404) — demo mode.
+      if (res.status === 503) {
+        // The studio is refusing work it cannot deliver — a spent monthly
+        // allowance, or a renders volume it cannot write to. Distinct from 429:
+        // this one does not come back tomorrow on its own.
+        let reason = ''
+        try {
+          reason = ((await res.json()) as { error?: string }).error ?? ''
+        } catch {
+          reason = ''
+        }
+        setError({
+          message:
+            reason === 'budget_exhausted'
+              ? 'The studio is at capacity for this month and is not taking new programs right now. Nothing has been charged.'
+              : 'The studio is temporarily unavailable. Nothing has been charged — please try again shortly.',
+          retryable: reason !== 'budget_exhausted',
+        })
+        return
+      }
+      if (res.status === 404) {
+        // No API behind this host at all (static preview) — demo mode.
         await mockFlow()
+        return
+      }
+      if (res.status !== 202) {
+        // Anything else is a real failure. It must NOT fall through to
+        // mockFlow(), which simulates a completed render — that would show
+        // "your program is ready" for a render that never started.
+        setError({
+          message: 'Something went wrong starting your program. Nothing has been charged — please try again.',
+          retryable: true,
+        })
         return
       }
       const { jobId } = await res.json()
