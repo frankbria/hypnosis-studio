@@ -287,6 +287,11 @@ function chargeBudget(id, cost) {
 function refundBudget(id) {
   const b = readBudget();
   const owed = b.jobs[id];
+  // A job charged at 23:59 and failing at 00:01 finds an empty ledger and is not
+  // refunded. That is deliberate rather than merely accepted: the charge sat
+  // against a month that has closed, and crediting it to the new month would
+  // hand out allowance that was never spent from it. The characters are stranded
+  // in a file nothing reads again, which is the conservative direction.
   if (typeof owed !== 'number') return false;
   delete b.jobs[id];
   b.chars = Math.max(0, b.chars - owed);
@@ -592,7 +597,8 @@ async function handleRequest(req, res) {
   const url = req.url || '/';
 
   if (url === '/api/health') {
-    const remaining = budgetRemaining();
+    const budgetNow = readBudget();
+    const remaining = Math.max(0, MONTHLY_CHAR_BUDGET - budgetNow.chars);
     const dearest = Math.max(...Object.values(GOAL_CHARS));
     // `rendering` is what the deploy gate waits on (deploy/wait-for-idle.sh) —
     // the same predicate the render endpoint uses to return 409 busy, so there
@@ -606,8 +612,8 @@ async function handleRequest(req, res) {
       // anything new to monitor. `programsLeft` is deliberately measured
       // against the dearest goal, so it is the number that cannot disappoint.
       budget: {
-        month: readBudget().month,
-        charsUsed: readBudget().chars,
+        month: budgetNow.month,
+        charsUsed: budgetNow.chars,
         charsRemaining: remaining,
         charsBudget: MONTHLY_CHAR_BUDGET,
         programsLeft: Math.floor(remaining / dearest),
@@ -629,6 +635,15 @@ async function handleRequest(req, res) {
     // second 429. #25 needs that second one for its own preflight.
     if (readQuota().count >= MAX_JOBS_PER_DAY) return sendJson(res, 429, { error: 'daily_cap' });
     const cost = uncachedChars(body.goal, body.voiceSet);
+    // Unreachable today (GOAL_CHARS covers every VALID_GOAL), but the failure
+    // is silent and expensive if it ever is: `remaining < undefined` is false,
+    // so the render proceeds, then `chars += undefined` is NaN, which
+    // JSON.stringify writes as null, which readBudget rejects — zeroing the
+    // month's spend. Make the invariant explicit rather than rely on it.
+    if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) {
+      console.error('could not price goal', body.goal, '- refusing rather than guessing');
+      return sendJson(res, 503, { error: 'storage_unavailable' });
+    }
     if (budgetRemaining() < cost) {
       console.warn('refusing render: needs', cost, 'characters,', budgetRemaining(), 'left this month');
       return sendJson(res, 503, {

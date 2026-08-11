@@ -93,6 +93,18 @@ function readBudgetFile(dir) {
   catch { return null; }
 }
 
+/** Wait until the budget file satisfies `predicate`, or give up. */
+async function waitForBudget(dir, predicate, ms = 5000) {
+  const deadline = Date.now() + ms;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = readBudgetFile(dir);
+    if (predicate(last)) return last;
+    await sleep(50);
+  }
+  return last;
+}
+
 async function health(port) {
   const r = await request(port, 'GET', '/api/health');
   return JSON.parse(r.body);
@@ -122,8 +134,7 @@ test('a render is charged its goal real character count', async () => {
   const srv = await startServer({ enginePy: engine });
   try {
     await request(srv.port, 'POST', '/api/programs', START('river'));
-    await sleep(900);
-    const b = readBudgetFile(srv.rendersDir);
+    const b = await waitForBudget(srv.rendersDir, (v) => v && v.chars > 0);
     assert.strictEqual(b.chars, goalChars('river'),
       'the budget must meter what ElevenLabs will bill, not an average');
   } finally {
@@ -244,8 +255,8 @@ test('a successful render keeps its charge', async () => {
   const srv = await startServer({ enginePy: engine });
   try {
     await request(srv.port, 'POST', '/api/programs', START('river'));
-    await sleep(1200);
-    assert.strictEqual(readBudgetFile(srv.rendersDir).chars, goalChars('river'),
+    const charged = await waitForBudget(srv.rendersDir, (v) => v && v.chars > 0);
+    assert.strictEqual(charged.chars, goalChars('river'),
       'a completed render must still cost the month');
   } finally {
     stop(srv);
@@ -267,7 +278,7 @@ test('the remaining budget is visible on /api/health', async () => {
     assert.match(before.budget.month, /^\d{4}-\d{2}$/);
 
     await request(srv.port, 'POST', '/api/programs', START('river'));
-    await sleep(900);
+    await waitForBudget(srv.rendersDir, (v) => v && v.chars > 0);
 
     const after = await health(srv.port);
     assert.strictEqual(after.budget.charsUsed, goalChars('river'));
@@ -360,8 +371,8 @@ test('a double refund cannot take back characters another job is holding', async
 
     const b = readBudgetFile(rendersDir);
     assert.strictEqual(b.chars, held,
-      'characters already refunded were refunded again, taking back a charge '
-      + 'another job is still holding');
+      `expected job_holder's ${held} characters to still be charged; a second `
+      + 'refund of job_ghost gave back allowance nobody had spent');
     assert.deepStrictEqual(b.jobs, { job_holder: held });
   } finally {
     stop(srv);
