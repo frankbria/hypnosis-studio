@@ -1,4 +1,16 @@
-@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500;1,600&display=swap');
+/*
+ * Self-hosted (#102). This was an @import from fonts.googleapis.com, which Vite
+ * leaves in the emitted CSS — so every visitor's browser requested a stylesheet
+ * from Google and disclosed their IP, while the privacy page said the site made
+ * no third-party requests. Disclosing that was the stopgap; not making the
+ * request is the fix.
+ *
+ * Two faces, not the nine the old import asked for. Measured in a browser across
+ * every route and wizard step: only 400 normal and 400 italic are ever rendered.
+ * Both files carry font-display: swap, so text is never invisible while loading.
+ */
+@import '@fontsource/cormorant-garamond/latin-400.css';
+@import '@fontsource/cormorant-garamond/latin-400-italic.css';
 
 @tailwind base;
 @tailwind components;

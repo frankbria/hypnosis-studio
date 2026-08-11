@@ -108,26 +108,16 @@ export const NO_TRACKING_NOTICE =
   'It sets no cookies and stores nothing in your browser.'
 
 /**
- * The one third-party request the site actually makes.
+ * The site now makes no third-party requests at all (#102).
  *
- * `web/src/index.css` opens with an `@import` from fonts.googleapis.com, and
- * Vite leaves that in the emitted CSS — so it is a request every visitor's
- * browser makes at runtime, disclosing their IP address and User-Agent to
- * Google. Saying "no tracking" while making it is the kind of overstatement
- * this file exists to prevent.
+ * There used to be a `THIRD_PARTY_ORIGINS` list and a `FONT_NOTICE` paragraph
+ * here, because index.css opened with an @import from fonts.googleapis.com and
+ * NO_TRACKING_NOTICE above would otherwise have been false. The typeface is
+ * self-hosted now, so the claim is true without qualification and the
+ * disclosure is gone rather than merely reworded.
  *
- * Disclosed rather than quietly omitted. Removing the request entirely by
- * self-hosting the font is #102, and this constant goes away when it lands.
- *
- * `THIRD_PARTY_ORIGINS` is asserted against the real stylesheet in
- * test/web.claims.test.js, so a new third-party host cannot be added without
- * either disclosing it here or failing the build.
+ * test/web.claims.test.js still derives the origin list from the real
+ * stylesheet and index.html. It now asserts BOTH directions: no undisclosed
+ * origin, and — while there are none — no leftover disclosure copy claiming
+ * otherwise.
  */
-export const THIRD_PARTY_ORIGINS = ['fonts.googleapis.com'] as const
-
-export const FONT_NOTICE =
-  'One exception, so this page is not overstating the case: the site loads its ' +
-  'display typeface from Google Fonts, which means your browser requests a ' +
-  'stylesheet from Google and Google sees your IP address. We receive nothing ' +
-  'from that request and it carries nothing about you or your purchase. We are ' +
-  'moving to a self-hosted font to remove it.'

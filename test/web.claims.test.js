@@ -411,15 +411,16 @@ test('the general disclaimer still exists alongside it', () => {
 // The privacy page must not overstate (#21)
 // --------------------------------------------------------------------------
 
-test('every third-party origin the site actually requests is disclosed', () => {
+test('the privacy page matches the requests the site actually makes', () => {
   // The privacy copy says "no analytics, no advertising tags, no third-party
   // scripts". That was written from reading index.html, which is clean — but
-  // index.css opens with an @import from fonts.googleapis.com, and Vite leaves
-  // it in the emitted CSS. So every visitor's browser requests a stylesheet
-  // from Google, disclosing their IP, while the page said nothing left the box.
+  // index.css opened with an @import from fonts.googleapis.com, and Vite leaves
+  // it in the emitted CSS. Every visitor's browser requested a stylesheet from
+  // Google, disclosing their IP, while the page said nothing left the box.
   //
-  // Assert against the real sources rather than against a remembered audit, so
-  // adding a CDN cannot silently falsify the policy.
+  // Asserted in BOTH directions, so neither regime can pass vacuously:
+  //   * an origin that IS requested must be declared and disclosed in prose;
+  //   * when there are none, no leftover disclosure may claim otherwise.
   const sources = ['index.css', path.join('..', 'index.html')]
     .map((f) => path.join(WEB, f))
     .filter((f) => fs.existsSync(f))
@@ -431,25 +432,35 @@ test('every third-party origin the site actually requests is disclosed', () => {
   )].filter((h) => !h.endsWith('hypnosisstudio.com') && h !== 'localhost');
 
   const legal = fs.readFileSync(path.join(WEB, 'lib', 'legal.ts'), 'utf8');
+  const page = codeOnly(fs.readFileSync(path.join(WEB, 'sections', 'Legal.tsx'), 'utf8'));
+
+  if (found.length === 0) {
+    // Self-hosted (#102). The claim is now true without qualification, so the
+    // disclosure must be GONE — a stale "we load a font from Google" paragraph
+    // is its own false statement once the request no longer happens.
+    assert.ok(!/export const THIRD_PARTY_ORIGINS/.test(legal),
+      'no third-party request is made, but an origin list is still declared');
+    assert.ok(!/export const FONT_NOTICE/.test(legal),
+      'no third-party request is made, but the font disclosure copy remains');
+    assert.ok(!/\{FONT_NOTICE\}/.test(page),
+      'the privacy page still renders a disclosure for a request that no longer happens');
+    assert.ok(!/google|gstatic|cdn\./i.test(codeOnly(sources)),
+      'a third-party host survived the origin scan');
+    return;
+  }
+
   const declared = [...legal.matchAll(/'([a-z0-9.-]+\.[a-z]{2,})'/gi)].map((m) =>
     m[1].toLowerCase(),
   );
-
   for (const host of found) {
     assert.ok(declared.includes(host),
       `${host} is requested at runtime but not declared in THIRD_PARTY_ORIGINS — ` +
       'the privacy page claims no third-party requests');
   }
-
-  // And a declared origin must actually be described in prose, not just listed
-  // in an array nobody renders.
-  if (found.length > 0) {
-    assert.match(legal, /export const FONT_NOTICE/,
-      'a third-party request exists with no disclosure copy');
-    const page = fs.readFileSync(path.join(WEB, 'sections', 'Legal.tsx'), 'utf8');
-    assert.match(codeOnly(page), /\{FONT_NOTICE\}/,
-      'the disclosure exists as a constant but the privacy page never renders it');
-  }
+  assert.match(legal, /export const FONT_NOTICE/,
+    'a third-party request exists with no disclosure copy');
+  assert.match(page, /\{FONT_NOTICE\}/,
+    'the disclosure exists as a constant but the privacy page never renders it');
 });
 
 // --------------------------------------------------------------------------
