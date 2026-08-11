@@ -326,7 +326,7 @@ function PerformanceLanding({ onStart, onHome }: Omit<LandingProps, 'door'>) {
           <div className="text-center">
             <Eyebrow>Pricing</Eyebrow>
             <h2 className="font-display mx-auto mt-4 max-w-xl text-4xl leading-tight text-[#e8e6f0]">
-              Pay for the program. Keep it for life.
+              One payment. No subscription.
             </h2>
           </div>
           <div className="mt-14 grid gap-4 md:grid-cols-3">
@@ -365,17 +365,27 @@ function PerformanceLanding({ onStart, onHome }: Omit<LandingProps, 'door'>) {
                       </li>
                     ))}
                   </ul>
-                  <Button
-                    onClick={onStart}
-                    variant={tier.highlighted ? 'default' : 'outline'}
-                    className={
-                      tier.highlighted
-                        ? 'mt-8 w-full bg-primary text-primary-foreground hover:bg-violet-300'
-                        : 'mt-8 w-full border-white/15 bg-transparent text-white/80 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white'
-                    }
-                  >
-                    {tier.cta}
-                  </Button>
+                  {tier.available ? (
+                    <Button
+                      onClick={onStart}
+                      variant={tier.highlighted ? 'default' : 'outline'}
+                      className={
+                        tier.highlighted
+                          ? 'mt-8 w-full bg-primary text-primary-foreground hover:bg-violet-300'
+                          : 'mt-8 w-full border-white/15 bg-transparent text-white/80 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white'
+                      }
+                    >
+                      {tier.cta}
+                    </Button>
+                  ) : (
+                    /* Deliberately not a button. A control that looks clickable
+                       and does nothing is worse than none, and a payment CTA
+                       here would sell something the studio cannot deliver on the
+                       day of sale. */
+                    <p className="mt-8 w-full rounded-md border border-white/10 px-4 py-2.5 text-center text-sm text-white/45">
+                      {tier.cta}
+                    </p>
+                  )}
                 </CardContent>
               </Card>
             ))}

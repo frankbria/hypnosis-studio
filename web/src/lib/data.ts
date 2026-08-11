@@ -236,42 +236,74 @@ export interface PricingTier {
   cta: string
   highlighted?: boolean
   badge?: string
+  /**
+   * Whether this tier can actually be bought today. A tier that is visible but
+   * not purchasable must never render a payment CTA — advertising something the
+   * studio cannot deliver on the day of sale is the exposure #13 was opened
+   * about.
+   */
+  available: boolean
 }
 
+/**
+ * The ladder from tasks/marketing-plan.md §3: $39 → $129 → $649.
+ *
+ * Only the $39 tier is purchasable at launch. The plan puts the personalized
+ * tier post-launch ("ship the catalog, then this"), and the anchor contains two
+ * personalized programs, so neither can be fulfilled on day one. They stay
+ * visible because the ladder is what makes $39 read as the easy decision — an
+ * anchor removed is a price with nothing to be cheap against — but neither
+ * carries a payment CTA.
+ *
+ * The anchor is $649 with TWO programs, not the $1,499 with five that issue #63
+ * quotes: §3 records a later owner decision, and at $649 five programs invert
+ * the tier into a 23% discount, which is the opposite of an anchor. $649 against
+ * $453 piecemeal is a 43% premium, so it still does its job.
+ *
+ * No tier may claim a subscription, a library, a priority queue (there is no
+ * queue — the server returns 409 busy), human consultation, or lifetime access
+ * (retention is 30 days).
+ */
 export const PRICING: PricingTier[] = [
   {
-    name: 'Custom Program',
+    name: 'Program',
     price: '$39',
     cadence: 'one-time',
-    cta: 'Create your program',
+    cta: 'Choose your program',
+    available: true,
     features: [
-      'One personalized 4-track program',
+      'Any one catalog title — four tracks',
+      'Your choice of voice',
       'WAV + MP3, studio-mastered',
-      'Lifetime download access',
+      'Downloads in seconds · 30-day access',
     ],
   },
   {
-    name: 'Practice',
-    price: '$19',
-    cadence: 'per month',
-    cta: 'Start practicing',
-    highlighted: true,
-    badge: 'Most popular',
-    features: [
-      'One new custom program each month',
-      'Full library access',
-      'Pause or cancel anytime',
-    ],
-  },
-  {
-    name: 'Premium',
-    price: '$99',
+    name: 'Personalized Program',
+    price: '$129',
     cadence: 'one-time',
-    cta: 'Go premium',
+    cta: 'Opening soon',
+    highlighted: true,
+    badge: 'Next to open',
+    available: false,
     features: [
-      'One personalized 4-track program',
-      'Priority render queue',
-      '1:1 script consultation',
+      'Describe what you want to work on',
+      'A script written around your answers',
+      'Rendered on the same four-track engine',
+      'WAV + MP3 · 30-day access',
+    ],
+  },
+  {
+    name: 'The Complete Studio',
+    price: '$649',
+    cadence: 'one-time',
+    cta: 'Opening soon',
+    available: false,
+    features: [
+      'Every catalog title, live at purchase',
+      'Two personalized programs',
+      'Both voice sets throughout',
+      'WAV + MP3 · 30-day access',
     ],
   },
 ]
