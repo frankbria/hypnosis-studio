@@ -15,7 +15,7 @@ const DOORS = [
     icon: Brain,
     title: 'Performance',
     subtitle: 'Train the mind',
-    body: 'Self-hypnosis audio programs for learning, focus, creativity, and seeing opportunity. Four-track programs, rendered fresh for you, in the voice you choose.',
+    body: 'Self-hypnosis audio programs for learning, focus, creativity, and seeing opportunity. Four tracks that build on each other, in the voice you choose.',
     cta: 'Enter Performance',
   },
   {
@@ -48,14 +48,15 @@ export default function DoorChooser({ onEnter, onNavigate }: DoorChooserProps) {
         />
         <div className="mx-auto max-w-3xl text-center">
           <p className="text-xs uppercase tracking-[0.2em] text-white/40">
-            Personalized self-hypnosis audio
+            Self-hypnosis audio programs
           </p>
           <h1 className="font-display mt-6 text-5xl leading-[1.08] text-[#e8e6f0] md:text-7xl">
             Two doors into <em className="text-violet-300">the studio.</em>
           </h1>
           <p className="mx-auto mt-6 max-w-xl text-base leading-relaxed text-white/55 md:text-lg">
-            Every program is scripted, voiced, and mastered for one listener.
-            Choose the door that matches what you need tonight.
+            Every program is four tracks, written for one outcome and locked —
+            the same program every listener gets. Choose the door that matches
+            what you need today.
           </p>
         </div>
       </section>

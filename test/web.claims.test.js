@@ -601,3 +601,131 @@ test('the attestation states the contraindications the disclaimer names', () => 
   assert.ok(!/\byou (should|must|need to)\b/i.test(text),
     'the attestation tells the reader what to do instead of stating what is true of them');
 });
+
+// --------------------------------------------------------------------------
+// The main offer must not claim the script is written for the buyer (#61)
+// --------------------------------------------------------------------------
+
+/**
+ * Surfaces that describe the product to someone who has not bought yet.
+ *
+ * The engine ships one fixed script per goal, so "written for you" is false
+ * everywhere except the personalized tier — which does not exist yet and is not
+ * purchasable (#13).
+ */
+const OFFER_SURFACES = [
+  path.join(WEB, 'sections', 'Landing.tsx'),
+  path.join(WEB, 'sections', 'DoorChooser.tsx'),
+  path.join(WEB, '..', 'index.html'),
+  path.join(__dirname, '..', 'README.md'),
+];
+
+const PERSONALIZATION_CLAIMS = [
+  [/personali[sz]ed/i, 'the script is the same for every buyer'],
+  [/written for one mind|for one mind/i, 'the script is not written per buyer'],
+  [/for one listener/i, 'the same program ships to every listener'],
+  [/rendered fresh for you/i, 'implies the script is generated per buyer'],
+  [/scripted and voiced for your goal/i, 'the script is fixed per goal, not per buyer'],
+  [/written (just )?for you\b/i, 'the script is not written per buyer'],
+];
+
+test('the main offer does not claim the script is written for the buyer', () => {
+  const offenders = [];
+  for (const file of OFFER_SURFACES) {
+    const src = codeOnly(fs.readFileSync(file, 'utf8'));
+    for (const [pattern, why] of PERSONALIZATION_CLAIMS) {
+      const m = src.match(pattern);
+      if (m) offenders.push(`${path.basename(file)}: "${m[0]}" — ${why}`);
+    }
+  }
+  assert.deepStrictEqual(offenders, [],
+    `personalization claims are back on the main offer:\n${offenders.join('\n')}`);
+});
+
+test('"personalized" survives only as the name of the tier that is not sold yet', () => {
+  // #61 exempts the personalized tier — that tier genuinely would be. The point
+  // is that the word must stay inside PRICING and not leak back into copy.
+  const outside = codeOnly(DATA).split('export const PRICING')[0];
+  assert.ok(!/personali[sz]ed/i.test(outside),
+    'the personalization claim has leaked out of the pricing tier into product copy');
+});
+
+test('delivery speed is stated as it actually is', () => {
+  // #61 asked for instant delivery as a selling point. Delivery is NOT instant:
+  // the product renders on purchase (~15-20 min). Instant delivery arrives with
+  // the pre-rendered catalog (#58/#59), and claiming it before then would be a
+  // false promise discovered only after payment.
+  //
+  // So this asserts the honest position holds, and fails if an instant-delivery
+  // claim appears while the render path is still what ships. Delete this test
+  // when #59 lands and the claim becomes true.
+  const renderPath = fs.readFileSync(path.join(WEB, 'sections', 'Wizard.tsx'), 'utf8');
+  const stillRenders = /takes ~?15-20 minutes/.test(renderPath);
+  if (!stillRenders) return; // catalog delivery shipped; the claim may be true now.
+
+  const offenders = [];
+  for (const file of OFFER_SURFACES) {
+    const src = codeOnly(fs.readFileSync(file, 'utf8'));
+    for (const p of [/download(s|ing)? in seconds/i, /instant(ly)? deliver/i,
+                     /available immediately/i, /ready in seconds/i]) {
+      const m = src.match(p);
+      if (m) offenders.push(`${path.basename(file)}: "${m[0]}"`);
+    }
+  }
+  assert.deepStrictEqual(offenders, [],
+    'instant delivery is claimed while the product still renders on purchase ' +
+    `(~15-20 min). That becomes true with #58/#59, not before:\n${offenders.join('\n')}`);
+
+  // And the honest claim must actually be present — removing the false promise
+  // is only half of #61.
+  const landing = codeOnly(fs.readFileSync(OFFER_SURFACES[0], 'utf8'));
+  assert.match(landing, /about twenty minutes/i,
+    'the hero states no delivery timing at all — #61 wants delivery as a selling point');
+
+  // The tier feature lists are the sharpest place for this, and were the one
+  // place the surface list above missed: the $39 tier — the only purchasable
+  // one — advertised "Downloads in seconds" while the server rendered for
+  // twenty minutes. A browser found it; a grep over Landing/DoorChooser/meta/
+  // README could not, because the string lives in data.ts.
+  //
+  // Scoped to PURCHASABLE tiers. An `available: false` tier describing what it
+  // will do when it opens is a roadmap entry, not a promise to someone holding
+  // a card.
+  for (const tier of PRICING_BLOCK.split('name:').slice(1)) {
+    if (!/available: true/.test(tier)) continue;
+    const name = (tier.match(/'([^']+)'/) || [])[1] ?? '(unnamed)';
+    for (const p of [/in seconds/i, /instant/i, /immediately/i, /live at purchase/i]) {
+      const m = tier.match(p);
+      assert.ok(!m,
+        `the purchasable tier "${name}" promises "${m && m[0]}" while the product ` +
+        'still renders on purchase (~15-20 min). That becomes true with #58/#59.');
+    }
+  }
+});
+
+test('the hero says what the product is, not what it does for you', () => {
+  const landing = codeOnly(fs.readFileSync(OFFER_SURFACES[0], 'utf8'));
+  const h1 = landing.slice(landing.indexOf('<h1'), landing.indexOf('</h1>'));
+  assert.match(h1, /four-track/i, 'the hero does not say the product is four tracks');
+  assert.match(h1, /self-hypnosis/i, 'the hero does not say what kind of audio this is');
+});
+
+test('no efficacy claims, studies, percentages or testimonials appear', () => {
+  // marketing-plan.md §4: the current copy is clean on this and the restraint is
+  // an asset. Pinning it so a future rewrite cannot quietly introduce them.
+  const banned = [
+    [/\b\d{1,3}%/, 'a percentage implies a measured outcome'],
+    [/\bstud(y|ies)\b/i, 'no study backs this product'],
+    [/clinically|scientifically proven|evidence[- ]based/i, 'an efficacy claim'],
+    [/\bguarantee[sd]? results?\b/i, 'results are not guaranteed'],
+  ];
+  const offenders = [];
+  for (const file of OFFER_SURFACES) {
+    const src = codeOnly(fs.readFileSync(file, 'utf8'));
+    for (const [p, why] of banned) {
+      const m = src.match(p);
+      if (m) offenders.push(`${path.basename(file)}: "${m[0]}" — ${why}`);
+    }
+  }
+  assert.deepStrictEqual(offenders, [], `efficacy claims introduced:\n${offenders.join('\n')}`);
+});
