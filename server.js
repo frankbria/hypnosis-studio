@@ -43,6 +43,59 @@ const RETENTION_DRY_RUN = process.env.RETENTION_DRY_RUN === '1';
 const MAX_JOBS_PER_DAY = parseInt(process.env.MAX_JOBS_PER_DAY || '6', 10) || 6;
 
 const VALID_GOALS = new Set(['polymath', 'golden_thread', 'inner_studio', 'open_gate', 'river']);
+
+// The provider meters characters and bills monthly, so that is what the budget
+// counts. MAX_JOBS_PER_DAY permits ~180 programs a month, which does not bound
+// spend against any plan below Business — it only spreads it out, and a busy
+// first week then exhausts the month with every later render failing after
+// payment.
+//
+// Default sized to a Pro allocation (~500k characters, ~25 programs). Set it to
+// match the plan actually being paid for.
+// Mirrors VOICE_SETS in render_program.py — the ids that end up in the cache key.
+const VOICE_SETS = {
+  male: { narrator: 'nPczCjzI2devNBz1zQrb', whisper: 'RsoSo7Gg7GyAtGoPBiqb' },
+  female: { narrator: 'EXAVITQu4vr4xnSDxMaL', whisper: 'pFZP5JQG7iQjIQuC4Bku' },
+};
+
+const MONTHLY_CHAR_BUDGET = (() => {
+  const n = parseInt(process.env.MONTHLY_CHAR_BUDGET || '500000', 10);
+  return Number.isFinite(n) && n > 0 ? n : 500000;
+})();
+
+// What each goal actually costs, computed from the scripts rather than assumed.
+// A committed table would go stale the moment a script is edited and the failure
+// would be silent — the budget would meter one number while ElevenLabs billed
+// another. This is the exact string render_track.tts() sends: tag + text, with
+// the whisper tag only on suggestion segments.
+const GOAL_CHARS = (() => {
+  const suffixes = ['', '_track2', '_track3', '_track4'];
+  const out = {};
+  for (const goal of VALID_GOALS) {
+    let total = 0;
+    for (const suffix of suffixes) {
+      const p = path.join(__dirname, 'engine', 'scripts', `${goal}${suffix}_tts_segments.json`);
+      const script = readJsonSafe(p);
+      if (!script || !Array.isArray(script.segments)) { total = null; break; }
+      for (const seg of script.segments) {
+        const tag = seg.phase === 'suggestion' ? '[whispering] ' : '[soft] ';
+        total += tag.length + String(seg.text || '').length;
+      }
+    }
+    // A goal whose scripts cannot be read is charged the largest known program
+    // rather than zero, so an unreadable file cannot quietly make renders free.
+    out[goal] = total;
+  }
+  const known = Object.values(out).filter((v) => typeof v === 'number');
+  const fallback = known.length ? Math.max(...known) : 25000;
+  for (const goal of Object.keys(out)) {
+    if (typeof out[goal] !== 'number') {
+      console.error('could not size goal', goal, '- charging it', fallback, 'characters');
+      out[goal] = fallback;
+    }
+  }
+  return out;
+})();
 const VALID_VOICE_SETS = new Set(['male', 'female']);
 const SAFE_ID = /^[A-Za-z0-9_-]+$/;
 // Stricter than SAFE_ID, and only used by the retention sweep. Every job id is
@@ -134,6 +187,122 @@ function anyJobRendering() {
   return false;
 }
 
+// The cache key Python writes, recomputed here. Must stay byte-identical to
+// segment_cache.key(): sha256 over each field as <utf8 length> NUL <utf8 bytes>.
+// A cross-language test pins the two together, because a silent divergence
+// would make every segment look uncached and charge for work already paid for.
+function segmentCacheKey(voiceId, tag, text) {
+  const h = crypto.createHash('sha256');
+  for (const field of [voiceId, tag, text]) {
+    const raw = Buffer.from(field, 'utf8');
+    h.update(String(raw.length), 'ascii');
+    h.update(Buffer.from([0]));
+    h.update(raw);
+  }
+  return h.digest('hex');
+}
+
+function segmentCacheDir() {
+  return process.env.SEGMENT_CACHE_DIR || path.join(RENDERS, 'segment-cache');
+}
+
+// What this render would actually buy. Since #9 a segment already in the shared
+// cache costs nothing, and a repeat of the same (goal, voiceSet) buys nothing at
+// all — charging the full script there would refuse renders that are free, which
+// is a lost sale rather than a saved credit.
+//
+// Falls back to the full size if anything about the cache cannot be read: over-
+// charging delays a sale, under-charging overruns the plan, and only one of
+// those is recoverable.
+function uncachedChars(goal, voiceSet) {
+  const voices = VOICE_SETS[voiceSet];
+  if (!voices) return GOAL_CHARS[goal];
+  const cache = segmentCacheDir();
+  let total = 0;
+  try {
+    for (const suffix of ['', '_track2', '_track3', '_track4']) {
+      const p = path.join(__dirname, 'engine', 'scripts', `${goal}${suffix}_tts_segments.json`);
+      const script = readJsonSafe(p);
+      if (!script || !Array.isArray(script.segments)) return GOAL_CHARS[goal];
+      for (const seg of script.segments) {
+        const whisper = seg.phase === 'suggestion';
+        const tag = whisper ? '[whispering] ' : '[soft] ';
+        const voiceId = whisper ? voices.whisper : voices.narrator;
+        const cost = tag.length + String(seg.text || '').length;
+        const key = segmentCacheKey(voiceId, tag, String(seg.text || ''));
+        const entry = path.join(cache, key.slice(0, 2), `${key}.wav`);
+        if (!fs.existsSync(entry)) total += cost;
+      }
+    }
+  } catch {
+    return GOAL_CHARS[goal];
+  }
+  return total;
+}
+
+function budgetPath() {
+  return path.join(RENDERS, '.budget.json');
+}
+
+// Same ledger shape as the daily quota, for the same reason: a release has to be
+// idempotent against the exit-handler / stale-sweep race. A map rather than a
+// list, because a release gives back *that job's* characters, not a fixed one.
+//
+// Discarding a file from another month on read is what keeps the ledger finite —
+// with the daily cap no longer the binding limit it now spans a month, so the
+// month rollover is the only thing bounding its size.
+function readBudget() {
+  const month = new Date().toISOString().slice(0, 7);
+  const b = readJsonSafe(budgetPath());
+  if (b && b.month === month && typeof b.chars === 'number') {
+    return { month, chars: b.chars, jobs: (b.jobs && typeof b.jobs === 'object') ? b.jobs : {} };
+  }
+  return { month, chars: 0, jobs: {} };
+}
+
+function writeBudget(b) {
+  const p = budgetPath();
+  const tmp = p + '.tmp';
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(b));
+    fs.renameSync(tmp, p);
+    return true;
+  } catch (e) {
+    console.error('budget write failed:', e && e.message);
+    return false;
+  }
+}
+
+function budgetRemaining() {
+  return Math.max(0, MONTHLY_CHAR_BUDGET - readBudget().chars);
+}
+
+function chargeBudget(id, cost) {
+  const b = readBudget();
+  b.chars += cost;
+  b.jobs[id] = cost;
+  return writeBudget(b);
+}
+
+function refundBudget(id) {
+  const b = readBudget();
+  const owed = b.jobs[id];
+  // A job charged at 23:59 and failing at 00:01 finds an empty ledger and is not
+  // refunded. That is deliberate rather than merely accepted: the charge sat
+  // against a month that has closed, and crediting it to the new month would
+  // hand out allowance that was never spent from it. The characters are stranded
+  // in a file nothing reads again, which is the conservative direction.
+  if (typeof owed !== 'number') return false;
+  delete b.jobs[id];
+  b.chars = Math.max(0, b.chars - owed);
+  if (!writeBudget(b)) {
+    console.error('budget for', id, 'could not be refunded (write failed)');
+    return false;
+  }
+  console.log('refunded', owed, 'characters for failed job', id);
+  return true;
+}
+
 function quotaPath() {
   return path.join(RENDERS, '.quota.json');
 }
@@ -214,7 +383,7 @@ function failToStart(id, detail, error) {
     jobId: id, state: 'failed', stage: null, progress: 0,
     detail, error: String(error),
   });
-  releaseQuota(id);
+  releaseJob(id);
 }
 
 // Jobs with a worker process still running. The stale sweep decides a job is
@@ -326,6 +495,13 @@ function workerAlive(id) {
   return state === 'ours' || state === 'unknown';
 }
 
+// Both ledgers, at every point a job can be declared failed. Separate functions
+// would mean four call sites to keep in step.
+function releaseJob(id) {
+  releaseQuota(id);
+  refundBudget(id);
+}
+
 function startWorker(id, goal, voiceSet) {
   // The whole body is guarded, not just the spawn. bumpQuota() has already run
   // by the time we get here, so anything that throws on the way to a live
@@ -377,7 +553,7 @@ function startWorker(id, goal, voiceSet) {
     }
     // The customer has nothing either way, so a crash and a clean failure are
     // not worth charging differently for. A `ready` job keeps its slot.
-    if (!st || st.state !== 'ready') releaseQuota(id);
+    if (!st || st.state !== 'ready') releaseJob(id);
   });
 }
 
@@ -421,6 +597,9 @@ async function handleRequest(req, res) {
   const url = req.url || '/';
 
   if (url === '/api/health') {
+    const budgetNow = readBudget();
+    const remaining = Math.max(0, MONTHLY_CHAR_BUDGET - budgetNow.chars);
+    const dearest = Math.max(...Object.values(GOAL_CHARS));
     // `rendering` is what the deploy gate waits on (deploy/wait-for-idle.sh) —
     // the same predicate the render endpoint uses to return 409 busy, so there
     // is one source of truth rather than a second implementation in shell.
@@ -428,6 +607,17 @@ async function handleRequest(req, res) {
       ok: true,
       service: 'hypnosis-studio',
       rendering: anyJobRendering(),
+      // The cheapest thing to watch: this endpoint is already polled by the
+      // deploy gate, so the monthly allowance is visible without adding
+      // anything new to monitor. `programsLeft` is deliberately measured
+      // against the dearest goal, so it is the number that cannot disappoint.
+      budget: {
+        month: budgetNow.month,
+        charsUsed: budgetNow.chars,
+        charsRemaining: remaining,
+        charsBudget: MONTHLY_CHAR_BUDGET,
+        programsLeft: Math.floor(remaining / dearest),
+      },
       time: new Date().toISOString(),
     });
   }
@@ -439,7 +629,28 @@ async function handleRequest(req, res) {
     if (!VALID_GOALS.has(body.goal)) return sendJson(res, 422, { error: 'goal_in_production' });
     if (!VALID_VOICE_SETS.has(body.voiceSet)) return sendJson(res, 422, { error: 'bad_voice_set' });
     if (anyJobRendering()) return sendJson(res, 409, { error: 'busy' });
+    // Daily cap first: it is the burst control and its answer is "come back
+    // tomorrow". The monthly budget is a different statement — "unavailable
+    // until the plan resets or is raised" — which is why it is a 503 and not a
+    // second 429. #25 needs that second one for its own preflight.
     if (readQuota().count >= MAX_JOBS_PER_DAY) return sendJson(res, 429, { error: 'daily_cap' });
+    const cost = uncachedChars(body.goal, body.voiceSet);
+    // Unreachable today (GOAL_CHARS covers every VALID_GOAL), but the failure
+    // is silent and expensive if it ever is: `remaining < undefined` is false,
+    // so the render proceeds, then `chars += undefined` is NaN, which
+    // JSON.stringify writes as null, which readBudget rejects — zeroing the
+    // month's spend. Make the invariant explicit rather than rely on it.
+    if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) {
+      console.error('could not price goal', body.goal, '- refusing rather than guessing');
+      return sendJson(res, 503, { error: 'storage_unavailable' });
+    }
+    if (budgetRemaining() < cost) {
+      console.warn('refusing render: needs', cost, 'characters,', budgetRemaining(), 'left this month');
+      return sendJson(res, 503, {
+        error: 'budget_exhausted',
+        detail: 'temporarily unavailable — the monthly rendering allowance is spent',
+      });
+    }
 
     const jobId = 'job_' + Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
     fs.mkdirSync(jobDir(jobId), { recursive: true });
@@ -447,7 +658,18 @@ async function handleRequest(req, res) {
       jobId, state: 'rendering', stage: 'scripting', progress: 0,
       detail: 'Queued',
     });
+    if (!chargeBudget(jobId, cost)) {
+      // Same reasoning as the quota below: a render the budget cannot see is a
+      // render the budget cannot bound.
+      writeStatus(jobId, {
+        jobId, state: 'failed', stage: null, progress: 0,
+        detail: 'could not record the render against the monthly budget',
+        error: 'budget storage unavailable',
+      });
+      return sendJson(res, 503, { error: 'storage_unavailable' });
+    }
     if (!bumpQuota(jobId)) {
+      refundBudget(jobId);
       // No spend. A render whose slot was never recorded is one the cap cannot
       // see, and the volume that could not take 80 bytes of JSON is not going
       // to hold ~500 MB of audio either.
@@ -603,7 +825,7 @@ function sweepStaleJobs() {
     } else {
       console.log('swept stale job', d.name);
     }
-    releaseQuota(d.name);
+    releaseJob(d.name);
   }
 }
 
