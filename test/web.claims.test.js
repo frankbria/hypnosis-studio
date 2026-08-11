@@ -191,3 +191,76 @@ test('the phase union admits exactly the engine names', () => {
   assert.deepStrictEqual(names, [...new Set(ENGINE_TRACKS.map((t) => t.phase))].sort(),
     'TrackPhase does not match the phases the engine writes');
 });
+
+// --------------------------------------------------------------------------
+// Policy pages (#16) and the retention window (#21)
+// --------------------------------------------------------------------------
+
+// Comments stripped: the popstate handler is *described* in a comment that
+// mentions "popstate", so slicing raw source found the prose first and produced
+// an empty range that matched nothing. Fourth time this pattern has bitten in
+// this repo — see the conftest fixture on the Python side.
+const APP = codeOnly(fs.readFileSync(path.join(WEB, 'App.tsx'), 'utf8'));
+const LEGAL_LIB = fs.readFileSync(path.join(WEB, 'lib', 'legal.ts'), 'utf8');
+const FOOTER = fs.readFileSync(path.join(WEB, 'components', 'SiteFooter.tsx'), 'utf8');
+
+test('/terms and /privacy are real routes', () => {
+  for (const route of ['/terms', '/privacy']) {
+    assert.ok(APP.includes(`'${route}'`), `${route} is not routed`);
+  }
+});
+
+test('policy routes are resolved on back/forward as well as first load', () => {
+  // Both the initial state and the popstate handler have to consult the legal
+  // path, or the browser's back button lands on a page that still thinks it is
+  // showing the door chooser.
+  const pop = APP.slice(APP.indexOf('const onPop'), APP.indexOf('popstate'));
+  assert.match(pop, /legalFromPath/, 'popstate does not resolve policy routes');
+  assert.match(APP, /useState<LegalPageId \| null>\(\(\) =>\s*legalFromPath/,
+    'the initial route does not resolve policy paths, so direct navigation fails');
+});
+
+test('the policy links are in the shared footer, not one page', () => {
+  // #16 wants them on every page including the wizard. There were three separate
+  // footers, which is how one ends up without the link.
+  assert.match(FOOTER, /href="\/terms"/);
+  assert.match(FOOTER, /href="\/privacy"/);
+  for (const surface of ['Landing.tsx', 'DoorChooser.tsx', 'Wizard.tsx']) {
+    const src = fs.readFileSync(path.join(WEB, 'sections', surface), 'utf8');
+    assert.match(src, /<SiteFooter/, `${surface} does not render the shared footer`);
+  }
+});
+
+test('the policy links survive a modified click', () => {
+  // A policy page should still open in a new tab; intercepting every click would
+  // break that, and an <a href> that preventDefaults unconditionally is a link
+  // in name only.
+  assert.match(FOOTER, /metaKey \|\| event\.ctrlKey/,
+    'modified clicks are intercepted, so the links cannot be opened in a new tab');
+});
+
+test('the advertised retention window matches what actually deletes the files', () => {
+  // server.js is what removes them; the site quoting a different number is the
+  // kind of promise that only surfaces when a customer comes back on day 31.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const m = server.match(/RETENTION_DAYS \|\| '(\d+)'/);
+  assert.ok(m, 'could not find the server retention default');
+  const declared = LEGAL_LIB.match(/RETENTION_DAYS = (\d+)/);
+  assert.ok(declared, 'the site does not declare a retention window');
+  assert.strictEqual(declared[1], m[1],
+    `the site says ${declared[1]} days; the sweep deletes after ${m[1]}`);
+});
+
+test('the retention number appears once, not scattered through prose', () => {
+  // Two pages quoting it separately is how they drift.
+  const legalPage = fs.readFileSync(path.join(WEB, 'sections', 'Legal.tsx'), 'utf8');
+  assert.ok(!/\b30 days\b/.test(codeOnly(legalPage)),
+    'the retention window is hard-coded in the policy prose instead of using RETENTION_WINDOW');
+});
+
+test('the policy pages say what is collected and how long it is kept', () => {
+  const legalPage = fs.readFileSync(path.join(WEB, 'sections', 'Legal.tsx'), 'utf8');
+  assert.match(legalPage, /RETENTION_WINDOW/, 'no retention window on the policy pages');
+  assert.match(legalPage, /DATA_WE_KEEP/, 'the privacy page does not list what is stored');
+  assert.match(legalPage, /DISCLAIMER/, 'the non-medical stance is not carried on the policy pages');
+});

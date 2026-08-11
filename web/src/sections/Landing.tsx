@@ -5,7 +5,6 @@ import {
   Clock,
   FileAudio,
   Info,
-  Moon,
   PackageCheck,
   Target,
 } from 'lucide-react'
@@ -14,11 +13,14 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { DISCLAIMER, PRICING, goalsForDoor } from '@/lib/data'
 import type { DoorId, TrackPhase } from '@/lib/data'
+import SiteFooter from '@/components/SiteFooter'
 
 interface LandingProps {
   door: DoorId
   onStart: () => void
   onHome: () => void
+  /** Client-side navigation, so the footer's policy links do not reload. */
+  onNavigate: (path: string) => void
 }
 
 const HOW_IT_WORKS = [
@@ -109,29 +111,6 @@ function BrandButton({ onHome }: { onHome: () => void }) {
   )
 }
 
-function Footer() {
-  return (
-    <footer className="border-t border-white/5 px-6 py-10">
-      <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-6 sm:flex-row">
-        <div className="flex items-center gap-3">
-          <Moon className="size-4 text-violet-300/70" />
-          <span className="text-xs font-medium tracking-[0.3em] text-white/70">
-            HYPNOSIS&nbsp;STUDIO
-          </span>
-        </div>
-        <p className="text-xs text-white/30">© 2026 Hypnosis Studio</p>
-        <nav className="flex items-center gap-6 text-xs text-white/40">
-          <a href="#disclaimer" className="transition-colors hover:text-white/80">
-            Disclaimer
-          </a>
-          <a href="#top" className="transition-colors hover:text-white/80">
-            Contact
-          </a>
-        </nav>
-      </div>
-    </footer>
-  )
-}
 
 function DisclaimerSection() {
   return (
@@ -148,7 +127,7 @@ function DisclaimerSection() {
 
 // ─── Performance door (the original catalog) ─────────────────────────────────
 
-function PerformanceLanding({ onStart, onHome }: Omit<LandingProps, 'door'>) {
+function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 'door'>) {
   const goals = goalsForDoor('performance')
   return (
     <div id="top" className="animate-fade-in">
@@ -401,14 +380,14 @@ function PerformanceLanding({ onStart, onHome }: Omit<LandingProps, 'door'>) {
       </section>
 
       <DisclaimerSection />
-      <Footer />
+      <SiteFooter onHome={onHome} onNavigate={onNavigate} />
     </div>
   )
 }
 
 // ─── Healing door (mind-body rest visualizations — non-medical) ──────────────
 
-function HealingLanding({ onStart, onHome }: Omit<LandingProps, 'door'>) {
+function HealingLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 'door'>) {
   const goals = goalsForDoor('healing')
   return (
     <div id="top" className="animate-fade-in">
@@ -529,14 +508,14 @@ function HealingLanding({ onStart, onHome }: Omit<LandingProps, 'door'>) {
       </section>
 
       <DisclaimerSection />
-      <Footer />
+      <SiteFooter onHome={onHome} onNavigate={onNavigate} />
     </div>
   )
 }
 
-export default function Landing({ door, onStart, onHome }: LandingProps) {
+export default function Landing({ door, onStart, onHome, onNavigate }: LandingProps) {
   if (door === 'healing') {
-    return <HealingLanding onStart={onStart} onHome={onHome} />
+    return <HealingLanding onStart={onStart} onHome={onHome} onNavigate={onNavigate} />
   }
-  return <PerformanceLanding onStart={onStart} onHome={onHome} />
+  return <PerformanceLanding onStart={onStart} onHome={onHome} onNavigate={onNavigate} />
 }

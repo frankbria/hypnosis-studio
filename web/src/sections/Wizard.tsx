@@ -31,6 +31,7 @@ import {
   buildTracks,
 } from '@/lib/data'
 import type { DoorId, TrackPhase, VoiceSet } from '@/lib/data'
+import SiteFooter from '@/components/SiteFooter'
 import { cn } from '@/lib/utils'
 
 const STEP_LABELS = ['Goal', 'Voice', 'Review', 'Create', 'Program'] as const
@@ -42,6 +43,7 @@ interface WizardProps {
   door: DoorId
   onExit: () => void
   onHome: () => void
+  onNavigate: (path: string) => void
 }
 
 // ─── Stepper ─────────────────────────────────────────────────────────────────
@@ -393,7 +395,7 @@ function GeneratingStep({
 
 // ─── Wizard ──────────────────────────────────────────────────────────────────
 
-export default function Wizard({ door, onExit, onHome }: WizardProps) {
+export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps) {
   const [step, setStep] = useState(0)
   const [goalId, setGoalId] = useState<string | null>(null)
   const [customText, setCustomText] = useState('')
@@ -965,12 +967,15 @@ export default function Wizard({ door, onExit, onHome }: WizardProps) {
       </main>
 
       {door === 'healing' && (
-        <footer className="border-t border-white/5 px-6 py-6">
+        <div className="border-t border-white/5 px-6 py-6">
           <p className="mx-auto max-w-2xl text-center text-[11px] leading-relaxed text-white/30">
             {HEALING_NONMEDICAL}
           </p>
-        </footer>
+        </div>
       )}
+      {/* The policy links belong here too — the wizard is where money changes
+          hands, and it was the one surface with no way to reach them (#16). */}
+      <SiteFooter onHome={onHome} onNavigate={onNavigate} />
     </div>
   )
 }
