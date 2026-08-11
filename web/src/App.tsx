@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import DoorChooser from '@/sections/DoorChooser'
 import Landing from '@/sections/Landing'
 import Wizard from '@/sections/Wizard'
-import { PrivacyPage, TermsPage } from '@/sections/Legal'
+import { PrivacyPage, RefundPage, TermsPage } from '@/sections/Legal'
 import type { LegalPageId } from '@/sections/Legal'
 import type { DoorId } from '@/lib/data'
 
@@ -17,6 +17,13 @@ type View = 'landing' | 'wizard'
 const LEGAL_PATHS: Record<string, LegalPageId> = {
   '/terms': 'terms',
   '/privacy': 'privacy',
+  '/refunds': 'refunds',
+}
+
+const LEGAL_PAGES: Record<LegalPageId, (p: { onHome: () => void }) => React.ReactNode> = {
+  terms: TermsPage,
+  privacy: PrivacyPage,
+  refunds: RefundPage,
 }
 
 function legalFromPath(pathname: string): LegalPageId | null {
@@ -59,6 +66,7 @@ const DOC_TITLES: Record<DoorId | 'chooser', string> = {
 const LEGAL_TITLES: Record<LegalPageId, string> = {
   terms: 'Terms of use — Hypnosis Studio',
   privacy: 'Privacy — Hypnosis Studio',
+  refunds: 'Refunds — Hypnosis Studio',
 }
 
 export default function App() {
@@ -119,7 +127,7 @@ export default function App() {
   // Checked before the door, so /terms renders the policy rather than the
   // chooser regardless of which door the visitor came from.
   if (legal !== null) {
-    const Page = legal === 'terms' ? TermsPage : PrivacyPage
+    const Page = LEGAL_PAGES[legal]
     return (
       <div className="min-h-screen">
         <Page onHome={goHome} />

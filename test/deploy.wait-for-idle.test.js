@@ -17,7 +17,9 @@ const SCRIPT = path.join(__dirname, '..', 'deploy', 'wait-for-idle.sh');
 function stubHealth(bodyFor) {
   return new Promise((resolve) => {
     let n = 0;
+    const at = [];
     const srv = http.createServer((req, res) => {
+      at.push(Date.now());
       const body = bodyFor(n++);
       if (body === null) {
         res.writeHead(503);
@@ -30,6 +32,8 @@ function stubHealth(bodyFor) {
       resolve({
         url: `http://127.0.0.1:${srv.address().port}/api/health`,
         calls: () => n,
+        /** Gaps between consecutive polls, in ms. */
+        gaps: () => at.slice(1).map((t, i) => t - at[i]),
         close: () => srv.close(),
       }),
     );
@@ -88,11 +92,25 @@ test('proceeds when health returns a non-200', async () => {
 test('waits while a render is in flight, then proceeds once it finishes', async () => {
   const s = await stubHealth((n) => (n < 2 ? '{"rendering":true}' : '{"rendering":false}'));
   try {
-    const started = Date.now();
     const r = await run(s.url, 30, 1);
     assert.strictEqual(r.code, 0, `should proceed once the render completes:\n${r.out}`);
     assert.ok(s.calls() >= 3, `should have polled repeatedly, got ${s.calls()}`);
-    assert.ok(Date.now() - started >= 1000, 'should actually have waited');
+
+    // Measured from the stub's own request timestamps, not from total process
+    // wall time. Wall time also covers execFile scheduling, bash startup and
+    // curl, none of which are under test — and this file runs alongside others
+    // under `node --test`, which schedules test files in parallel.
+    //
+    // This is the stricter assertion, not a relaxed one: it fails a script that
+    // polls three times without sleeping, which a total-elapsed check would
+    // wave through as long as something else was slow. Contention can only push
+    // these gaps up.
+    const gaps = s.gaps();
+    assert.ok(gaps.length >= 2, `expected at least two intervals, got ${gaps.length}`);
+    for (const gap of gaps) {
+      assert.ok(gap >= 900,
+        `polled again after only ${gap}ms — the script is spinning, not waiting on a ${1}s interval`);
+    }
     assert.match(r.out, /render/i, 'should say why it is waiting');
   } finally {
     s.close();

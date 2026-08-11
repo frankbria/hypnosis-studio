@@ -52,6 +52,9 @@ export default function SiteFooter({
           <a href="/privacy" onClick={go('/privacy')} className="transition-colors hover:text-white">
             Privacy
           </a>
+          <a href="/refunds" onClick={go('/refunds')} className="transition-colors hover:text-white">
+            Refunds
+          </a>
         </nav>
       </div>
     </footer>

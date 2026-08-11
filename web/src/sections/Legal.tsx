@@ -2,14 +2,17 @@ import { Moon } from 'lucide-react'
 import { DISCLAIMER } from '@/lib/data'
 import {
   DATA_WE_KEEP,
+  DELIVERED_GOODS_NOTICE,
   FONT_NOTICE,
   NO_ACCOUNT_NOTICE,
   NO_TRACKING_NOTICE,
+  RENDER_FAILURE_GUARANTEE,
   RETENTION_WINDOW,
+  SUPPORT_EMAIL,
 } from '@/lib/legal'
 import SiteFooter from '@/components/SiteFooter'
 
-export type LegalPageId = 'terms' | 'privacy'
+export type LegalPageId = 'terms' | 'privacy' | 'refunds'
 
 function Shell({
   title,
@@ -100,6 +103,10 @@ export function TermsPage({ onHome }: { onHome: () => void }) {
           does, you will see it on the page — the site never reports a program as
           ready unless it is.
         </p>
+        {/* This section described the failure and stopped there, which left the
+            terms silent on the money. The guarantee has one home; the terms
+            point at it rather than restating it in words that could drift. */}
+        <p className="text-white/75">{RENDER_FAILURE_GUARANTEE}</p>
       </Section>
 
       <Section heading="This is not medical or psychological care">
@@ -110,6 +117,66 @@ export function TermsPage({ onHome }: { onHome: () => void }) {
         <p>
           If these terms change, the version on this page is the one that applies
           to purchases made after it appears.
+        </p>
+      </Section>
+    </Shell>
+  )
+}
+
+export function RefundPage({ onHome }: { onHome: () => void }) {
+  return (
+    <Shell
+      title="Refunds"
+      intro="One rule that matters: if the render fails, you get your money back without asking."
+      onHome={onHome}
+    >
+      <Section heading="If your render fails">
+        <p className="text-white/75">{RENDER_FAILURE_GUARANTEE}</p>
+        <p>
+          Rendering takes fifteen to twenty minutes and occasionally fails. When it
+          does, the failure is ours — you chose a program, paid, and waited for
+          nothing. Making you write and ask for the refund would add our problem to
+          your day.
+        </p>
+        <p>
+          We do not automatically try again. The studio already retries the parts
+          that fail for temporary reasons, so a render that reaches you as failed
+          has failed past that point, and a second attempt would likely fail the
+          same way. You are refunded, and whether to try again is yours to decide.
+        </p>
+      </Section>
+
+      <Section heading="If your program renders successfully">
+        <p>{DELIVERED_GOODS_NOTICE}</p>
+        <p>
+          This is the part worth reading before you buy rather than after. Please
+          listen to the voice previews and read what each program covers — those
+          are there so the decision is made before payment, not regretted after it.
+        </p>
+        {SUPPORT_EMAIL && (
+          <p>
+            If something went wrong that is not simply a change of mind, write to{' '}
+            <a href={`mailto:${SUPPORT_EMAIL}`} className="text-violet-300 underline">
+              {SUPPORT_EMAIL}
+            </a>{' '}
+            and a person will read it.
+          </p>
+        )}
+      </Section>
+
+      <Section heading="Partial failures">
+        <p>
+          A program is four tracks and is only delivered as a complete set. If some
+          tracks render and others do not, that is a failed render and it is
+          refunded in full — you are not charged a fraction for a fraction of a
+          program.
+        </p>
+      </Section>
+
+      <Section heading="How the refund reaches you">
+        <p>
+          It returns to the card you paid with. Your bank decides how quickly it
+          appears, which is usually a few days and is not something we control.
         </p>
       </Section>
     </Shell>

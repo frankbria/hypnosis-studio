@@ -46,6 +46,63 @@ export const NO_ACCOUNT_NOTICE =
   'There are no accounts. We do not ask for your name, email address, or a password, ' +
   'and we do not have one on file for you.'
 
+/**
+ * The refund guarantee, stated once (#17).
+ *
+ * This string is the specification for #26, not a description of it. The issue
+ * asked for the policy to be written first precisely so the refund behaviour
+ * would be decided before the payment code exists — so if these two ever
+ * disagree, the code is wrong, not this constant.
+ *
+ * `server.js` already refunds the internal ledgers (`releaseQuota`,
+ * `refundBudget`) on the transition to `state: 'failed'`. #26 attaches the money
+ * refund to that same transition, which is what makes this promise
+ * implementable rather than aspirational.
+ */
+export const RENDER_FAILURE_GUARANTEE =
+  'If your render fails, you are refunded in full, automatically. You do not ' +
+  'have to ask, and you do not have to prove anything — the refund is issued ' +
+  'by the same system that noticed the failure.'
+
+/**
+ * What the customer is told at the moment their render fails.
+ *
+ * The previous copy said "Nothing was charged — please try again." That was true
+ * only because nothing is ever charged yet, and it becomes a false statement
+ * about the customer's own money the day payment is switched on — in the one
+ * screen someone reads directly after losing it.
+ *
+ * Phrased to be true in both worlds, so switching payment on cannot silently
+ * turn it into a lie.
+ */
+export const RENDER_FAILED_ASSURANCE =
+  'If you were charged, your refund is already on its way. You do not need to ask for it.'
+
+/**
+ * Why there is no automatic refund after a successful render.
+ *
+ * Stated plainly rather than buried: the audio is downloadable the moment it
+ * finishes and cannot be un-delivered.
+ */
+export const DELIVERED_GOODS_NOTICE =
+  'Once your program renders successfully, it is yours immediately — the files ' +
+  'are downloadable straight away and cannot be returned. So a completed ' +
+  'program is not automatically refundable.'
+
+/**
+ * A monitored address, or `null` while there is not one.
+ *
+ * `null` is the honest current state, not an oversight: #18 is open precisely
+ * because the old Contact link pointed at `#top` and went nowhere. Inventing an
+ * address here would recreate that bug inside the refund policy, which is the
+ * worst page on the site to have a dead contact route.
+ *
+ * The discretionary-refund paragraph renders only when this is set, and
+ * test/web.claims.test.js fails if any policy page tells a customer to make
+ * contact while it is null. Set it when #18 lands and the paragraph appears.
+ */
+export const SUPPORT_EMAIL: string | null = null
+
 export const NO_TRACKING_NOTICE =
   'This site loads no analytics, no advertising tags, and no third-party scripts. ' +
   'It sets no cookies and stores nothing in your browser.'
