@@ -632,7 +632,12 @@ const PERSONALIZATION_CLAIMS = [
 test('the main offer does not claim the script is written for the buyer', () => {
   const offenders = [];
   for (const file of OFFER_SURFACES) {
-    const src = codeOnly(fs.readFileSync(file, 'utf8'));
+    // Identifiers are not copy. `PERSONALIZED_POINTER` is the name of the
+    // constant that points readers AT the personalized tier — stripping
+    // SCREAMING_SNAKE tokens keeps the scan on prose, which is what the claim
+    // is about.
+    const src = codeOnly(fs.readFileSync(file, 'utf8'))
+      .replace(/\b[A-Z][A-Z0-9_]{2,}\b/g, '');
     for (const [pattern, why] of PERSONALIZATION_CLAIMS) {
       const m = src.match(pattern);
       if (m) offenders.push(`${path.basename(file)}: "${m[0]}" — ${why}`);
@@ -1045,4 +1050,128 @@ test('no step promises a script written around the buyer\'s words', () => {
     const m = src.match(p);
     assert.ok(!m, `the funnel still promises a custom script: "${m && m[0]}"`);
   }
+});
+
+// --------------------------------------------------------------------------
+// The AI disclosure (#64)
+// --------------------------------------------------------------------------
+
+test('the voices are labelled as AI at the point of listening', () => {
+  // "AI" is in the role VALUE, not the markup, because these render in two
+  // places — the voice step and the delivery screen — and the aria-label is
+  // built from the same string. A disclosure added to one render site is how
+  // the other ships without it.
+  const data = codeOnly(DATA);
+  assert.match(data, /role: 'AI narrator' \| 'AI whisper layer'/,
+    'the role type no longer forces an AI label');
+  assert.ok(!/role: '(Narrator|Whisper layer)'/.test(data),
+    'a voice still has a role that does not say it is synthetic');
+
+  const wizard = codeOnly(WIZARD());
+  assert.match(wizard, /\{voice\.role\}/, 'the voice role is never displayed');
+  assert.match(wizard, /label=\{`\$\{voice\.name\}, \$\{voice\.role\}`\}/,
+    'the audio preview aria-label no longer carries the role');
+  assert.ok(!/voice\.role\.toLowerCase\(\)/.test(wizard),
+    'the aria-label lowercases the role, so "AI" is announced as a word');
+});
+
+test('the disclosure explains why AI enables the whisper layer', () => {
+  // Lead with capability, not apology. "AI-generated hypnosis" leads with the
+  // commodity; the true argument is that two synthetic voices can land in exact
+  // time with each other and two human performers cannot.
+  const data = DATA;
+  const at = data.indexOf('export const HOW_MADE');
+  assert.ok(at > 0, 'there is no HOW_MADE block');
+  const block = data.slice(at, data.indexOf('\n]', at));
+
+  // Per ITEM, not across the whole block. Checking keywords over the block let
+  // a mutation gut the capability sentence entirely and still pass, because
+  // "drift" and "synthetic" survived in the neighbouring literals. One clause
+  // satisfying an assertion meant for another is the same weakness the
+  // first-person attestation check had (#20).
+  // `.slice(1)` is not enough: the type annotation
+  // `ReadonlyArray<{ heading: string; body: string }>` contains "heading:" too,
+  // so the split yields a phantom leading item with no quoted heading.
+  const items = block.split('heading:').slice(1).filter((c) => /^\s*'/.test(c)).map((chunk) => ({
+    heading: (chunk.match(/'([^']*)'/) || [])[1] ?? '',
+    // Join the concatenated literals so the assertion reads the sentence, not
+    // the line wrapping.
+    body: (chunk.slice(chunk.indexOf('body:')).match(/'[^']*'(?:\s*\+\s*'[^']*')*/) || [''])[0]
+      .replace(/'\s*\+\s*'/g, '')
+      .replace(/^'|'$/g, ''),
+  }));
+  assert.strictEqual(items.length, 3, `expected 3 HOW_MADE items, parsed ${items.length}`);
+
+  const voices = items.find((i) => /voices/i.test(i.heading));
+  assert.ok(voices, 'no item explains the voices');
+  for (const [pattern, why] of [
+    [/synthetic/i, 'does not say the voices are synthetic'],
+    [/exact time/i, 'drops the capability argument — two voices landing together'],
+    [/drift/i, 'does not say why two human performers could not do this'],
+  ]) {
+    assert.match(voices.body, pattern, `the voices item ${why}`);
+  }
+
+  // Register: capability, not apology, and no contradiction of the disclosure.
+  for (const [p, why] of [
+    [/AI assistance/i, 'reads as an apology bolted on rather than the reason'],
+    [/recorded in a studio|voice actors?|human performers? (record|perform) /i,
+     'implies the voices are human, contradicting the disclosure'],
+  ]) {
+    assert.ok(!p.test(block), `the disclosure ${why}`);
+  }
+
+  const scripts = items.find((i) => /scripts/i.test(i.heading));
+  assert.ok(scripts && /fixed|locked/i.test(scripts.body),
+    'the scripts item does not state they are fixed');
+  const bed = items.find((i) => /bed/i.test(i.heading));
+  assert.ok(bed && /isochronic/i.test(bed.body),
+    'the bed item does not say the bed is isochronic');
+
+  // Never "hand-written" — a claim we would lose an argument about.
+  assert.ok(!/hand[- ]?written|handcrafted|hand[- ]?crafted/i.test(block),
+    'the disclosure claims the scripts are hand-written');
+});
+
+test('both doors carry the disclosure and it links to the personalized tier', () => {
+  // Per component, not per file — the mistake that shipped /healing without a
+  // seizure warning (#65) and put both upcoming lines on one door (#66).
+  const src = codeOnly(LANDING);
+  const fns = [...src.matchAll(/^(?:export\s+(?:default\s+)?)?function (\w+)/gm)]
+    .map((m, i, all) => ({
+      name: m[1],
+      body: src.slice(m.index, all[i + 1] ? all[i + 1].index : src.length),
+    }));
+  const carriers = fns.filter((f) => /<HowMadeSection/.test(f.body)).map((f) => f.name);
+
+  for (const door of ['PerformanceLanding', 'HealingLanding']) {
+    const fn = fns.find((f) => f.name === door);
+    assert.ok(fn, `${door} no longer exists — update this test`);
+    const direct = /<HowMadeSection/.test(fn.body);
+    const viaShared = carriers.some((c) => c !== door && fn.body.includes(`<${c}`));
+    assert.ok(direct || viaShared, `${door} ships without the AI disclosure`);
+  }
+
+  assert.match(src, /\{PERSONALIZED_POINTER\}/,
+    'the block does not point at the personalized tier');
+});
+
+test('the "See the tiers" link resolves on a door with no pricing section', () => {
+  // The tiers live on the performance landing; HealingLanding has no #pricing
+  // element, so a bare scroll-to-id would silently do nothing there — the same
+  // dead-link failure #18 exists to fix.
+  const src = codeOnly(LANDING);
+  // The JSX usage, not the import at the top of the file — indexOf finds the
+  // import first and the slice then contains none of the link.
+  const at = src.indexOf('{PERSONALIZED_POINTER}');
+  assert.ok(at > 0, 'the personalized pointer is never rendered');
+  const region = src.slice(at, at + 1200);
+  assert.match(region, /getElementById\('pricing'\)/,
+    'the tier link does not check whether the section is on this page');
+  assert.match(region, /onNavigate\('\/performance'\)/,
+    'the tier link has no fallback for a door without a pricing section');
+
+  const healing = src.slice(src.indexOf('function HealingLanding'));
+  assert.ok(!/id="pricing"/.test(healing),
+    'HealingLanding now has a pricing section — simplify the tier link');
 });

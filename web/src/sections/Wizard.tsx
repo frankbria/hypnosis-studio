@@ -599,7 +599,7 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
                             className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3"
                           >
                             <div className="min-w-0">
-                              <p className="text-[10px] uppercase tracking-[0.2em] text-white/35">
+                              <p className="text-[10px] uppercase tracking-[0.2em] text-white/60">
                                 {voice.role}
                               </p>
                               <p className="truncate text-sm text-white/85">
@@ -614,7 +614,10 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
                               src={voice.src}
                               playingSrc={audio.playingSrc}
                               onToggle={audio.toggle}
-                              label={`${voice.name}, ${voice.role.toLowerCase()}`}
+                              // Not lowercased: the role now begins with "AI", and "ai narrator" is
+                              // read aloud as a word by some screen readers rather than as
+                              // the two letters. The role already reads naturally as-is.
+                              label={`${voice.name}, ${voice.role}`}
                             />
                           </div>
                         ))}

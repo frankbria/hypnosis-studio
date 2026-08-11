@@ -215,7 +215,15 @@ export function nameList(names: string[]): string {
 // ─── Voice sets ──────────────────────────────────────────────────────────────
 
 export interface VoiceRole {
-  role: 'Narrator' | 'Whisper layer'
+  /**
+   * The label a listener sees at the moment of previewing (#64).
+   *
+   * "AI" lives in the value rather than in the markup because these render in
+   * two places — the wizard's voice step and the delivery screen — and the
+   * aria-label is built from this string too. Putting the disclosure in one
+   * render site is how the other one ships without it.
+   */
+  role: 'AI narrator' | 'AI whisper layer'
   name: string
   description: string
   src: string
@@ -233,13 +241,13 @@ export const VOICE_SETS: VoiceSet[] = [
     id: 'male',
     label: 'Male voices',
     narrator: {
-      role: 'Narrator',
+      role: 'AI narrator',
       name: 'Brian',
       description: 'Deep, comforting',
       src: '/voices/brian.mp3',
     },
     whisper: {
-      role: 'Whisper layer',
+      role: 'AI whisper layer',
       name: 'Frank',
       description: 'Low, close, almost subliminal',
       src: '/voices/frank.mp3',
@@ -249,13 +257,13 @@ export const VOICE_SETS: VoiceSet[] = [
     id: 'female',
     label: 'Female voices',
     narrator: {
-      role: 'Narrator',
+      role: 'AI narrator',
       name: 'Sarah',
       description: 'Mature, reassuring',
       src: '/voices/sarah.mp3',
     },
     whisper: {
-      role: 'Whisper layer',
+      role: 'AI whisper layer',
       name: 'Lily',
       description: 'Velvety, weightless',
       src: '/voices/lily.mp3',
@@ -456,6 +464,55 @@ export const ATTESTATION =
   'I am 18 or older. I do not have a history of seizures or a severe mental ' +
   'illness — or if I do, I have spoken to a qualified professional about using ' +
   'hypnosis audio.'
+
+/**
+ * How the programs are made (#64).
+ *
+ * Nothing on the site said the voices were synthetic. They are audibly so,
+ * which means a customer discovered it on first listen — after paying, which
+ * is the worst possible moment, and the one that reads as concealment.
+ *
+ * Led with capability rather than apology. "AI-generated hypnosis" leads with
+ * the commodity; "AI so we could build something otherwise impossible" is
+ * engineering, and it happens to be the true reason the whisper layer exists at
+ * all. Two synthetic voices render from one script in two registers and land in
+ * exact time with each other. Two human performers would drift, and drift is
+ * audible when one voice runs underneath the other.
+ *
+ * The curated claim is "fixed", never "hand-written" — the latter invites a
+ * challenge we would lose.
+ */
+export const HOW_MADE: ReadonlyArray<{ heading: string; body: string }> = [
+  {
+    heading: 'The scripts are fixed',
+    body:
+      'Each program is written for one outcome, revised, and then locked. Every ' +
+      'listener gets the same four tracks. That is the point: a script that is ' +
+      'settled can be worked on until it is right, rather than generated fresh ' +
+      'and hoped over.',
+  },
+  {
+    heading: 'The voices are AI, and that is why there are two of them',
+    body:
+      'Both voices are synthetic. That is what makes the whisper layer possible: ' +
+      'two synthetic voices can be rendered from one script in two registers and ' +
+      'land in exact time with each other. Two human performers would drift, and ' +
+      'drift is audible when one voice runs underneath the other.',
+  },
+  {
+    heading: 'The bed is engineered, not a loop',
+    body:
+      'Underneath the narration is an isochronic entrainment bed, notched so it ' +
+      'sits out of the way of the narrator rather than fighting for the same ' +
+      'frequencies. It is built per program, mastered with the voices, not laid ' +
+      'over the top afterwards.',
+  },
+]
+
+/** Where a script actually written around your own words does live. */
+export const PERSONALIZED_POINTER =
+  'If you want a script written around your own situation rather than one of ' +
+  'these, that is the Personalized Program.'
 
 /** The healing door's non-medical stance — shown on the chooser card, healing landing, and wizard footer. */
 export const HEALING_NONMEDICAL =
