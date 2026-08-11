@@ -11,7 +11,14 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import { DISCLAIMER, PRICING, SAFETY_WARNING, goalsForDoor } from '@/lib/data'
+import {
+  DISCLAIMER,
+  PRICING,
+  SAFETY_WARNING,
+  goalsForDoor,
+  nameList,
+  upcomingForDoor,
+} from '@/lib/data'
 import type { DoorId, TrackPhase } from '@/lib/data'
 import GoalCardText from '@/components/GoalCardText'
 import SiteFooter from '@/components/SiteFooter'
@@ -125,6 +132,24 @@ function BrandButton({ onHome }: { onHome: () => void }) {
  * Anchoring it to the component both doors already render makes the divergence
  * structurally impossible instead of fixed once.
  */
+/**
+ * One sentence naming what is coming, in place of greyed-out cards (#66).
+ *
+ * Shared by both doors so neither can quietly go back to rendering dead cards,
+ * and renders nothing when there is nothing to announce — a door with a
+ * complete catalog should not carry an empty promise.
+ */
+function UpcomingLine({ door }: { door: DoorId }) {
+  const upcoming = upcomingForDoor(door)
+  if (upcoming.length === 0) return null
+  return (
+    <p className="mt-10 text-sm leading-relaxed text-white/55">
+      {nameList(upcoming.map((g) => g.name))}{' '}
+      {upcoming.length === 1 ? 'is' : 'are'} in production.
+    </p>
+  )
+}
+
 function DisclaimerSection() {
   return (
     <section id="disclaimer" className="scroll-mt-24 px-6 py-16">
@@ -311,6 +336,7 @@ function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 
                 </Card>
               ))}
             </div>
+            <UpcomingLine door="performance" />
           </div>
         </div>
       </section>
@@ -487,27 +513,16 @@ function HealingLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 'doo
             {goals.map((goal) => (
               <Card
                 key={goal.id}
-                className={
-                  goal.available
-                    ? 'group rounded-2xl border-white/10 bg-white/5 shadow-none transition-colors hover:border-violet-300/30'
-                    : 'group relative rounded-2xl border-white/10 bg-white/5 opacity-60 shadow-none'
-                }
+                className="group rounded-2xl border-white/10 bg-white/5 shadow-none transition-colors hover:border-violet-300/30"
               >
                 <CardContent className="p-7">
-                  {!goal.available && (
-                    <Badge
-                      variant="outline"
-                      className="absolute right-5 top-5 rounded-full border-white/15 px-3 py-1 text-[10px] font-normal uppercase tracking-[0.2em] text-white/40"
-                    >
-                      In production
-                    </Badge>
-                  )}
                   <goal.icon className="size-5 text-violet-300 transition-colors group-hover:text-[#d4b87f]" />
                   <GoalCardText goal={goal} />
                 </CardContent>
               </Card>
             ))}
           </div>
+          <UpcomingLine door="healing" />
         </div>
       </section>
 

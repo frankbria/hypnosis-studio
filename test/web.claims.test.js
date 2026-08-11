@@ -842,18 +842,132 @@ test('every colour on the goal card meets AA', () => {
     path.join(WEB, 'components', 'GoalCardText.tsx'), 'utf8'));
 
   const failures = [];
+  let parsed = 0;
 
   for (const m of src.matchAll(/text-white\/(\d{1,3})/g)) {
+    parsed += 1;
     const ratio = contrastOnDark(Number(m[1]) / 100);
     if (ratio < 4.5) failures.push(`text-white/${m[1]} = ${ratio.toFixed(2)}:1`);
   }
   for (const m of src.matchAll(/text-\[(#[0-9a-f]{6})\]/gi)) {
+    parsed += 1;
     const ratio = hexContrastOnDark(m[1].toLowerCase());
     if (ratio < 4.5) failures.push(`${m[1]} = ${ratio.toFixed(2)}:1`);
   }
 
-  assert.ok(failures.length > 0 || src.includes('text-white/'),
+  // Count what was actually parsed, in EITHER notation. The first version
+  // guarded on `src.includes('text-white/')`, so refactoring the card to hex
+  // colours only would have failed the check for the wrong reason — flagged on
+  // #107 as forward-looking, fixed here.
+  assert.ok(parsed > 0,
     'no colours parsed from the goal card — the check would pass vacuously');
   assert.deepStrictEqual(failures, [],
     `goal-card text below WCAG AA:\n${failures.join('\n')}`);
+});
+
+// --------------------------------------------------------------------------
+// Only purchasable programs appear on purchase surfaces (#66)
+// --------------------------------------------------------------------------
+
+test('the catalog helper returns only what can be bought', () => {
+  // The Healing landing showed three cards with two greyed out — a shelf
+  // two-thirds empty, on the page whose job is to make an anxious visitor feel
+  // they are in careful hands.
+  const src = codeOnly(DATA);
+  const fn = src.slice(src.indexOf('export const goalsForDoor'));
+  const body = fn.slice(0, fn.indexOf('\n\n'));
+  assert.match(body, /g\.available/,
+    'goalsForDoor no longer filters on availability — dead cards are back');
+});
+
+test('no purchase surface renders an unavailable goal', () => {
+  const landing = codeOnly(LANDING);
+  const wizard = codeOnly(WIZARD());
+
+  // Every grid must map over a filtered list, never GOALS directly.
+  assert.ok(!/GOALS\.filter\(\(g\) => g\.door === door\)(?!\s*&&)/.test(wizard),
+    'the wizard goal grid maps over an unfiltered door list');
+  assert.match(wizard, /g\.door === door && g\.available/,
+    'the wizard purchase screen does not filter to purchasable goals');
+
+  // And the "In production" treatment must be gone from both.
+  for (const [name, src] of [['Landing.tsx', landing], ['Wizard.tsx', wizard]]) {
+    assert.ok(!/In production/.test(src),
+      `${name} still renders an "In production" badge on a card`);
+    assert.ok(!/opacity-50|opacity-60/.test(src) || !/available/.test(src),
+      `${name} still dims cards by availability`);
+  }
+});
+
+test('upcoming titles are named in prose, not shown as dead cards', () => {
+  const src = codeOnly(DATA);
+  assert.match(src, /export const upcomingForDoor/,
+    'there is no way to name upcoming titles');
+  const fn = src.slice(src.indexOf('export const upcomingForDoor'));
+  const body = fn.slice(0, fn.indexOf('\n\n'));
+  assert.match(body, /!g\.available/, 'upcomingForDoor does not select unbuilt goals');
+  // `custom` is not unfinished — it is the $129 tier, and it was being rendered
+  // at 50% opacity under a badge saying it does not exist.
+  assert.match(body, /g\.id !== 'custom'/,
+    'custom is announced as "in production" when it is actually a pricing tier');
+
+  // Per COMPONENT, not per file. Counting `<UpcomingLine` across Landing.tsx
+  // passed with BOTH lines inside PerformanceLanding and none in HealingLanding
+  // — the healing door announced nothing and the performance door announced the
+  // healing titles. A browser found it; a file-wide count structurally cannot.
+  const landing = codeOnly(LANDING);
+  const fns = [...landing.matchAll(/^(?:export\s+(?:default\s+)?)?function (\w+)/gm)]
+    .map((m, i, all) => ({
+      name: m[1],
+      body: landing.slice(m.index, all[i + 1] ? all[i + 1].index : landing.length),
+    }));
+  for (const door of ['PerformanceLanding', 'HealingLanding']) {
+    const fn = fns.find((x) => x.name === door);
+    assert.ok(fn, `${door} no longer exists — update this test`);
+    const lines = fn.body.match(/<UpcomingLine door="(\w+)"/g) || [];
+    assert.strictEqual(lines.length, 1,
+      `${door} renders ${lines.length} upcoming lines, expected exactly 1`);
+    const expected = door === 'HealingLanding' ? 'healing' : 'performance';
+    assert.ok(lines[0].includes(`"${expected}"`),
+      `${door} announces the wrong door's upcoming titles: ${lines[0]}`);
+  }
+});
+
+test('nameList reads as English for one, two and three titles', () => {
+  // Rendered into a sentence, so "A, B" instead of "A and B" is a visible bug.
+  const src = codeOnly(DATA);
+  const at = src.indexOf('export function nameList');
+  assert.ok(at > 0, 'nameList is missing');
+  // +2 to include the closing brace — without it the extracted function is
+  // unterminated and new Function fails on a syntax error, not on behaviour.
+  const body = src.slice(at, src.indexOf('\n}', at) + 2);
+  // Strip the TypeScript annotations so the real implementation can be called.
+  // Re-implementing it here would test the copy, not the function — and the
+  // off-by-one in an English list join ("A, B" instead of "A and B") is exactly
+  // the kind of thing only execution catches.
+  const js = body
+    .replace('export function', 'function')
+    .replace(/:\s*string\[\]/g, '')
+    .replace(/\)\s*:\s*string\s*\{/, ') {');
+  assert.ok(!/:\s*string/.test(js), `type annotations survived the strip:\n${js}`);
+  const nameList = new Function(`${js}; return nameList;`)();
+  assert.strictEqual(nameList([]), '');
+  assert.strictEqual(nameList(['A']), 'A');
+  assert.strictEqual(nameList(['A', 'B']), 'A and B');
+  assert.strictEqual(nameList(['A', 'B', 'C']), 'A, B and C');
+});
+
+test('the "not in production yet" error is unreachable through the UI', () => {
+  // The 422 handler stays: the API can still return it for a hand-crafted
+  // request, and deleting a server-error branch because the UI cannot trigger
+  // it is how a real 422 becomes an unhandled blank screen. "Unreachable
+  // through the flow" is the criterion, and filtering is what delivers it.
+  const wizard = codeOnly(WIZARD());
+  assert.match(wizard, /res\.status === 422/,
+    'the 422 handler was deleted rather than made unreachable');
+
+  const start = wizard.indexOf('const doorGoals');
+  const decl = wizard.slice(start, start + 260);
+  assert.match(decl, /g\.available/,
+    'nothing prevents an unavailable goal reaching the render request');
 });

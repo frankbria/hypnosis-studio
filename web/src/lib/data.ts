@@ -181,8 +181,36 @@ export const GOALS: Goal[] = [
   },
 ]
 
+/**
+ * The catalog for a door — what someone can actually buy today (#66).
+ *
+ * This used to return every goal, and the grids rendered the unbuilt ones as
+ * greyed-out cards behind an "In production" badge. The arithmetic worked
+ * against us exactly where it mattered: the Healing landing showed three cards
+ * with two greyed out — a shelf two-thirds empty, on the page whose job is to
+ * make an anxious visitor feel they are in careful hands.
+ *
+ * Roadmap credibility is worth about one sentence, and nothing at all at the
+ * moment of payment.
+ */
 export const goalsForDoor = (door: DoorId): Goal[] =>
-  GOALS.filter((g) => g.door === door)
+  GOALS.filter((g) => g.door === door && g.available)
+
+/**
+ * Titles worth naming as coming, for the one sentence that replaces the cards.
+ *
+ * `custom` is excluded deliberately: it is not unfinished. It is the $129
+ * personalized tier, and it was being rendered at 50% opacity under a badge
+ * saying it does not exist. It belongs in PRICING, which already has it.
+ */
+export const upcomingForDoor = (door: DoorId): Goal[] =>
+  GOALS.filter((g) => g.door === door && !g.available && g.id !== 'custom')
+
+/** "A", "A and B", "A, B and C" — for naming upcoming titles in prose. */
+export function nameList(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? ''
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
 
 // ─── Voice sets ──────────────────────────────────────────────────────────────
 
