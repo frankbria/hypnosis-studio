@@ -413,7 +413,14 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
   const [jobResult, setJobResult] = useState<JobResult | null>(null)
   const audio = useAudioPreview()
 
-  const doorGoals = useMemo(() => GOALS.filter((g) => g.door === door), [door])
+  // Only what can be bought. Step 1 is the purchase screen: someone who has
+  // already decided to pay was being shown two products they cannot have, one
+  // of which (`custom`) is not unfinished at all — it is the $129 tier, greyed
+  // out under a badge saying it does not exist (#66).
+  const doorGoals = useMemo(
+    () => GOALS.filter((g) => g.door === door && g.available),
+    [door],
+  )
   const goal = doorGoals.find((g) => g.id === goalId) ?? null
   const voiceSet = VOICE_SETS.find((v) => v.id === voiceSetId) ?? null
   const tracks = useMemo(() => (goal ? buildTracks(goal) : []), [goal])
@@ -447,7 +454,10 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
 
   const goalValid =
     goalId !== null &&
-    (doorGoals.find((g) => g.id === goalId)?.available ?? false) &&
+    // doorGoals is the catalog now, so `.available` would be a tautology. What
+    // still matters is that the selection belongs to THIS door — a goalId can
+    // survive a door switch.
+    doorGoals.some((g) => g.id === goalId) &&
     (goalId !== 'custom' || customText.trim().length > 0)
 
   return (
@@ -501,26 +511,15 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
                     <button
                       key={g.id}
                       type="button"
-                      disabled={!g.available}
-                      onClick={() => g.available && setGoalId(g.id)}
+                      onClick={() => setGoalId(g.id)}
                       aria-pressed={selected}
                       className={cn(
                         'relative rounded-2xl border p-7 text-left transition-colors',
                         selected
                           ? 'border-violet-300/60 bg-violet-300/10'
                           : 'border-white/10 bg-white/5 hover:border-white/25',
-                        !g.available &&
-                          'cursor-not-allowed opacity-50 hover:border-white/10',
                       )}
                     >
-                      {!g.available && (
-                        <Badge
-                          variant="outline"
-                          className="absolute right-5 top-5 rounded-full border-white/15 px-3 py-1 text-[10px] font-normal uppercase tracking-[0.2em] text-white/40"
-                        >
-                          In production
-                        </Badge>
-                      )}
                       {selected && (
                         <span className="absolute right-5 top-5 flex size-5 items-center justify-center rounded-full bg-violet-300 text-[#0b0b12]">
                           <Check className="size-3" />
