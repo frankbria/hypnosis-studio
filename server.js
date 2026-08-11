@@ -214,6 +214,29 @@ function segmentCacheDir() {
 // Falls back to the full size if anything about the cache cannot be read: over-
 // charging delays a sale, under-charging overruns the plan, and only one of
 // those is recoverable.
+// Whether the renderer would actually reuse this entry.
+//
+// It must ask the same question segment_cache.lookup() asks, not a weaker one.
+// lookup() discards an entry whose header is not RIFF — so a corrupt cached
+// segment reads as free here while the renderer re-purchases it, and spend
+// exceeds the cap by exactly the segments the budget thought were already paid
+// for. Existence is not usability.
+function cachedSegmentUsable(entryPath) {
+  let fd;
+  try {
+    fd = fs.openSync(entryPath, 'r');
+    const head = Buffer.alloc(4);
+    const read = fs.readSync(fd, head, 0, 4, 0);
+    return read === 4 && head.toString('latin1') === 'RIFF';
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* nothing to do */ }
+    }
+  }
+}
+
 function uncachedChars(goal, voiceSet) {
   const voices = VOICE_SETS[voiceSet];
   if (!voices) return GOAL_CHARS[goal];
@@ -231,7 +254,7 @@ function uncachedChars(goal, voiceSet) {
         const cost = tag.length + String(seg.text || '').length;
         const key = segmentCacheKey(voiceId, tag, String(seg.text || ''));
         const entry = path.join(cache, key.slice(0, 2), `${key}.wav`);
-        if (!fs.existsSync(entry)) total += cost;
+        if (!cachedSegmentUsable(entry)) total += cost;
       }
     }
   } catch {

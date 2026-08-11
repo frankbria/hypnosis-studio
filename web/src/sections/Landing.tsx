@@ -13,7 +13,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { DISCLAIMER, PRICING, goalsForDoor } from '@/lib/data'
-import type { DoorId } from '@/lib/data'
+import type { DoorId, TrackPhase } from '@/lib/data'
 
 interface LandingProps {
   door: DoorId
@@ -52,7 +52,7 @@ const PROGRAM_ARC = [
   },
   {
     numeral: 'III',
-    phase: 'Suggestion',
+    phase: 'Mastery',
     body: 'The second deepening. The whisper layer carries the suggestions underneath the narration.',
   },
   {
@@ -60,7 +60,14 @@ const PROGRAM_ARC = [
     phase: 'Integration',
     body: 'A short daytime anchor. Return to the state in minutes — eyes open, day resumed.',
   },
-] as const
+] as const satisfies ReadonlyArray<{
+  numeral: string
+  // Typed against the union so this list cannot drift from the engine the way
+  // it just had: `as const` alone let 'Suggestion' sit here unnoticed while the
+  // delivery screen said 'Mastery' (#15).
+  phase: TrackPhase
+  body: string
+}>
 
 function Waveform() {
   const bars = Array.from({ length: 64 }, (_, i) => {
@@ -326,7 +333,7 @@ function PerformanceLanding({ onStart, onHome }: Omit<LandingProps, 'door'>) {
           <div className="text-center">
             <Eyebrow>Pricing</Eyebrow>
             <h2 className="font-display mx-auto mt-4 max-w-xl text-4xl leading-tight text-[#e8e6f0]">
-              Pay for the program. Keep it for life.
+              One payment. No subscription.
             </h2>
           </div>
           <div className="mt-14 grid gap-4 md:grid-cols-3">
@@ -365,17 +372,27 @@ function PerformanceLanding({ onStart, onHome }: Omit<LandingProps, 'door'>) {
                       </li>
                     ))}
                   </ul>
-                  <Button
-                    onClick={onStart}
-                    variant={tier.highlighted ? 'default' : 'outline'}
-                    className={
-                      tier.highlighted
-                        ? 'mt-8 w-full bg-primary text-primary-foreground hover:bg-violet-300'
-                        : 'mt-8 w-full border-white/15 bg-transparent text-white/80 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white'
-                    }
-                  >
-                    {tier.cta}
-                  </Button>
+                  {tier.available ? (
+                    <Button
+                      onClick={onStart}
+                      variant={tier.highlighted ? 'default' : 'outline'}
+                      className={
+                        tier.highlighted
+                          ? 'mt-8 w-full bg-primary text-primary-foreground hover:bg-violet-300'
+                          : 'mt-8 w-full border-white/15 bg-transparent text-white/80 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white'
+                      }
+                    >
+                      {tier.cta}
+                    </Button>
+                  ) : (
+                    /* Deliberately not a button. A control that looks clickable
+                       and does nothing is worse than none, and a payment CTA
+                       here would sell something the studio cannot deliver on the
+                       day of sale. */
+                    <p className="mt-8 w-full rounded-md border border-white/10 px-4 py-2.5 text-center text-sm text-white/45">
+                      {tier.cta}
+                    </p>
+                  )}
                 </CardContent>
               </Card>
             ))}

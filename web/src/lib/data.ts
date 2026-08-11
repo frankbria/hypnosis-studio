@@ -197,7 +197,13 @@ export const VOICE_SETS: VoiceSet[] = [
 
 // ─── Tracks ──────────────────────────────────────────────────────────────────
 
-export type TrackPhase = 'Foundation' | 'Deepening' | 'Suggestion' | 'Integration'
+/**
+ * The engine writes these into manifest.json (render_program.py TRACKS), and the
+ * delivery screen renders that value. "Mastery" rather than "Suggestion" because
+ * the engine is what the customer actually receives — the badge used to change
+ * between what was bought and what arrived (#15).
+ */
+export type TrackPhase = 'Foundation' | 'Deepening' | 'Mastery' | 'Integration'
 
 export interface Track {
   numeral: 'I' | 'II' | 'III' | 'IV'
@@ -206,12 +212,44 @@ export interface Track {
   duration: string
 }
 
-const TRACK_META: ReadonlyArray<{ phase: TrackPhase; duration: string }> = [
-  { phase: 'Foundation', duration: '14:20' },
-  { phase: 'Deepening', duration: '13:45' },
-  { phase: 'Suggestion', duration: '14:55' },
-  { phase: 'Integration', duration: '13:10' },
+/**
+ * Kept in step with `TRACKS` in engine/render_program.py, whose `total_s` is
+ * 780/780/780/420. Nothing enforces that coupling across the language boundary,
+ * so it is written down here and asserted in test/web.claims.test.js.
+ *
+ * These are MINIMUMS, not predictions. The assembler renders
+ * `max(total_s, voice_end + 75 s)` bounded by the pad (#5), and `voice_end` is
+ * the sum of real TTS durations — so a track runs at least this long and
+ * typically two to three minutes longer, varying by goal. Advertising the floor
+ * never overstates what is delivered, which is the direction that matters for
+ * something shown at the moment of purchase.
+ *
+ * The previous values (14:20 / 13:45 / 14:55 / 13:10, totalling 56:10) were
+ * invented and unconnected to the engine. Track IV was sold at 13:10 and
+ * delivered at 7:00 (#14).
+ *
+ * #58's catalog manifest carries real measured durations and should replace
+ * these floors once it exists.
+ */
+const TRACK_META: ReadonlyArray<{ phase: TrackPhase; minimumSeconds: number }> = [
+  { phase: 'Foundation', minimumSeconds: 780 },
+  { phase: 'Deepening', minimumSeconds: 780 },
+  { phase: 'Mastery', minimumSeconds: 780 },
+  { phase: 'Integration', minimumSeconds: 420 },
 ]
+
+/** `780` → `"13:00"`. */
+export function formatDuration(totalSeconds: number): string {
+  const m = Math.floor(totalSeconds / 60)
+  const s = Math.floor(totalSeconds % 60)
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+/** The shortest a full program can be, for copy that quotes a total. */
+export const PROGRAM_MINIMUM_SECONDS = TRACK_META.reduce(
+  (total, t) => total + t.minimumSeconds,
+  0,
+)
 
 const NUMERALS = ['I', 'II', 'III', 'IV'] as const
 
@@ -222,7 +260,7 @@ export function buildTracks(goal: Goal): Track[] {
     numeral,
     title: `${programName} ${numeral} — ${parts[i]}`,
     phase: TRACK_META[i].phase,
-    duration: TRACK_META[i].duration,
+    duration: formatDuration(TRACK_META[i].minimumSeconds),
   }))
 }
 
@@ -236,42 +274,74 @@ export interface PricingTier {
   cta: string
   highlighted?: boolean
   badge?: string
+  /**
+   * Whether this tier can actually be bought today. A tier that is visible but
+   * not purchasable must never render a payment CTA — advertising something the
+   * studio cannot deliver on the day of sale is the exposure #13 was opened
+   * about.
+   */
+  available: boolean
 }
 
+/**
+ * The ladder from tasks/marketing-plan.md §3: $39 → $129 → $649.
+ *
+ * Only the $39 tier is purchasable at launch. The plan puts the personalized
+ * tier post-launch ("ship the catalog, then this"), and the anchor contains two
+ * personalized programs, so neither can be fulfilled on day one. They stay
+ * visible because the ladder is what makes $39 read as the easy decision — an
+ * anchor removed is a price with nothing to be cheap against — but neither
+ * carries a payment CTA.
+ *
+ * The anchor is $649 with TWO programs, not the $1,499 with five that issue #63
+ * quotes: §3 records a later owner decision, and at $649 five programs invert
+ * the tier into a 23% discount, which is the opposite of an anchor. $649 against
+ * $453 piecemeal is a 43% premium, so it still does its job.
+ *
+ * No tier may claim a subscription, a library, a priority queue (there is no
+ * queue — the server returns 409 busy), human consultation, or lifetime access
+ * (retention is 30 days).
+ */
 export const PRICING: PricingTier[] = [
   {
-    name: 'Custom Program',
+    name: 'Program',
     price: '$39',
     cadence: 'one-time',
-    cta: 'Create your program',
+    cta: 'Choose your program',
+    available: true,
     features: [
-      'One personalized 4-track program',
+      'Any one catalog title — four tracks',
+      'Your choice of voice',
       'WAV + MP3, studio-mastered',
-      'Lifetime download access',
+      'Downloads in seconds · 30-day access',
     ],
   },
   {
-    name: 'Practice',
-    price: '$19',
-    cadence: 'per month',
-    cta: 'Start practicing',
-    highlighted: true,
-    badge: 'Most popular',
-    features: [
-      'One new custom program each month',
-      'Full library access',
-      'Pause or cancel anytime',
-    ],
-  },
-  {
-    name: 'Premium',
-    price: '$99',
+    name: 'Personalized Program',
+    price: '$129',
     cadence: 'one-time',
-    cta: 'Go premium',
+    cta: 'Opening soon',
+    highlighted: true,
+    badge: 'Next to open',
+    available: false,
     features: [
-      'One personalized 4-track program',
-      'Priority render queue',
-      '1:1 script consultation',
+      'Describe what you want to work on',
+      'A script written around your answers',
+      'Rendered on the same four-track engine',
+      'WAV + MP3 · 30-day access',
+    ],
+  },
+  {
+    name: 'The Complete Studio',
+    price: '$649',
+    cadence: 'one-time',
+    cta: 'Opening soon',
+    available: false,
+    features: [
+      'Every catalog title, live at purchase',
+      'Two personalized programs',
+      'Both voice sets throughout',
+      'WAV + MP3 · 30-day access',
     ],
   },
 ]

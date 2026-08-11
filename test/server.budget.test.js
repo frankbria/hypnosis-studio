@@ -537,3 +537,48 @@ test('a partially cached render is charged only for what it will buy', async () 
     stop(srv);
   }
 });
+
+test('a corrupt cached segment is priced as unpaid', async () => {
+  // The budget must ask the same question the renderer asks. segment_cache
+  // .lookup() discards an entry whose header is not RIFF, so an entry that
+  // merely *exists* is not one the renderer will reuse — it re-purchases it.
+  // Treating it as free lets spend exceed the monthly cap by exactly the
+  // segments the budget thought were already paid for.
+  const crypto = require('node:crypto');
+  const rendersDir = fs.mkdtempSync(path.join(os.tmpdir(), 'budget-corrupt-'));
+  const cache = path.join(rendersDir, 'segment-cache');
+  const VOICES = { narrator: 'nPczCjzI2devNBz1zQrb', whisper: 'RsoSo7Gg7GyAtGoPBiqb' };
+  function key(voiceId, tag, text) {
+    const h = crypto.createHash('sha256');
+    for (const field of [voiceId, tag, text]) {
+      const raw = Buffer.from(field, 'utf8');
+      h.update(String(raw.length), 'ascii');
+      h.update(Buffer.from([0]));
+      h.update(raw);
+    }
+    return h.digest('hex');
+  }
+  // Seed every segment, but with junk bytes rather than a WAV header.
+  for (const suffix of ['', '_track2', '_track3', '_track4']) {
+    const p = path.join(ROOT, 'engine', 'scripts', `river${suffix}_tts_segments.json`);
+    for (const seg of JSON.parse(fs.readFileSync(p, 'utf8')).segments) {
+      const whisper = seg.phase === 'suggestion';
+      const k = key(whisper ? VOICES.whisper : VOICES.narrator,
+        whisper ? '[whispering] ' : '[soft] ', String(seg.text || ''));
+      const dir = path.join(cache, k.slice(0, 2));
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${k}.wav`), Buffer.from('<html>nope'));
+    }
+  }
+
+  const srv = await startServer({ budget: '500000', rendersDir, enginePy: makeEngine() });
+  try {
+    await request(srv.port, 'POST', '/api/programs', START('river'));
+    const b = await waitForBudget(rendersDir, (v) => v && v.chars > 0);
+    assert.strictEqual(b.chars, goalChars('river'),
+      'corrupt cache entries were priced as already paid for; the renderer will '
+      + 'buy them again and spend will exceed the cap');
+  } finally {
+    stop(srv);
+  }
+});

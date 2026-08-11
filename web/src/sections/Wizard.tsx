@@ -30,7 +30,7 @@ import {
   VOICE_SETS,
   buildTracks,
 } from '@/lib/data'
-import type { DoorId, VoiceSet } from '@/lib/data'
+import type { DoorId, TrackPhase, VoiceSet } from '@/lib/data'
 import { cn } from '@/lib/utils'
 
 const STEP_LABELS = ['Goal', 'Voice', 'Review', 'Create', 'Program'] as const
@@ -117,7 +117,12 @@ export interface ReadyTrack {
   n: number
   id: string
   title: string
-  phase: string
+  /**
+   * Typed as the union, not `string`. It was `string`, which is why the compiler
+   * never noticed the delivery screen showing "Mastery" where the purchase
+   * screen said "Suggestion" (#15).
+   */
+  phase: TrackPhase
   durationSec: number
   mp3: string
   wav: string
