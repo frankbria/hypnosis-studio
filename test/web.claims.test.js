@@ -729,3 +729,131 @@ test('no efficacy claims, studies, percentages or testimonials appear', () => {
   }
   assert.deepStrictEqual(offenders, [], `efficacy claims introduced:\n${offenders.join('\n')}`);
 });
+
+// --------------------------------------------------------------------------
+// Goal cards say what they are for (#62)
+// --------------------------------------------------------------------------
+
+const GOALS_BLOCK = (() => {
+  const start = DATA.indexOf('export const GOALS');
+  assert.ok(start >= 0, 'GOALS array not found');
+  return DATA.slice(start, DATA.indexOf('\n]', start));
+})();
+
+const GOAL_IDS = [...GOALS_BLOCK.matchAll(/^\s{4}id: '([^']+)'/gm)].map((m) => m[1]);
+
+test('every goal has an outcome label and a "Choose this if" line', () => {
+  assert.ok(GOAL_IDS.length >= 9, `expected at least 9 goals, parsed ${GOAL_IDS.length}`);
+
+  const entries = GOALS_BLOCK.split(/^\s{4}id: '/m).slice(1);
+  assert.strictEqual(entries.length, GOAL_IDS.length, 'goal parsing disagrees with itself');
+
+  const missing = [];
+  entries.forEach((entry, i) => {
+    for (const field of ['outcome', 'chooseIf']) {
+      const m = entry.match(new RegExp(`${field}: '([^']*)'`));
+      if (!m || m[1].trim().length < 8) missing.push(`${GOAL_IDS[i]}.${field}`);
+    }
+  });
+  assert.deepStrictEqual(missing, [],
+    `goals without a usable outcome/chooseIf:\n${missing.join('\n')}`);
+});
+
+test('all three goal-card renderers share one component', () => {
+  // The performance grid, the healing practices grid and the wizard's goal step
+  // rendered three identical copies of this markup. Three copies is how one of
+  // them ends up missing the field you just added — which is exactly how the
+  // healing door shipped without a seizure warning (#65).
+  const shared = fs.readFileSync(
+    path.join(WEB, 'components', 'GoalCardText.tsx'), 'utf8');
+  for (const field of ['goal.outcome', 'goal.chooseIf', 'goal.name', 'goal.tagline']) {
+    assert.ok(shared.includes(`{${field}}`), `the shared card does not render ${field}`);
+  }
+
+  const landing = codeOnly(LANDING);
+  const wizard = codeOnly(WIZARD());
+  assert.strictEqual((landing.match(/<GoalCardText/g) || []).length, 2,
+    'Landing.tsx should render the shared goal card exactly twice (performance + healing)');
+  assert.strictEqual((wizard.match(/<GoalCardText/g) || []).length, 1,
+    'the wizard goal step does not use the shared goal card');
+
+  // And no renderer may reconstruct the old inline block alongside it.
+  for (const [name, src] of [['Landing.tsx', landing], ['Wizard.tsx', wizard]]) {
+    assert.ok(!/\{(goal|g)\.tagline\}/.test(src),
+      `${name} still renders a goal tagline inline instead of through the shared card`);
+  }
+});
+
+test('the outcome outranks the metaphor in the card', () => {
+  // #62 is a hierarchy fix: the metaphor got 40px and the meaning got 12px at
+  // 35% opacity. The outcome must come first in the DOM and the name after it.
+  const shared = fs.readFileSync(
+    path.join(WEB, 'components', 'GoalCardText.tsx'), 'utf8');
+  const code = codeOnly(shared);
+  assert.ok(code.indexOf('{goal.outcome}') < code.indexOf('{goal.name}'),
+    'the metaphor still leads the card');
+  assert.ok(code.indexOf('{goal.description}') < code.indexOf('{goal.chooseIf}'),
+    '"Choose this if" should be the last thing read, after the description');
+});
+
+test('healing goals describe an experience, not a medical condition', () => {
+  // The healing door's stance is HEALING_NONMEDICAL — rest and personal growth,
+  // never treatment. A "Choose this if" line naming insomnia or anxiety would
+  // quietly turn the catalogue into a list of things we claim to treat.
+  const clinical = [
+    /\binsomnia\b/i, /\banxiety\b/i, /\bdepress(ion|ed)\b/i, /\btrauma\b/i,
+    /\bchronic\b/i, /\bdiagnos(is|ed)\b/i, /\bdisorder\b/i, /\bsymptom/i,
+    /\bcure\b/i, /\btreat(ment|s)?\b/i, /\bpain\b/i,
+  ];
+  const offenders = [];
+  for (const entry of GOALS_BLOCK.split(/^\s{4}id: '/m).slice(1)) {
+    const id = entry.slice(0, entry.indexOf("'"));
+    const choose = (entry.match(/chooseIf: '([^']*)'/) || [])[1] || '';
+    const outcome = (entry.match(/outcome: '([^']*)'/) || [])[1] || '';
+    for (const p of clinical) {
+      for (const [field, text] of [['chooseIf', choose], ['outcome', outcome]]) {
+        const m = text.match(p);
+        if (m) offenders.push(`${id}.${field}: "${m[0]}"`);
+      }
+    }
+  }
+  assert.deepStrictEqual(offenders, [],
+    `goal copy names a medical condition:\n${offenders.join('\n')}`);
+});
+
+/** Contrast of a solid hex colour against the dark page background. */
+function hexContrastOnDark(hex, bg = [0x0b, 0x0b, 0x12]) {
+  const lin = (c) => {
+    const v = c / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+  const lum = (rgb) => 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
+  const rgb = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const [hi, lo] = [lum(rgb), lum(bg)].sort((a, b) => b - a);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+test('every colour on the goal card meets AA', () => {
+  // #62's fourth criterion. The tagline shipped at text-white/35 — 3.15:1, under
+  // AA — and #19 recorded it as out of scope because it was chrome. This issue
+  // rewrites that exact hierarchy, so it is the right place to fix it, and the
+  // guard belongs on the card rather than on the disclaimer token list.
+  const src = codeOnly(fs.readFileSync(
+    path.join(WEB, 'components', 'GoalCardText.tsx'), 'utf8'));
+
+  const failures = [];
+
+  for (const m of src.matchAll(/text-white\/(\d{1,3})/g)) {
+    const ratio = contrastOnDark(Number(m[1]) / 100);
+    if (ratio < 4.5) failures.push(`text-white/${m[1]} = ${ratio.toFixed(2)}:1`);
+  }
+  for (const m of src.matchAll(/text-\[(#[0-9a-f]{6})\]/gi)) {
+    const ratio = hexContrastOnDark(m[1].toLowerCase());
+    if (ratio < 4.5) failures.push(`${m[1]} = ${ratio.toFixed(2)}:1`);
+  }
+
+  assert.ok(failures.length > 0 || src.includes('text-white/'),
+    'no colours parsed from the goal card — the check would pass vacuously');
+  assert.deepStrictEqual(failures, [],
+    `goal-card text below WCAG AA:\n${failures.join('\n')}`);
+});
