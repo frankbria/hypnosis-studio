@@ -191,3 +191,263 @@ test('the phase union admits exactly the engine names', () => {
   assert.deepStrictEqual(names, [...new Set(ENGINE_TRACKS.map((t) => t.phase))].sort(),
     'TrackPhase does not match the phases the engine writes');
 });
+
+// --------------------------------------------------------------------------
+// Policy pages (#16) and the retention window (#21)
+// --------------------------------------------------------------------------
+
+// Comments stripped: the popstate handler is *described* in a comment that
+// mentions "popstate", so slicing raw source found the prose first and produced
+// an empty range that matched nothing. Fourth time this pattern has bitten in
+// this repo — see the conftest fixture on the Python side.
+const APP = codeOnly(fs.readFileSync(path.join(WEB, 'App.tsx'), 'utf8'));
+const LEGAL_LIB = fs.readFileSync(path.join(WEB, 'lib', 'legal.ts'), 'utf8');
+const FOOTER = fs.readFileSync(path.join(WEB, 'components', 'SiteFooter.tsx'), 'utf8');
+
+test('/terms and /privacy are real routes', () => {
+  for (const route of ['/terms', '/privacy']) {
+    assert.ok(APP.includes(`'${route}'`), `${route} is not routed`);
+  }
+});
+
+test('policy routes are resolved on back/forward as well as first load', () => {
+  // Both the initial state and the popstate handler have to consult the legal
+  // path, or the browser's back button lands on a page that still thinks it is
+  // showing the door chooser.
+  const pop = APP.slice(APP.indexOf('const onPop'), APP.indexOf('popstate'));
+  assert.match(pop, /legalFromPath/, 'popstate does not resolve policy routes');
+  assert.match(APP, /useState<LegalPageId \| null>\(\(\) =>\s*legalFromPath/,
+    'the initial route does not resolve policy paths, so direct navigation fails');
+});
+
+test('the policy links are in the shared footer, not one page', () => {
+  // #16 wants them on every page including the wizard. There were three separate
+  // footers, which is how one ends up without the link.
+  assert.match(FOOTER, /href="\/terms"/);
+  assert.match(FOOTER, /href="\/privacy"/);
+  for (const surface of ['Landing.tsx', 'DoorChooser.tsx', 'Wizard.tsx']) {
+    const src = fs.readFileSync(path.join(WEB, 'sections', surface), 'utf8');
+    assert.match(src, /<SiteFooter/, `${surface} does not render the shared footer`);
+  }
+});
+
+test('the policy links survive a modified click', () => {
+  // A policy page should still open in a new tab; intercepting every click would
+  // break that, and an <a href> that preventDefaults unconditionally is a link
+  // in name only.
+  assert.match(FOOTER, /metaKey \|\| event\.ctrlKey/,
+    'modified clicks are intercepted, so the links cannot be opened in a new tab');
+});
+
+test('the advertised retention window matches what actually deletes the files', () => {
+  // server.js is what removes them; the site quoting a different number is the
+  // kind of promise that only surfaces when a customer comes back on day 31.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const m = server.match(/RETENTION_DAYS \|\| '(\d+)'/);
+  assert.ok(m, 'could not find the server retention default');
+  const declared = LEGAL_LIB.match(/RETENTION_DAYS = (\d+)/);
+  assert.ok(declared, 'the site does not declare a retention window');
+  assert.strictEqual(declared[1], m[1],
+    `the site says ${declared[1]} days; the sweep deletes after ${m[1]}`);
+});
+
+test('the retention number appears once, not scattered through prose', () => {
+  // Two pages quoting it separately is how they drift.
+  const legalPage = fs.readFileSync(path.join(WEB, 'sections', 'Legal.tsx'), 'utf8');
+  assert.ok(!/\b30 days\b/.test(codeOnly(legalPage)),
+    'the retention window is hard-coded in the policy prose instead of using RETENTION_WINDOW');
+});
+
+test('the policy pages say what is collected and how long it is kept', () => {
+  const legalPage = fs.readFileSync(path.join(WEB, 'sections', 'Legal.tsx'), 'utf8');
+  assert.match(legalPage, /RETENTION_WINDOW/, 'no retention window on the policy pages');
+  assert.match(legalPage, /DATA_WE_KEEP/, 'the privacy page does not list what is stored');
+  assert.match(legalPage, /DISCLAIMER/, 'the non-medical stance is not carried on the policy pages');
+});
+
+// --------------------------------------------------------------------------
+// Safety copy must be readable (#19) and the seizure warning must stand alone (#65)
+// --------------------------------------------------------------------------
+
+/**
+ * WCAG 2.1 contrast ratio for white at `alpha` composited on `bg`.
+ *
+ * Recomputed here rather than trusting the numbers in the issue, because the
+ * whole point of the issue is that a number was wrong.
+ */
+function contrastOnDark(alpha, bg = [0x0b, 0x0b, 0x12]) {
+  const lin = (c) => {
+    const v = c / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+  const lum = (rgb) => 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
+  const fg = bg.map((c) => alpha * 255 + (1 - alpha) * c);
+  const [hi, lo] = [lum(fg), lum(bg)].sort((a, b) => b - a);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** The `text-white/NN` on the element rendering `{TOKEN}`. */
+function opacityRendering(src, token) {
+  const at = src.indexOf(`{${token}}`);
+  if (at < 0) return null;
+  // The className sits on the opening tag, just above the interpolation.
+  const before = src.slice(Math.max(0, at - 400), at);
+  const matches = [...before.matchAll(/text-white\/(\d+)/g)];
+  return matches.length ? Number(matches[matches.length - 1][1]) / 100 : null;
+}
+
+const SAFETY_TOKENS = ['DISCLAIMER', 'HEALING_NONMEDICAL', 'SAFETY_WARNING'];
+
+test('the contrast helper agrees with the measured values in the issue', () => {
+  // Sanity-check the helper itself before relying on it: the issue measured
+  // white/40 at 3.81 and white/45 at 4.52.
+  assert.ok(Math.abs(contrastOnDark(0.4) - 3.81) < 0.05, `white/40 = ${contrastOnDark(0.4)}`);
+  assert.ok(Math.abs(contrastOnDark(0.45) - 4.52) < 0.05, `white/45 = ${contrastOnDark(0.45)}`);
+});
+
+test('every rendering of safety copy meets WCAG AA', () => {
+  const failures = [];
+  for (const surface of ['Landing.tsx', 'Wizard.tsx']) {
+    const src = fs.readFileSync(path.join(WEB, 'sections', surface), 'utf8');
+    for (const token of SAFETY_TOKENS) {
+      let from = 0;
+      for (;;) {
+        const at = src.indexOf(`{${token}}`, from);
+        if (at < 0) break;
+        const alpha = opacityRendering(src.slice(0, at + token.length + 2), token);
+        if (alpha !== null && contrastOnDark(alpha) < 4.5) {
+          failures.push(`${surface}: ${token} at white/${alpha * 100} = ${contrastOnDark(alpha).toFixed(2)}:1`);
+        }
+        from = at + 1;
+      }
+    }
+  }
+  assert.deepStrictEqual(failures, [],
+    `safety copy below WCAG AA:\n${failures.join('\n')}`);
+});
+
+test('safety copy is not left on a 0.01 margin', () => {
+  // white/45 is 4.51:1 — passing by a hundredth. For the most legally sensitive
+  // text in the product, a rounding change or a background tweak should not be
+  // able to drop it below the line.
+  for (const surface of ['Landing.tsx', 'Wizard.tsx']) {
+    const src = fs.readFileSync(path.join(WEB, 'sections', surface), 'utf8');
+    for (const token of SAFETY_TOKENS) {
+      const alpha = opacityRendering(src, token);
+      if (alpha === null) continue;
+      assert.ok(contrastOnDark(alpha) >= 5.0,
+        `${surface}: ${token} at ${contrastOnDark(alpha).toFixed(2)}:1 has no headroom`);
+    }
+  }
+});
+
+test('the seizure warning is its own line, not a clause in a paragraph', () => {
+  const data = fs.readFileSync(path.join(WEB, 'lib', 'data.ts'), 'utf8');
+  assert.match(data, /export const SAFETY_WARNING/,
+    'the warning does not exist independently of the general disclaimer');
+  const warning = data.slice(data.indexOf('export const SAFETY_WARNING'), data.indexOf('export const DISCLAIMER'));
+  assert.match(warning, /seizure/i, 'the standalone warning does not mention seizures');
+  assert.match(warning, /photosensitiv/i, 'the standalone warning does not mention photosensitivity');
+});
+
+test('the seizure warning appears before purchase, not only in the footer', () => {
+  const wizard = fs.readFileSync(path.join(WEB, 'sections', 'Wizard.tsx'), 'utf8');
+  assert.match(wizard, /\{SAFETY_WARNING\}/,
+    'the purchase flow never shows the standalone safety warning');
+  // Above the consent checkbox, so it is not buried inside the thing being
+  // consented to — which is what it was.
+  assert.ok(wizard.indexOf('{SAFETY_WARNING}') < wizard.indexOf('{DISCLAIMER}'),
+    'the warning appears after the consent label rather than before it');
+});
+
+test('every door shows the seizure warning, not just the one it was added to', () => {
+  // Landing.tsx holds two independent door components. The warning was first
+  // added only to PerformanceLanding, so /healing rendered no seizure warning at
+  // all — and a file-scoped `LANDING.includes('SAFETY_WARNING')` passed anyway,
+  // because the constant *was* in the file. A browser on /healing found it.
+  //
+  // So assert per component. Each door either renders the warning itself or
+  // renders a shared component that does.
+  const src = codeOnly(LANDING);
+
+  // Each component's body runs to the next top-level function, NOT to the next
+  // *door*. Bounding by door let HealingLanding — the last one — run to EOF and
+  // swallow the `Landing` dispatcher below it, which renders
+  // `<PerformanceLanding`. The check then "passed" by finding the other door's
+  // tag inside healing's slice, and stayed green when the fix was reverted.
+  //
+  // The `export (default )?` alternation matters for the same reason: the
+  // dispatcher is `export default function Landing`, so a bare /^function/
+  // does not treat it as a boundary and healing's slice runs to EOF anyway.
+  const fns = [...src.matchAll(/^(?:export\s+(?:default\s+)?)?function (\w+)/gm)].map((m, i, all) => ({
+    name: m[1],
+    body: src.slice(m.index, all[i + 1] ? all[i + 1].index : src.length),
+  }));
+
+  const carriers = fns
+    .filter((fn) => /\{SAFETY_WARNING\}/.test(fn.body))
+    .map((fn) => fn.name);
+  assert.ok(carriers.length > 0, 'no component in Landing.tsx renders SAFETY_WARNING');
+
+  for (const door of ['PerformanceLanding', 'HealingLanding']) {
+    const fn = fns.find((f) => f.name === door);
+    assert.ok(fn, `${door} no longer exists — update this test`);
+
+    const direct = /\{SAFETY_WARNING\}/.test(fn.body);
+    const viaShared = carriers.some((c) => c !== door && fn.body.includes(`<${c}`));
+    assert.ok(direct || viaShared,
+      `${door} never reaches the seizure warning — that door ships without it`);
+  }
+});
+
+test('the general disclaimer still exists alongside it', () => {
+  // #65 wants the disclaimer kept, just no longer the sole carrier.
+  const data = fs.readFileSync(path.join(WEB, 'lib', 'data.ts'), 'utf8');
+  assert.match(data, /export const DISCLAIMER/);
+  assert.match(data, /not medical or psychological treatment/i);
+});
+
+// --------------------------------------------------------------------------
+// The privacy page must not overstate (#21)
+// --------------------------------------------------------------------------
+
+test('every third-party origin the site actually requests is disclosed', () => {
+  // The privacy copy says "no analytics, no advertising tags, no third-party
+  // scripts". That was written from reading index.html, which is clean — but
+  // index.css opens with an @import from fonts.googleapis.com, and Vite leaves
+  // it in the emitted CSS. So every visitor's browser requests a stylesheet
+  // from Google, disclosing their IP, while the page said nothing left the box.
+  //
+  // Assert against the real sources rather than against a remembered audit, so
+  // adding a CDN cannot silently falsify the policy.
+  const sources = ['index.css', path.join('..', 'index.html')]
+    .map((f) => path.join(WEB, f))
+    .filter((f) => fs.existsSync(f))
+    .map((f) => fs.readFileSync(f, 'utf8'))
+    .join('\n');
+
+  const found = [...new Set(
+    [...sources.matchAll(/https?:\/\/([a-z0-9.-]+)/gi)].map((m) => m[1].toLowerCase()),
+  )].filter((h) => !h.endsWith('hypnosisstudio.com') && h !== 'localhost');
+
+  const legal = fs.readFileSync(path.join(WEB, 'lib', 'legal.ts'), 'utf8');
+  const declared = [...legal.matchAll(/'([a-z0-9.-]+\.[a-z]{2,})'/gi)].map((m) =>
+    m[1].toLowerCase(),
+  );
+
+  for (const host of found) {
+    assert.ok(declared.includes(host),
+      `${host} is requested at runtime but not declared in THIRD_PARTY_ORIGINS — ` +
+      'the privacy page claims no third-party requests');
+  }
+
+  // And a declared origin must actually be described in prose, not just listed
+  // in an array nobody renders.
+  if (found.length > 0) {
+    assert.match(legal, /export const FONT_NOTICE/,
+      'a third-party request exists with no disclosure copy');
+    const page = fs.readFileSync(path.join(WEB, 'sections', 'Legal.tsx'), 'utf8');
+    assert.match(codeOnly(page), /\{FONT_NOTICE\}/,
+      'the disclosure exists as a constant but the privacy page never renders it');
+  }
+});

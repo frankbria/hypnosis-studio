@@ -1,10 +1,12 @@
-import { ArrowRight, Brain, Moon, Waves } from 'lucide-react'
+import { ArrowRight, Brain, Waves } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import type { DoorId } from '@/lib/data'
+import SiteFooter from '@/components/SiteFooter'
 
 interface DoorChooserProps {
   onEnter: (door: DoorId) => void
+  onNavigate: (path: string) => void
 }
 
 const DOORS = [
@@ -26,7 +28,7 @@ const DOORS = [
   },
 ] as const
 
-export default function DoorChooser({ onEnter }: DoorChooserProps) {
+export default function DoorChooser({ onEnter, onNavigate }: DoorChooserProps) {
   return (
     <div id="top" className="animate-fade-in">
       {/* ── Nav ─────────────────────────────────────────── */}
@@ -99,18 +101,7 @@ export default function DoorChooser({ onEnter }: DoorChooserProps) {
         </div>
       </section>
 
-      {/* ── Footer ──────────────────────────────────────── */}
-      <footer className="border-t border-white/5 px-6 py-10">
-        <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-6 sm:flex-row">
-          <div className="flex items-center gap-3">
-            <Moon className="size-4 text-violet-300/70" />
-            <span className="text-xs font-medium tracking-[0.3em] text-white/70">
-              HYPNOSIS&nbsp;STUDIO
-            </span>
-          </div>
-          <p className="text-xs text-white/30">© 2026 Hypnosis Studio</p>
-        </div>
-      </footer>
+      <SiteFooter onNavigate={onNavigate} />
     </div>
   )
 }

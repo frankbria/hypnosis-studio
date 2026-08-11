@@ -350,6 +350,23 @@ export const PROGRAM_PRICE = '$39'
 
 // ─── Copy constants ──────────────────────────────────────────────────────────
 
+/**
+ * The seizure and photosensitivity warning, standing on its own.
+ *
+ * It used to be the fifth clause of a 55-word paragraph rendered at 11px and 40%
+ * opacity (3.79:1, below WCAG AA) — and that same paragraph was the label of the
+ * consent checkbox, so it did double duty as the safety notice and the thing
+ * nobody reads before clicking (#65).
+ *
+ * Every track carries an isochronic entrainment bed: a deliberate rhythmic
+ * auditory stimulus, which is why this warning exists at all. The reason is
+ * stated rather than left implicit — "consult a professional" means little
+ * without it. The audio already opens with a spoken disclaimer on all 20
+ * scripts; the written one should be no less prominent.
+ */
+export const SAFETY_WARNING =
+  'These tracks carry a pulsing tone beneath the narration. If you have a history of seizures or are photosensitive, speak to a doctor before listening. Never listen while driving or operating machinery.'
+
 export const DISCLAIMER =
   'Hypnosis Studio audio is for relaxation and personal development. It is not medical or psychological treatment and is not a substitute for professional care. Never listen while driving or operating machinery. If you have a history of seizures, severe mental illness, or are under 18, consult a qualified professional before use.'
 
