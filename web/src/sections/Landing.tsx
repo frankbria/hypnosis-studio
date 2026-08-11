@@ -13,7 +13,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { DISCLAIMER, PRICING, goalsForDoor } from '@/lib/data'
-import type { DoorId } from '@/lib/data'
+import type { DoorId, TrackPhase } from '@/lib/data'
 
 interface LandingProps {
   door: DoorId
@@ -52,7 +52,7 @@ const PROGRAM_ARC = [
   },
   {
     numeral: 'III',
-    phase: 'Suggestion',
+    phase: 'Mastery',
     body: 'The second deepening. The whisper layer carries the suggestions underneath the narration.',
   },
   {
@@ -60,7 +60,14 @@ const PROGRAM_ARC = [
     phase: 'Integration',
     body: 'A short daytime anchor. Return to the state in minutes — eyes open, day resumed.',
   },
-] as const
+] as const satisfies ReadonlyArray<{
+  numeral: string
+  // Typed against the union so this list cannot drift from the engine the way
+  // it just had: `as const` alone let 'Suggestion' sit here unnoticed while the
+  // delivery screen said 'Mastery' (#15).
+  phase: TrackPhase
+  body: string
+}>
 
 function Waveform() {
   const bars = Array.from({ length: 64 }, (_, i) => {

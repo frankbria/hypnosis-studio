@@ -131,3 +131,63 @@ test('exactly one tier is purchasable today', () => {
     'the launch decision was one buyable tier; changing that is a business '
     + 'decision, not a refactor');
 });
+
+// --------------------------------------------------------------------------
+// The advertised program must match the engine that renders it
+// --------------------------------------------------------------------------
+
+const ENGINE_TRACKS = (() => {
+  // Parse the TRACKS table out of render_program.py. Nothing enforces this
+  // coupling across the language boundary, so the test is the enforcement:
+  // #14 (durations) and #15 (phase names) were both silent drift between these
+  // two tables.
+  const src = fs.readFileSync(
+    path.join(__dirname, '..', 'engine', 'render_program.py'), 'utf8');
+  const from = src.indexOf('TRACKS = [');
+  const block = src.slice(from, src.indexOf(']', from));
+  const rows = [...block.matchAll(/"total_s":\s*(\d+),\s*"phase":\s*"(\w+)"/g)];
+  assert.strictEqual(rows.length, 4, 'could not parse the engine TRACKS table');
+  return rows.map((m) => ({ totalS: Number(m[1]), phase: m[2] }));
+})();
+
+const DECLARED = [...DATA.matchAll(/minimumSeconds: (\d+)/g)].map((m) => Number(m[1]));
+
+test('advertised track lengths are the engine minimums, not invented', () => {
+  // The old values (14:20 / 13:45 / 14:55 / 13:10 = 56:10) had no relationship
+  // to the engine at all.
+  assert.deepStrictEqual(DECLARED, ENGINE_TRACKS.map((t) => t.totalS),
+    'the advertised minimums no longer match engine/render_program.py TRACKS');
+});
+
+test('no advertised length exceeds what the engine guarantees', () => {
+  // The direction that matters: the assembler renders at least total_s, so
+  // quoting the floor can only under-promise. Over-promising at the moment of
+  // purchase is the misrepresentation #14 was opened about.
+  DECLARED.forEach((seconds, i) => {
+    assert.ok(seconds <= ENGINE_TRACKS[i].totalS,
+      `track ${i + 1} advertises ${seconds}s against an engine floor of ${ENGINE_TRACKS[i].totalS}s`);
+  });
+});
+
+test('track IV is not advertised at roughly double its length', () => {
+  assert.strictEqual(DECLARED[3], 420, 'track IV should be the 420 s the engine renders');
+  assert.ok(DECLARED[3] < DECLARED[0], 'the short integration track is not shorter than track I');
+});
+
+test('phase names match the engine, which is what the customer receives', () => {
+  // The delivery screen renders the manifest's phase. When the two disagreed the
+  // badge visibly changed between what was bought and what arrived (#15).
+  const declared = [...DATA.matchAll(/phase: '(\w+)', minimumSeconds/g)].map((m) => m[1]);
+  assert.deepStrictEqual(declared, ENGINE_TRACKS.map((t) => t.phase),
+    'the frontend phase names have drifted from engine/render_program.py');
+});
+
+test('the phase union admits exactly the engine names', () => {
+  // ReadyTrack.phase was typed `string`, which is why the compiler never noticed
+  // the drift. The union is the guard now, so it has to stay in step.
+  const union = DATA.match(/export type TrackPhase = ([^\n]+)/);
+  assert.ok(union, 'TrackPhase union not found');
+  const names = [...union[1].matchAll(/'(\w+)'/g)].map((m) => m[1]).sort();
+  assert.deepStrictEqual(names, [...new Set(ENGINE_TRACKS.map((t) => t.phase))].sort(),
+    'TrackPhase does not match the phases the engine writes');
+});

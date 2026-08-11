@@ -197,7 +197,13 @@ export const VOICE_SETS: VoiceSet[] = [
 
 // ─── Tracks ──────────────────────────────────────────────────────────────────
 
-export type TrackPhase = 'Foundation' | 'Deepening' | 'Suggestion' | 'Integration'
+/**
+ * The engine writes these into manifest.json (render_program.py TRACKS), and the
+ * delivery screen renders that value. "Mastery" rather than "Suggestion" because
+ * the engine is what the customer actually receives — the badge used to change
+ * between what was bought and what arrived (#15).
+ */
+export type TrackPhase = 'Foundation' | 'Deepening' | 'Mastery' | 'Integration'
 
 export interface Track {
   numeral: 'I' | 'II' | 'III' | 'IV'
@@ -206,12 +212,44 @@ export interface Track {
   duration: string
 }
 
-const TRACK_META: ReadonlyArray<{ phase: TrackPhase; duration: string }> = [
-  { phase: 'Foundation', duration: '14:20' },
-  { phase: 'Deepening', duration: '13:45' },
-  { phase: 'Suggestion', duration: '14:55' },
-  { phase: 'Integration', duration: '13:10' },
+/**
+ * Kept in step with `TRACKS` in engine/render_program.py, whose `total_s` is
+ * 780/780/780/420. Nothing enforces that coupling across the language boundary,
+ * so it is written down here and asserted in test/web.claims.test.js.
+ *
+ * These are MINIMUMS, not predictions. The assembler renders
+ * `max(total_s, voice_end + 75 s)` bounded by the pad (#5), and `voice_end` is
+ * the sum of real TTS durations — so a track runs at least this long and
+ * typically two to three minutes longer, varying by goal. Advertising the floor
+ * never overstates what is delivered, which is the direction that matters for
+ * something shown at the moment of purchase.
+ *
+ * The previous values (14:20 / 13:45 / 14:55 / 13:10, totalling 56:10) were
+ * invented and unconnected to the engine. Track IV was sold at 13:10 and
+ * delivered at 7:00 (#14).
+ *
+ * #58's catalog manifest carries real measured durations and should replace
+ * these floors once it exists.
+ */
+const TRACK_META: ReadonlyArray<{ phase: TrackPhase; minimumSeconds: number }> = [
+  { phase: 'Foundation', minimumSeconds: 780 },
+  { phase: 'Deepening', minimumSeconds: 780 },
+  { phase: 'Mastery', minimumSeconds: 780 },
+  { phase: 'Integration', minimumSeconds: 420 },
 ]
+
+/** `780` → `"13:00"`. */
+export function formatDuration(totalSeconds: number): string {
+  const m = Math.floor(totalSeconds / 60)
+  const s = Math.floor(totalSeconds % 60)
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+/** The shortest a full program can be, for copy that quotes a total. */
+export const PROGRAM_MINIMUM_SECONDS = TRACK_META.reduce(
+  (total, t) => total + t.minimumSeconds,
+  0,
+)
 
 const NUMERALS = ['I', 'II', 'III', 'IV'] as const
 
@@ -222,7 +260,7 @@ export function buildTracks(goal: Goal): Track[] {
     numeral,
     title: `${programName} ${numeral} — ${parts[i]}`,
     phase: TRACK_META[i].phase,
-    duration: TRACK_META[i].duration,
+    duration: formatDuration(TRACK_META[i].minimumSeconds),
   }))
 }
 
