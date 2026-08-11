@@ -11,7 +11,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import { DISCLAIMER, PRICING, goalsForDoor } from '@/lib/data'
+import { DISCLAIMER, PRICING, SAFETY_WARNING, goalsForDoor } from '@/lib/data'
 import type { DoorId, TrackPhase } from '@/lib/data'
 import SiteFooter from '@/components/SiteFooter'
 
@@ -118,7 +118,7 @@ function DisclaimerSection() {
       <div className="mx-auto max-w-3xl">
         <div className="flex gap-4 rounded-2xl border border-white/10 bg-white/[0.03] p-7">
           <Info className="mt-0.5 size-4 shrink-0 text-[#d4b87f]/70" />
-          <p className="text-xs leading-relaxed text-white/40">{DISCLAIMER}</p>
+          <p className="text-xs leading-relaxed text-white/60">{DISCLAIMER}</p>
         </div>
       </div>
     </section>
@@ -315,7 +315,10 @@ function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 
               One payment. No subscription.
             </h2>
           </div>
-          <div className="mt-14 grid gap-4 md:grid-cols-3">
+          <p className="mx-auto mt-8 max-w-2xl rounded-lg border border-amber-200/25 bg-amber-100/[0.06] px-5 py-3.5 text-center text-sm leading-relaxed text-white/75">
+            {SAFETY_WARNING}
+          </p>
+          <div className="mt-10 grid gap-4 md:grid-cols-3">
             {PRICING.map((tier) => (
               <Card
                 key={tier.name}

@@ -26,6 +26,7 @@ import {
   GENERATION_TOTAL_MS,
   GOALS,
   HEALING_NONMEDICAL,
+  SAFETY_WARNING,
   PROGRAM_PRICE,
   VOICE_SETS,
   buildTracks,
@@ -704,6 +705,9 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
                   </ol>
                 </div>
 
+                <p className="mb-5 rounded-lg border border-amber-200/25 bg-amber-100/[0.06] px-5 py-3.5 text-sm leading-relaxed text-white/75">
+                  {SAFETY_WARNING}
+                </p>
                 <label
                   htmlFor="wizard-consent"
                   className="flex cursor-pointer items-start gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-6"
@@ -714,7 +718,7 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
                     onCheckedChange={(value) => setAgreed(value === true)}
                     className="mt-0.5 border-white/25 data-[state=checked]:border-violet-300 data-[state=checked]:bg-violet-300 data-[state=checked]:text-[#0b0b12]"
                   />
-                  <span className="text-xs leading-relaxed text-white/45">
+                  <span className="text-xs leading-relaxed text-white/60">
                     {DISCLAIMER}
                   </span>
                 </label>
@@ -968,7 +972,7 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
 
       {door === 'healing' && (
         <div className="border-t border-white/5 px-6 py-6">
-          <p className="mx-auto max-w-2xl text-center text-[11px] leading-relaxed text-white/30">
+          <p className="mx-auto max-w-2xl text-center text-xs leading-relaxed text-white/60">
             {HEALING_NONMEDICAL}
           </p>
         </div>

@@ -264,3 +264,105 @@ test('the policy pages say what is collected and how long it is kept', () => {
   assert.match(legalPage, /DATA_WE_KEEP/, 'the privacy page does not list what is stored');
   assert.match(legalPage, /DISCLAIMER/, 'the non-medical stance is not carried on the policy pages');
 });
+
+// --------------------------------------------------------------------------
+// Safety copy must be readable (#19) and the seizure warning must stand alone (#65)
+// --------------------------------------------------------------------------
+
+/**
+ * WCAG 2.1 contrast ratio for white at `alpha` composited on `bg`.
+ *
+ * Recomputed here rather than trusting the numbers in the issue, because the
+ * whole point of the issue is that a number was wrong.
+ */
+function contrastOnDark(alpha, bg = [0x0b, 0x0b, 0x12]) {
+  const lin = (c) => {
+    const v = c / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+  const lum = (rgb) => 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
+  const fg = bg.map((c) => alpha * 255 + (1 - alpha) * c);
+  const [hi, lo] = [lum(fg), lum(bg)].sort((a, b) => b - a);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** The `text-white/NN` on the element rendering `{TOKEN}`. */
+function opacityRendering(src, token) {
+  const at = src.indexOf(`{${token}}`);
+  if (at < 0) return null;
+  // The className sits on the opening tag, just above the interpolation.
+  const before = src.slice(Math.max(0, at - 400), at);
+  const matches = [...before.matchAll(/text-white\/(\d+)/g)];
+  return matches.length ? Number(matches[matches.length - 1][1]) / 100 : null;
+}
+
+const SAFETY_TOKENS = ['DISCLAIMER', 'HEALING_NONMEDICAL', 'SAFETY_WARNING'];
+
+test('the contrast helper agrees with the measured values in the issue', () => {
+  // Sanity-check the helper itself before relying on it: the issue measured
+  // white/40 at 3.81 and white/45 at 4.52.
+  assert.ok(Math.abs(contrastOnDark(0.4) - 3.81) < 0.05, `white/40 = ${contrastOnDark(0.4)}`);
+  assert.ok(Math.abs(contrastOnDark(0.45) - 4.52) < 0.05, `white/45 = ${contrastOnDark(0.45)}`);
+});
+
+test('every rendering of safety copy meets WCAG AA', () => {
+  const failures = [];
+  for (const surface of ['Landing.tsx', 'Wizard.tsx']) {
+    const src = fs.readFileSync(path.join(WEB, 'sections', surface), 'utf8');
+    for (const token of SAFETY_TOKENS) {
+      let from = 0;
+      for (;;) {
+        const at = src.indexOf(`{${token}}`, from);
+        if (at < 0) break;
+        const alpha = opacityRendering(src.slice(0, at + token.length + 2), token);
+        if (alpha !== null && contrastOnDark(alpha) < 4.5) {
+          failures.push(`${surface}: ${token} at white/${alpha * 100} = ${contrastOnDark(alpha).toFixed(2)}:1`);
+        }
+        from = at + 1;
+      }
+    }
+  }
+  assert.deepStrictEqual(failures, [],
+    `safety copy below WCAG AA:\n${failures.join('\n')}`);
+});
+
+test('safety copy is not left on a 0.01 margin', () => {
+  // white/45 is 4.51:1 — passing by a hundredth. For the most legally sensitive
+  // text in the product, a rounding change or a background tweak should not be
+  // able to drop it below the line.
+  for (const surface of ['Landing.tsx', 'Wizard.tsx']) {
+    const src = fs.readFileSync(path.join(WEB, 'sections', surface), 'utf8');
+    for (const token of SAFETY_TOKENS) {
+      const alpha = opacityRendering(src, token);
+      if (alpha === null) continue;
+      assert.ok(contrastOnDark(alpha) >= 5.0,
+        `${surface}: ${token} at ${contrastOnDark(alpha).toFixed(2)}:1 has no headroom`);
+    }
+  }
+});
+
+test('the seizure warning is its own line, not a clause in a paragraph', () => {
+  const data = fs.readFileSync(path.join(WEB, 'lib', 'data.ts'), 'utf8');
+  assert.match(data, /export const SAFETY_WARNING/,
+    'the warning does not exist independently of the general disclaimer');
+  const warning = data.slice(data.indexOf('export const SAFETY_WARNING'), data.indexOf('export const DISCLAIMER'));
+  assert.match(warning, /seizure/i, 'the standalone warning does not mention seizures');
+  assert.match(warning, /photosensitiv/i, 'the standalone warning does not mention photosensitivity');
+});
+
+test('the seizure warning appears before purchase, not only in the footer', () => {
+  const wizard = fs.readFileSync(path.join(WEB, 'sections', 'Wizard.tsx'), 'utf8');
+  assert.match(wizard, /\{SAFETY_WARNING\}/,
+    'the purchase flow never shows the standalone safety warning');
+  // Above the consent checkbox, so it is not buried inside the thing being
+  // consented to — which is what it was.
+  assert.ok(wizard.indexOf('{SAFETY_WARNING}') < wizard.indexOf('{DISCLAIMER}'),
+    'the warning appears after the consent label rather than before it');
+});
+
+test('the general disclaimer still exists alongside it', () => {
+  // #65 wants the disclaimer kept, just no longer the sole carrier.
+  const data = fs.readFileSync(path.join(WEB, 'lib', 'data.ts'), 'utf8');
+  assert.match(data, /export const DISCLAIMER/);
+  assert.match(data, /not medical or psychological treatment/i);
+});
