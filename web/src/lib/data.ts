@@ -21,6 +21,28 @@ export type DoorId = 'performance' | 'healing'
 export interface Goal {
   id: string
   name: string
+  /**
+   * Plain-English outcome, in the gold slot at the top of the card (#62).
+   *
+   * A human reviewer could not tell what these programs were: "are they
+   * different ways people learn, hypnosis themes, objective outcomes, or
+   * something else?" The names were not the problem — the hierarchy was. The
+   * metaphor got 40px and the meaning got 12px at 35% opacity.
+   *
+   * All five performance titles also share one grammar (The [Adjective]
+   * [Noun]), so they read as a set of themes rather than a set of products.
+   * This field is what makes them products again, without renaming anything.
+   */
+  outcome: string
+  /**
+   * "Choose this if…" — the reader's actual situation (#62).
+   *
+   * The only line on the card that lets someone say "that's me" in under two
+   * seconds. Written as an experience, never a condition: the healing goals in
+   * particular must not describe insomnia or anxiety, because the door's stance
+   * is HEALING_NONMEDICAL — rest and personal growth, never treatment.
+   */
+  chooseIf: string
   tagline: string
   description: string
   icon: LucideIcon
@@ -37,6 +59,8 @@ export interface Goal {
 export const GOALS: Goal[] = [
   {
     id: 'polymath',
+    outcome: 'Learn faster, remember more',
+    chooseIf: 'you read and study constantly, and retain less of it than you want',
     name: 'The Polymath Mind',
     tagline: 'Accelerated learning, cross-domain connection',
     description:
@@ -49,6 +73,8 @@ export const GOALS: Goal[] = [
   },
   {
     id: 'golden-thread',
+    outcome: 'Finish what you start',
+    chooseIf: 'you begin well and lose the thread somewhere in the middle',
     name: 'The Golden Thread',
     tagline: 'Focus and follow-through',
     description:
@@ -61,6 +87,8 @@ export const GOALS: Goal[] = [
   },
   {
     id: 'inner-studio',
+    outcome: 'Make the work without stalling',
+    chooseIf: 'you sit down to create and freeze, edit too early, or wait to feel ready',
     name: 'The Inner Studio',
     tagline: 'Creative confidence and flow',
     description:
@@ -73,6 +101,8 @@ export const GOALS: Goal[] = [
   },
   {
     id: 'open-gate',
+    outcome: 'Notice chances and move on them',
+    chooseIf: 'you keep recognising opportunities just after they have passed',
     name: 'The Open Gate',
     tagline: 'Noticing and acting on opportunities',
     description:
@@ -85,6 +115,8 @@ export const GOALS: Goal[] = [
   },
   {
     id: 'deep-confidence',
+    outcome: 'Stay steady under pressure',
+    chooseIf: 'you know your work, but lose your footing when it counts',
     name: 'Deep Confidence',
     tagline: 'Steadiness under pressure',
     description:
@@ -96,6 +128,8 @@ export const GOALS: Goal[] = [
   },
   {
     id: 'custom',
+    outcome: 'Your own goal, scripted',
+    chooseIf: 'nothing above fits, and you can describe the change in your own words',
     name: 'Custom',
     tagline: 'Describe your own change',
     description:
@@ -107,6 +141,8 @@ export const GOALS: Goal[] = [
   },
   {
     id: 'river',
+    outcome: 'Deep rest and recovery',
+    chooseIf: 'you are running on empty and want rest, not another task',
     name: 'The River of Renewal',
     tagline: 'Deep rest and symbolic repair',
     description:
@@ -119,6 +155,8 @@ export const GOALS: Goal[] = [
   },
   {
     id: 'deep-sleep',
+    outcome: 'A long, slow wind-down',
+    chooseIf: 'you want the end of the day to actually end',
     name: 'Deep Sleep',
     tagline: 'Rest, all the way down',
     description:
@@ -130,6 +168,8 @@ export const GOALS: Goal[] = [
   },
   {
     id: 'the-quiet-mind',
+    outcome: 'Quiet a busy mind',
+    chooseIf: 'your thoughts keep running when you would rather they settled',
     name: 'The Quiet Mind',
     tagline: 'Stillness for a busy mind',
     description:

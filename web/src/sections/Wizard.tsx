@@ -34,6 +34,7 @@ import {
 } from '@/lib/data'
 import type { DoorId, TrackPhase, VoiceSet } from '@/lib/data'
 import { RENDER_FAILED_ASSURANCE, RENDER_FAILURE_GUARANTEE } from '@/lib/legal'
+import GoalCardText from '@/components/GoalCardText'
 import SiteFooter from '@/components/SiteFooter'
 import { cn } from '@/lib/utils'
 
@@ -531,15 +532,7 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
                           selected ? 'text-[#d4b87f]' : 'text-violet-300',
                         )}
                       />
-                      <h3 className="mt-5 text-base font-medium text-white/90">
-                        {g.name}
-                      </h3>
-                      <p className="mt-1 text-xs uppercase tracking-[0.15em] text-white/35">
-                        {g.tagline}
-                      </p>
-                      <p className="mt-4 text-sm leading-relaxed text-white/50">
-                        {g.description}
-                      </p>
+                      <GoalCardText goal={g} />
                     </button>
                   )
                 })}

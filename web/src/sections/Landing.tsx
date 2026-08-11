@@ -13,6 +13,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { DISCLAIMER, PRICING, SAFETY_WARNING, goalsForDoor } from '@/lib/data'
 import type { DoorId, TrackPhase } from '@/lib/data'
+import GoalCardText from '@/components/GoalCardText'
 import SiteFooter from '@/components/SiteFooter'
 
 interface LandingProps {
@@ -305,15 +306,7 @@ function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 
                 >
                   <CardContent className="p-7">
                     <goal.icon className="size-5 text-violet-300 transition-colors group-hover:text-[#d4b87f]" />
-                    <h3 className="mt-5 text-base font-medium text-white/90">
-                      {goal.name}
-                    </h3>
-                    <p className="mt-1 text-xs uppercase tracking-[0.15em] text-white/35">
-                      {goal.tagline}
-                    </p>
-                    <p className="mt-4 text-sm leading-relaxed text-white/50">
-                      {goal.description}
-                    </p>
+                    <GoalCardText goal={goal} />
                   </CardContent>
                 </Card>
               ))}
@@ -510,15 +503,7 @@ function HealingLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 'doo
                     </Badge>
                   )}
                   <goal.icon className="size-5 text-violet-300 transition-colors group-hover:text-[#d4b87f]" />
-                  <h3 className="mt-5 text-base font-medium text-white/90">
-                    {goal.name}
-                  </h3>
-                  <p className="mt-1 text-xs uppercase tracking-[0.15em] text-white/35">
-                    {goal.tagline}
-                  </p>
-                  <p className="mt-4 text-sm leading-relaxed text-white/50">
-                    {goal.description}
-                  </p>
+                  <GoalCardText goal={goal} />
                 </CardContent>
               </Card>
             ))}
