@@ -31,23 +31,38 @@ interface LandingProps {
   onNavigate: (path: string) => void
 }
 
-const HOW_IT_WORKS = [
-  {
-    icon: Target,
-    title: 'Choose your goal',
-    body: 'Six considered starting points — or one sentence of your own. Every script is written around the change you name.',
-  },
-  {
-    icon: AudioLines,
-    title: 'Pick your voice',
-    body: 'A narrator to guide you down, and a whisper layer beneath. Hear both before you commit.',
-  },
-  {
-    icon: PackageCheck,
-    title: 'Receive your program',
-    body: 'Four tracks, scripted, voiced, and mastered over an isochronic entrainment bed. WAV + MP3, yours to keep.',
-  },
-] as const
+/**
+ * The three steps, with the catalog size passed in rather than written down
+ * (#67, #80).
+ *
+ * It used to be a const array saying "Six considered starting points". Six was
+ * wrong three ways: five goals were named, only four were buyable, and the
+ * sentence went on to promise "one sentence of your own — every script is
+ * written around the change you name", which the engine does not do. Counts
+ * that live in prose drift away from the catalog the moment the catalog moves,
+ * so this takes the number from the same array the cards are rendered from.
+ *
+ * The old step three was titled "Receive your program", which frames the
+ * purchase as waiting for something to be produced. It is a download.
+ */
+const howItWorks = (programCount: number) =>
+  [
+    {
+      icon: Target,
+      title: 'Choose your program',
+      body: `${programCount} programs, each written for one outcome, revised, then locked. Every card names the situation it is for, so you can tell in a sentence whether it is yours.`,
+    },
+    {
+      icon: AudioLines,
+      title: 'Pick your voice',
+      body: 'A narrator to guide you down, and a whisper layer beneath. Hear both before you commit.',
+    },
+    {
+      icon: PackageCheck,
+      title: 'Download your program',
+      body: 'Four tracks mastered over an isochronic entrainment bed, ready in about twenty minutes. WAV + MP3, yours to keep.',
+    },
+  ] as const
 
 const PROGRAM_ARC = [
   {
@@ -242,10 +257,10 @@ function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 
         <div className="mx-auto max-w-6xl">
           <Eyebrow>How it works</Eyebrow>
           <h2 className="font-display mt-4 max-w-xl text-4xl leading-tight text-[#e8e6f0]">
-            Three quiet steps between you and the program.
+            Getting started.
           </h2>
           <div className="mt-12 grid gap-4 md:grid-cols-3">
-            {HOW_IT_WORKS.map((step, i) => (
+            {howItWorks(goals.length).map((step, i) => (
               <Card
                 key={step.title}
                 className="rounded-2xl border-white/10 bg-white/5 shadow-none"
@@ -321,7 +336,7 @@ function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 
           <div className="mt-24">
             <Eyebrow>Performance goals</Eyebrow>
             <h2 className="font-display mt-4 max-w-xl text-4xl leading-tight text-[#e8e6f0]">
-              Six doors in. Or draw your own.
+              {goals.length} programs. Each built for one outcome.
             </h2>
             <div className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {goals.map((goal) => (

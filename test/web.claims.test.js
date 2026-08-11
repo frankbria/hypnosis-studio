@@ -971,3 +971,78 @@ test('the "not in production yet" error is unreachable through the UI', () => {
   assert.match(decl, /g\.available/,
     'nothing prevents an unavailable goal reaching the render request');
 });
+
+// --------------------------------------------------------------------------
+// Program counts derive from the catalog; the funnel does not count obstacles
+// (#67, #80)
+// --------------------------------------------------------------------------
+
+test('program counts are derived, not written down', () => {
+  // "Six considered starting points" was wrong three ways: five goals were
+  // named, only four were buyable, and the sentence promised a custom script.
+  // A number written into prose drifts the moment the catalog moves, so both
+  // places that state one must take it from the array the cards render from.
+  const src = codeOnly(LANDING);
+
+  assert.match(src, /const howItWorks = \(programCount: number\)/,
+    'the steps no longer take the catalog size as a parameter');
+  assert.match(src, /\$\{programCount\} programs/,
+    'step one states a program count that is not derived');
+  assert.match(src, /howItWorks\(goals\.length\)/,
+    'the steps are not rendered from the same list the cards use');
+  assert.match(src, /\{goals\.length\} programs/,
+    'the goal gallery heading states a count that is not derived');
+
+  // And no spelled-out count may describe the catalog again.
+  const banned = /\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+(programs|goals|starting points|doors in)\b/i;
+  const m = src.match(banned);
+  assert.ok(!m, `a program count is written into copy again: "${m && m[0]}"`);
+});
+
+test('"doors" means storefronts, never products', () => {
+  // The site has two doors (Performance, Healing) AND a product called "The
+  // Open Gate". "Six doors in" made the word mean three things at once.
+  const src = codeOnly(LANDING);
+  const m = src.match(/\b\w+\s+doors\s+in\b/i);
+  assert.ok(!m, `"doors" is used to count products: "${m && m[0]}"`);
+});
+
+test('the funnel heading does not count steps or frame them as distance', () => {
+  // Greg: "Three quiet steps between you and the program" sounds like a
+  // roadblock. It counts obstacles — the purchase reads as a distance to cross.
+  const src = codeOnly(LANDING);
+  assert.ok(!/steps between you and/i.test(src),
+    'the How It Works heading still frames the purchase as a distance');
+  assert.ok(!/\b(two|three|four)\s+(quiet\s+)?steps\b/i.test(src),
+    'the heading still counts steps');
+});
+
+test('the last step is a download, not a wait', () => {
+  // "Receive your program" implies waiting for something to be produced. It is
+  // a download — and it stays a download after the catalog is pre-rendered.
+  const src = codeOnly(LANDING);
+  const at = src.indexOf('const howItWorks');
+  const steps = src.slice(at, src.indexOf('] as const', at));
+  assert.ok(!/Receive your program/.test(steps),
+    'step three still tells the customer to wait to receive something');
+  assert.match(steps, /Download your program/,
+    'step three does not lead with the download');
+
+  // Same rule as #61: the honest timing, until #58/#59 make instant true.
+  const stillRenders = /takes ~?15-20 minutes/.test(WIZARD());
+  if (stillRenders) {
+    assert.ok(!/in seconds|instantly/i.test(steps),
+      'step three claims instant delivery while the product still renders on purchase');
+    assert.match(steps, /about twenty minutes/i,
+      'step three states no delivery timing at all');
+  }
+});
+
+test('no step promises a script written around the buyer\'s words', () => {
+  const src = codeOnly(LANDING);
+  for (const p of [/written around the change you name/i, /one sentence of your own/i,
+                   /draw your own/i, /or one sentence/i]) {
+    const m = src.match(p);
+    assert.ok(!m, `the funnel still promises a custom script: "${m && m[0]}"`);
+  }
+});
