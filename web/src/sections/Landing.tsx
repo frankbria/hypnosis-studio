@@ -13,6 +13,8 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
   DISCLAIMER,
+  HOW_MADE,
+  PERSONALIZED_POINTER,
   PRICING,
   SAFETY_WARNING,
   goalsForDoor,
@@ -162,6 +164,64 @@ function UpcomingLine({ door }: { door: DoorId }) {
       {nameList(upcoming.map((g) => g.name))}{' '}
       {upcoming.length === 1 ? 'is' : 'are'} in production.
     </p>
+  )
+}
+
+/**
+ * The AI disclosure (#64), shared by both doors.
+ *
+ * Placed in a component both landings render rather than added to one of them,
+ * because Landing.tsx holds two independent door components and adding a block
+ * to the one you happen to have open is exactly how /healing shipped without a
+ * seizure warning (#65).
+ */
+function HowMadeSection({ onNavigate }: { onNavigate?: (path: string) => void }) {
+  return (
+    <section id="how-made" className="scroll-mt-24 border-t border-white/5 px-6 py-24">
+      <div className="mx-auto max-w-3xl">
+        <Eyebrow>How these are made</Eyebrow>
+        <h2 className="font-display mt-4 text-4xl leading-tight text-[#e8e6f0]">
+          Nothing here is a secret.
+        </h2>
+        <dl className="mt-10 space-y-8">
+          {HOW_MADE.map((item) => (
+            <div key={item.heading}>
+              <dt className="text-sm font-medium text-[#e0c894]">{item.heading}</dt>
+              <dd className="mt-2 text-sm leading-relaxed text-white/60">{item.body}</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="mt-10 text-sm leading-relaxed text-white/60">
+          {PERSONALIZED_POINTER}{' '}
+          {/*
+            The tiers live on the performance landing; the healing door has no
+            #pricing section at all. Scrolling to an id that is not on the page
+            is a link that silently does nothing — the same dead-link failure
+            #18 exists to fix. So: scroll when the section is here, navigate
+            when it is not.
+          */}
+          <a
+            href="/performance#pricing"
+            onClick={(event) => {
+              if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0)
+                return
+              const here = document.getElementById('pricing')
+              if (here) {
+                event.preventDefault()
+                here.scrollIntoView({ behavior: 'smooth' })
+              } else if (onNavigate) {
+                event.preventDefault()
+                onNavigate('/performance')
+              }
+            }}
+            className="text-violet-300 underline underline-offset-2"
+          >
+            See the tiers
+          </a>
+          .
+        </p>
+      </div>
+    </section>
   )
 }
 
@@ -432,6 +492,7 @@ function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 
         </div>
       </section>
 
+      <HowMadeSection onNavigate={onNavigate} />
       <DisclaimerSection />
       <SiteFooter onHome={onHome} onNavigate={onNavigate} />
     </div>
@@ -541,6 +602,7 @@ function HealingLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 'doo
         </div>
       </section>
 
+      <HowMadeSection onNavigate={onNavigate} />
       <DisclaimerSection />
       <SiteFooter onHome={onHome} onNavigate={onNavigate} />
     </div>
