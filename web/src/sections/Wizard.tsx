@@ -32,6 +32,7 @@ import {
   buildTracks,
 } from '@/lib/data'
 import type { DoorId, TrackPhase, VoiceSet } from '@/lib/data'
+import { RENDER_FAILED_ASSURANCE, RENDER_FAILURE_GUARANTEE } from '@/lib/legal'
 import SiteFooter from '@/components/SiteFooter'
 import { cn } from '@/lib/utils'
 
@@ -217,9 +218,11 @@ function GeneratingStep({
           }
           if (s.state === 'failed') {
             setError({
-              message: s.error
-                ? `The render didn't finish: ${s.error}`
-                : "The render didn't finish. Nothing was charged — please try again.",
+              message: `${
+                s.error
+                  ? `The render didn't finish: ${s.error}`
+                  : "The render didn't finish."
+              } ${RENDER_FAILED_ASSURANCE}`,
               retryable: true,
             })
             return
@@ -722,6 +725,28 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
                     {DISCLAIMER}
                   </span>
                 </label>
+
+                <p className="mt-4 text-xs leading-relaxed text-white/60">
+                  {RENDER_FAILURE_GUARANTEE}{' '}
+                  <a
+                    href="/refunds"
+                    onClick={(event) => {
+                      if (
+                        event.metaKey ||
+                        event.ctrlKey ||
+                        event.shiftKey ||
+                        event.button !== 0
+                      )
+                        return
+                      event.preventDefault()
+                      onNavigate('/refunds')
+                    }}
+                    className="text-violet-300 underline underline-offset-2"
+                  >
+                    Read the refund policy
+                  </a>
+                  .
+                </p>
 
                 <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6">
                   <Label

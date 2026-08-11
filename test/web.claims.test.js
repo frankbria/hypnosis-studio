@@ -451,3 +451,79 @@ test('every third-party origin the site actually requests is disclosed', () => {
       'the disclosure exists as a constant but the privacy page never renders it');
   }
 });
+
+// --------------------------------------------------------------------------
+// The refund policy (#17)
+// --------------------------------------------------------------------------
+
+const LEGAL_TS = () => fs.readFileSync(path.join(WEB, 'lib', 'legal.ts'), 'utf8');
+const LEGAL_TSX = () => fs.readFileSync(path.join(WEB, 'sections', 'Legal.tsx'), 'utf8');
+const WIZARD = () => fs.readFileSync(path.join(WEB, 'sections', 'Wizard.tsx'), 'utf8');
+
+test('the refund page is reachable from the footer and the review step', () => {
+  // #17's criteria name both surfaces. The footer is shared, so the link must be
+  // in SiteFooter rather than on one page.
+  const footer = fs.readFileSync(path.join(WEB, 'components', 'SiteFooter.tsx'), 'utf8');
+  assert.match(footer, /href="\/refunds"/,
+    'the refund policy is not linked from the shared footer');
+
+  const app = codeOnly(fs.readFileSync(path.join(WEB, 'App.tsx'), 'utf8'));
+  assert.match(app, /'\/refunds':\s*'refunds'/,
+    '/refunds is not routed — the footer link would 404 into the door chooser');
+
+  assert.match(codeOnly(WIZARD()), /onNavigate\('\/refunds'\)/,
+    'the review step does not link the refund policy');
+});
+
+test('the render-failure guarantee is stated once and rendered', () => {
+  // It is the specification for #26, so it must have exactly one home. Two
+  // copies is how the page and the code end up promising different things.
+  const legal = LEGAL_TS();
+  assert.match(legal, /export const RENDER_FAILURE_GUARANTEE/,
+    'the guarantee is not a named constant');
+  assert.match(codeOnly(LEGAL_TSX()), /\{RENDER_FAILURE_GUARANTEE\}/,
+    'the refund page never renders the guarantee');
+  assert.match(codeOnly(WIZARD()), /\{RENDER_FAILURE_GUARANTEE\}/,
+    'the review step never states the guarantee before purchase');
+
+  const body = legal.slice(legal.indexOf('export const RENDER_FAILURE_GUARANTEE'));
+  const text = body.slice(0, body.indexOf('\n\n'));
+  assert.match(text, /automatic/i, 'the guarantee does not say the refund is automatic');
+  assert.match(text, /in full/i, 'the guarantee does not say the refund is full');
+});
+
+test('no page tells a customer to contact an address that does not exist', () => {
+  // #18 exists because the old Contact link pointed at `#top`. Recreating that
+  // inside the refund policy would be the worst possible place for it, so the
+  // contact copy is gated on SUPPORT_EMAIL actually being set.
+  const legal = LEGAL_TS();
+  const declared = /export const SUPPORT_EMAIL[^=]*=\s*null/.test(legal);
+  if (!declared) return; // #18 landed; a real address exists and may be shown.
+
+  const pages = codeOnly(LEGAL_TSX());
+  const mailtos = [...pages.matchAll(/mailto:([^`'"}\s]+)/g)].map((m) => m[1]);
+  for (const target of mailtos) {
+    assert.ok(target.includes('${SUPPORT_EMAIL}') || target.includes('SUPPORT_EMAIL'),
+      `a policy page hardcodes the address ${target} while SUPPORT_EMAIL is null`);
+  }
+  assert.match(pages, /SUPPORT_EMAIL &&/,
+    'contact copy is not gated on an address existing');
+});
+
+test('the render-failure message is true whether or not payment is live', () => {
+  // It said "Nothing was charged — please try again", which is true only while
+  // nothing is ever charged, and becomes a false claim about the customer's own
+  // money in the screen they read straight after losing it.
+  const wizard = codeOnly(WIZARD());
+  assert.ok(!/Nothing was charged/i.test(wizard),
+    'the failure copy still asserts nothing was charged');
+  assert.match(wizard, /\{RENDER_FAILED_ASSURANCE\}|RENDER_FAILED_ASSURANCE/,
+    'the failure copy does not carry the refund assurance');
+
+  const legal = LEGAL_TS();
+  const at = legal.indexOf('export const RENDER_FAILED_ASSURANCE');
+  assert.ok(at > 0, 'the assurance is not a named constant');
+  const text = legal.slice(at, legal.indexOf('\n\n', at));
+  assert.match(text, /if you were charged/i,
+    'the assurance asserts a charge state instead of being true in both');
+});
