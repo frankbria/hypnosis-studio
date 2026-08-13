@@ -3,6 +3,8 @@ import DoorChooser from '@/sections/DoorChooser'
 import Landing from '@/sections/Landing'
 import Wizard from '@/sections/Wizard'
 import ProgramPage from '@/sections/ProgramPage'
+import OrderPage from '@/sections/OrderPage'
+import ResendPage from '@/sections/ResendPage'
 import { PrivacyPage, RefundPage, TermsPage } from '@/sections/Legal'
 import type { LegalPageId } from '@/sections/Legal'
 import type { DoorId, TierId } from '@/lib/data'
@@ -42,6 +44,19 @@ function legalFromPath(pathname: string): LegalPageId | null {
  */
 function jobFromPath(pathname: string): string | null {
   const m = pathname.match(/^\/program\/([A-Za-z0-9_-]+)$/)
+  return m ? m[1] : null
+}
+
+/**
+ * An order, addressed by the Stripe session id (#70).
+ *
+ * This is where the post-checkout redirect lands and where the delivery email
+ * points, so it is the one link a customer has. The character class matches
+ * what the server's own route accepts, so a path that could never name an order
+ * falls through to the chooser rather than rendering "we can't find that".
+ */
+function orderFromPath(pathname: string): string | null {
+  const m = pathname.match(/^\/order\/([A-Za-z0-9_-]+)$/)
   return m ? m[1] : null
 }
 
@@ -95,6 +110,8 @@ export default function App() {
     legalFromPath(normalizedPath()),
   )
   const [job, setJob] = useState<string | null>(() => jobFromPath(normalizedPath()))
+  const [order, setOrder] = useState<string | null>(() => orderFromPath(normalizedPath()))
+  const [resend, setResend] = useState(() => normalizedPath() === '/resend')
   const [view, setView] = useState<View>('landing')
   /** Which tier the visitor chose, carried to the flow that fulfils it (#69). */
   const [tier, setTier] = useState<TierId>('program')
@@ -107,6 +124,8 @@ export default function App() {
       setDoor(doorFromPath(path))
       setLegal(legalFromPath(path))
       setJob(jobFromPath(path))
+      setOrder(orderFromPath(path))
+      setResend(path === '/resend')
       setView('landing')
     }
     window.addEventListener('popstate', onPop)
@@ -114,24 +133,28 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    document.title = job
+    document.title = order || job
       ? 'Your program — Hypnosis Studio'
+      : resend
+        ? 'Send my link again — Hypnosis Studio'
       : legal
         ? LEGAL_TITLES[legal]
         : door
           ? DOC_TITLES[door]
           : DOC_TITLES.chooser
-  }, [door, legal, job])
+  }, [door, legal, job, order, resend])
 
   useEffect(() => {
     window.scrollTo({ top: 0 })
-  }, [view, door, legal, job])
+  }, [view, door, legal, job, order, resend])
 
   const goHome = useCallback(() => {
     window.history.pushState({}, '', '/')
     setDoor(null)
     setLegal(null)
     setJob(null)
+    setOrder(null)
+    setResend(false)
     setView('landing')
   }, [])
 
@@ -140,6 +163,8 @@ export default function App() {
     setDoor(next)
     setLegal(null)
     setJob(null)
+    setOrder(null)
+    setResend(false)
     setView('landing')
   }, [])
 
@@ -148,6 +173,8 @@ export default function App() {
     setLegal(legalFromPath(path))
     setDoor(doorFromPath(path))
     setJob(jobFromPath(path))
+    setOrder(orderFromPath(path))
+    setResend(path === '/resend')
     setView('landing')
   }, [])
 
@@ -172,9 +199,25 @@ export default function App() {
     setView('wizard')
   }
 
-  // Checked first: someone arriving at their program has come back for it, and
-  // must not be handed the door chooser because they happen to have no door in
-  // the URL.
+  // Checked first: someone arriving at their order or their program has come
+  // back for something they bought, and must not be handed the door chooser
+  // because they happen to have no door in the URL.
+  if (order !== null) {
+    return (
+      <div className="min-h-screen">
+        <OrderPage token={order} onHome={goHome} onNavigate={goTo} />
+      </div>
+    )
+  }
+
+  if (resend) {
+    return (
+      <div className="min-h-screen">
+        <ResendPage onHome={goHome} onNavigate={goTo} />
+      </div>
+    )
+  }
+
   if (job !== null) {
     return (
       <div className="min-h-screen">

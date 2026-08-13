@@ -1421,8 +1421,16 @@ async function deliverProgram(jobId, { session = null } = {}) {
     }
 
     const attempts = ((order.delivery && order.delivery.attempts) || 0) + 1;
-    const link2 = `${PUBLIC_BASE_URL}/program/${jobId}`;
-    const sent = await sendEmail(order.email, deliveryEmail(link2), sessionId);
+    // The idempotency key is per SEND, not per order. It exists to stop a
+    // retry of one send becoming two messages (#28) — but a deliberate resend
+    // (#70) is a different message the customer asked for, and a key fixed to
+    // the session would have the provider silently refuse it forever. The
+    // generation only moves when someone asks for the link again.
+    const generation = Number.isFinite(order.deliveryGeneration) ? order.deliveryGeneration : 0;
+    // The ORDER page, not the job page: it is the address the post-checkout
+    // redirect uses too, so a customer has one link rather than two (#70).
+    const link2 = `${PUBLIC_BASE_URL}/order/${sessionId}`;
+    const sent = await sendEmail(order.email, deliveryEmail(link2), `${sessionId}-${generation}`);
     const recorded = markDelivery(sessionId, sent.ok
       ? { state: 'sent', attempts, at: new Date().toISOString() }
       : { state: 'failed', attempts, error: sent.error, at: new Date().toISOString() });
@@ -1563,6 +1571,39 @@ async function sendEmail(to, { subject, text, html }, key) {
     return { ok: false, error: `HTTP ${r.status} ${detail}` };
   }
   return { ok: true };
+}
+
+/**
+ * Email every order belonging to an address its link again (#70).
+ *
+ * Runs after the response has already gone out, so nothing it does — including
+ * finding nothing — can be timed or read by the caller.
+ */
+async function resendOrderLinks(email) {
+  let names;
+  try { names = fs.readdirSync(sessionsDir()); } catch { return; }
+  let sent = 0;
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    const order = readJsonSafe(path.join(sessionsDir(), name));
+    if (!order || !order.jobId || !order.email) continue;
+    if (String(order.email).trim().toLowerCase() !== email) continue;
+    const st = readJsonSafe(path.join(jobDir(order.jobId), 'status.json'));
+    if (!st || st.state !== 'ready') continue;   // nothing to send a link to yet
+    // Reuses the delivery path, so the message, the link and the once-only
+    // guarantees are the same ones #28 already gets right. Clearing `delivery`
+    // is what makes it send again — and bumping the generation is what stops
+    // the provider deduplicating it against the message already sent.
+    const next = {
+      ...order,
+      delivery: undefined,
+      deliveryGeneration: (Number.isFinite(order.deliveryGeneration) ? order.deliveryGeneration : 0) + 1,
+    };
+    if (!writeClaim(order.sessionId, next)) continue;
+    await deliverProgram(order.jobId, { session: order.sessionId });
+    sent += 1;
+  }
+  console.log('resend: matched', sent, 'order(s) for that address');
 }
 
 // Programs that are finished and paid for but have not been emailed.
@@ -1711,17 +1752,31 @@ function goalTitle(goal) {
   return goal.split('_').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
 }
 
-// Timestamps of the sessions asked for in the last minute. A plain array
-// because CHECKOUT_MAX_PER_MINUTE bounds its length — there is nothing to grow.
-const checkoutHits = [];
+// Timestamps per bucket, for the last minute. Plain arrays because each cap
+// bounds its own length — there is nothing to grow.
+const rateHits = new Map();
 
-function checkoutRateOk() {
+function rateOk(bucket, maxPerMinute) {
   const now = Date.now();
-  while (checkoutHits.length && now - checkoutHits[0] > 60000) checkoutHits.shift();
-  if (checkoutHits.length >= CHECKOUT_MAX_PER_MINUTE) return false;
-  checkoutHits.push(now);
+  const hits = rateHits.get(bucket) || [];
+  while (hits.length && now - hits[0] > 60000) hits.shift();
+  if (hits.length >= maxPerMinute) {
+    rateHits.set(bucket, hits);
+    return false;
+  }
+  hits.push(now);
+  rateHits.set(bucket, hits);
   return true;
 }
+
+const checkoutRateOk = () => rateOk('checkout', CHECKOUT_MAX_PER_MINUTE);
+
+// The resend form emails whoever asks. Without a cap it is a mail cannon
+// pointed at any address someone types, so it is bounded harder than checkout.
+const RESEND_MAX_PER_MINUTE = (() => {
+  const n = parseInt(process.env.RESEND_MAX_PER_MINUTE || '5', 10);
+  return Number.isFinite(n) && n > 0 ? n : 5;
+})();
 
 // Create the Checkout Session. Every field is built here; the caller passes an
 // already-validated goal and voice set and nothing else.
@@ -1731,8 +1786,10 @@ function checkoutRateOk() {
 async function createCheckoutSession(goal, voiceSet) {
   const form = new URLSearchParams({
     mode: 'payment',
-    // Stripe substitutes the real id for the literal placeholder on redirect.
-    success_url: `${PUBLIC_BASE_URL}/?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+    // Stripe substitutes the real id for the literal placeholder on redirect,
+    // so the customer lands directly on their order rather than on a home page
+    // that has to work out who they are (#70).
+    success_url: `${PUBLIC_BASE_URL}/order/{CHECKOUT_SESSION_ID}`,
     cancel_url: `${PUBLIC_BASE_URL}/?checkout=cancelled`,
     'line_items[0][quantity]': '1',
     'line_items[0][price_data][currency]': PROGRAM_CURRENCY,
@@ -2063,6 +2120,63 @@ async function handleRequest(req, res) {
     stream.on('error', () => res.destroy());
     res.on('error', () => stream.destroy()); // client aborted mid-download
     return stream.pipe(res);
+  }
+
+  // ---- the order a customer holds a link to (#70) --------------------------
+  //
+  // Addressed by the Stripe session id. That is what Stripe substitutes into
+  // success_url, so using anything else would need a redirect hop to translate
+  // it — and the id is already this order's primary key, generated by Stripe
+  // with far more entropy than anything worth guessing. It is a capability:
+  // whoever has the link has the files, which is the same trust model as the
+  // job id and the reason there are no accounts.
+  const orderMatch = url.match(/^\/api\/orders\/([A-Za-z0-9_-]+)$/);
+  if (orderMatch && (req.method === 'GET' || req.method === 'HEAD')) {
+    const order = readJsonSafe(claimPath(orderMatch[1]));
+    if (!order) return sendJson(res, 404, { error: 'unknown order' });
+    // Deliberately narrow. The order holds an email address, a payment
+    // reference and an amount, and this endpoint is public — so it answers
+    // only what a page needs to show someone their own files.
+    const out = { jobId: order.jobId ?? null, expiresAt: null };
+    if (order.jobId) {
+      const st = readJsonSafe(path.join(jobDir(order.jobId), 'status.json'));
+      // The retention sweep measures from the terminal status write, so that is
+      // what the expiry date has to be measured from too — a date computed from
+      // anything else would be a promise the sweep does not keep.
+      if (st && (st.state === 'ready' || st.state === 'failed')) {
+        const from = Date.parse(st.updatedAt);
+        if (Number.isFinite(from)) {
+          out.expiresAt = new Date(from + RETENTION_DAYS * 86400000).toISOString();
+        }
+      }
+    }
+    return sendJson(res, 200, out);
+  }
+
+  if (url === '/api/orders/resend' && req.method === 'POST') {
+    const body = await readBody(req);
+    // ALWAYS the same answer. Telling a stranger whether an address has bought
+    // something is account enumeration, and there are no accounts here to hide
+    // behind — the email IS the account.
+    const same = () => sendJson(res, 202, { ok: true });
+    if (!rateOk('resend', RESEND_MAX_PER_MINUTE)) {
+      // Even this is the same answer: a different one under load would leak
+      // just as much, one request at a time.
+      console.warn('resend rate cap reached -', RESEND_MAX_PER_MINUTE, 'per minute');
+      return same();
+    }
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    if (!email) return same();
+    // setImmediate, not a bare call. An async function runs SYNCHRONOUSLY up to
+    // its first await, and resendOrderLinks only reaches one when it finds a
+    // match — so calling it directly made an unknown address pay for the entire
+    // scan before the response went out, while a known address yielded early.
+    // That is the enumeration leak this endpoint exists to avoid, measured with
+    // a stopwatch instead of read off a status code.
+    setImmediate(() => {
+      resendOrderLinks(email).catch((e) => console.error('resend threw:', e && e.message));
+    });
+    return same();
   }
 
   const jobMatch = url.match(/^\/api\/jobs\/([A-Za-z0-9_-]+)$/);
