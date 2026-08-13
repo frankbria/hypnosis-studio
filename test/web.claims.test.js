@@ -268,7 +268,7 @@ test('the policy links are in the shared footer, not one page', () => {
   // footers, which is how one ends up without the link.
   assert.match(FOOTER, /href="\/terms"/);
   assert.match(FOOTER, /href="\/privacy"/);
-  for (const surface of ['Landing.tsx', 'DoorChooser.tsx', 'Wizard.tsx']) {
+  for (const surface of ['Landing.tsx', 'CatalogHome.tsx', 'Wizard.tsx']) {
     const src = fs.readFileSync(path.join(WEB, 'sections', surface), 'utf8');
     assert.match(src, /<SiteFooter/, `${surface} does not render the shared footer`);
   }
@@ -306,6 +306,102 @@ test('the policy pages say what is collected and how long it is kept', () => {
   assert.match(legalPage, /RETENTION_WINDOW/, 'no retention window on the policy pages');
   assert.match(legalPage, /DATA_WE_KEEP/, 'the privacy page does not list what is stored');
   assert.match(legalPage, /DISCLAIMER/, 'the non-medical stance is not carried on the policy pages');
+});
+
+// --------------------------------------------------------------------------
+// The front page is a catalog, not a gate (#68)
+// --------------------------------------------------------------------------
+
+const CATALOG = () =>
+  fs.readFileSync(path.join(WEB, 'sections', 'CatalogHome.tsx'), 'utf8');
+
+test('/ shows the catalog rather than asking who you are', () => {
+  // The chooser asked a cold visitor to choose an identity before showing them
+  // anything, and routed roughly half of all traffic to the door with one
+  // buyable program.
+  const app = codeOnly(fs.readFileSync(path.join(WEB, 'App.tsx'), 'utf8'));
+  assert.match(app, /<CatalogHome/, '/ does not render the catalog');
+  assert.ok(!/DoorChooser/.test(app), 'the gate is still routed');
+  assert.ok(!fs.existsSync(path.join(WEB, 'sections', 'DoorChooser.tsx')),
+    'the door chooser still exists as dead code');
+
+  // Both doors' programs, as sections of one page.
+  const catalog = codeOnly(CATALOG());
+  for (const door of ['performance', 'healing']) {
+    assert.ok(catalog.includes(`door: '${door}'`), `the catalog has no ${door} section`);
+  }
+  assert.match(catalog, /goalsForDoor\(section\.door\)/,
+    'the catalog does not list the real programs');
+});
+
+test('the doors survive as real routes', () => {
+  // #68 keeps them for paid traffic and SEO — it only stops the fork being
+  // mandatory.
+  const app = codeOnly(fs.readFileSync(path.join(WEB, 'App.tsx'), 'utf8'));
+  assert.match(app, /pathname === '\/performance'/, '/performance no longer resolves');
+  assert.match(app, /pathname === '\/healing'/, '/healing no longer resolves');
+  assert.match(codeOnly(CATALOG()), /onEnterDoor\(section\.door\)/,
+    'the catalog offers no way into a door');
+});
+
+test('a sample is playable without choosing a door first', () => {
+  const catalog = codeOnly(CATALOG());
+  assert.match(catalog, /<AudioPreviewButton/, 'nothing is playable on the front page');
+  assert.match(catalog, /useAudioPreview\(SAMPLE_CLIPS\)/,
+    'the front-page samples are not warmed like every other preview');
+
+  // NARRATOR voices only. #60 is open about the whisper layer being previewed
+  // solo — unmixed, which is the most uncanny configuration synthetic audio can
+  // be in. Putting that on the front page would widen the leak it describes.
+  assert.match(catalog, /VOICE_SETS\.map\(\(v\) => v\.narrator\)/,
+    'the front page samples something other than the narrator voices');
+  assert.ok(!/\.whisper/.test(catalog),
+    'the whisper layer is previewed solo on the front page, which #60 is about');
+});
+
+test('pricing is reachable from the home page without an identity choice', () => {
+  // The anchor tier cannot do its job if visitors never reach the table.
+  const catalog = codeOnly(CATALOG());
+  assert.match(catalog, /id="pricing"/, 'the front page has no pricing section');
+  assert.match(catalog, /PRICING\.map/, 'the front page does not render the ladder');
+  assert.match(catalog, /href="#pricing"/, 'nothing links to it');
+  // And the same availability gate as the door landings: an unbuyable tier
+  // must never render a payment CTA (#13).
+  assert.match(catalog, /tier\.available \?/,
+    'the front-page pricing CTA is not gated on availability');
+});
+
+test('choosing a program from the catalog carries the program, not just a tier', () => {
+  // The catalog has no door of its own, so "start the wizard" alone would have
+  // nowhere to start — and picking a default would send a healing visitor into
+  // the performance flow.
+  const catalog = codeOnly(CATALOG());
+  assert.match(catalog, /onChooseProgram\(goal\)/,
+    'the catalog CTA does not carry which program was chosen');
+
+  const app = codeOnly(fs.readFileSync(path.join(WEB, 'App.tsx'), 'utf8'));
+  const fn = app.slice(app.indexOf('function chooseProgram'));
+  const body = fn.slice(0, fn.indexOf('\n  }'));
+  assert.match(body, /setDoor\(goal\.door\)/, 'the door is not taken from the program');
+  assert.match(body, /setInitialGoal\(goal\.id\)/,
+    'the chosen program is dropped, so the wizard asks for it again');
+});
+
+test('a program chosen once does not leak into the next visit to the wizard', () => {
+  // The carried goal is only correct for the entry that set it. Left behind, a
+  // later entry from a tier CTA re-mounts the wizard pre-set to a program the
+  // visitor did not pick — and if it belonged to the OTHER door, `goal`
+  // resolves to null and the step renders blank.
+  const app = codeOnly(fs.readFileSync(path.join(WEB, 'App.tsx'), 'utf8'));
+  const clears = (app.match(/setInitialGoal\(null\)/g) || []).length;
+  assert.ok(clears >= 4,
+    `only ${clears} paths clear the carried program; every entry that is not `
+    + 'chooseProgram must');
+
+  // The tier CTA specifically: it means "this tier", never "this program".
+  const fn = app.slice(app.indexOf('function startPurchase'));
+  assert.match(fn.slice(0, fn.indexOf('\n  }')), /setInitialGoal\(null\)/,
+    'entering from a tier CTA keeps a program chosen earlier from the catalog');
 });
 
 // --------------------------------------------------------------------------
@@ -439,40 +535,38 @@ test('the audio element is still constructed inside the user gesture', () => {
 // One control per door (#72)
 // --------------------------------------------------------------------------
 
-test('a door has exactly one thing you can activate', () => {
-  // The card carried role="button" AND contained a real <Button> with the same
-  // handler, so a click on the CTA fired once and then bubbled to the card:
-  // two calls to onEnter, two history entries, and Back needing two presses to
-  // leave a door. It was also a button inside a button, which is invalid.
-  const src = codeOnly(
-    fs.readFileSync(path.join(WEB, 'sections', 'DoorChooser.tsx'), 'utf8'));
-
-  const handlers = (src.match(/onEnter\(door\.id\)/g) || []).length;
-  assert.strictEqual(handlers, 2,
-    `onEnter is wired ${handlers} times per door; expected exactly two — the click and the key`);
-
-  // And the second must be the KEYBOARD path, not a second pointer target.
-  const keydown = src.slice(src.indexOf('onKeyDown'), src.indexOf('className', src.indexOf('onKeyDown')));
-  assert.match(keydown, /onEnter\(door\.id\)/, 'keyboard activation was removed');
-  assert.match(keydown, /'Enter' \|\| e\.key === ' '/, 'space or enter no longer activates a door');
-
-  // No interactive element may sit inside the card.
-  assert.ok(!/<Button\b/.test(src),
-    'a real <Button> is back inside the door card — that is a button in a button');
-  const grid = src.slice(src.indexOf('DOORS.map'), src.indexOf('</section>', src.indexOf('DOORS.map')));
-  assert.ok(!/<a\b/.test(grid), 'a link inside the door card would bubble the same way');
-});
-
-test('the door card is still reachable and named for a screen reader', () => {
-  const src = codeOnly(
-    fs.readFileSync(path.join(WEB, 'sections', 'DoorChooser.tsx'), 'utf8'));
-  assert.match(src, /tabIndex=\{0\}/, 'the door card cannot be focused');
-  assert.match(src, /aria-label=\{door\.cta\}/,
-    'the card has no accessible name, so it is announced as its whole contents');
-  assert.match(src, /focus-visible:ring/,
-    'the card gives no visible focus indicator, and it is now the only control');
-  assert.match(src, /aria-hidden="true"/,
-    'the visual call to action is still announced separately from the card name');
+test('nothing you can activate contains something else you can activate', () => {
+  // #72: the door card carried role="button" AND contained a real <Button> with
+  // the same handler, so a click on the CTA fired once and then bubbled to the
+  // card — two history entries, and Back needing two presses to leave.
+  //
+  // The chooser itself is gone (#68 replaced it with the catalog), so this is
+  // the general form of the same guarantee rather than a test of one component:
+  // no element that is made clickable may wrap another clickable thing. A
+  // deleted component cannot regress; the pattern can.
+  const offenders = [];
+  for (const file of sourceFiles()) {
+    const src = codeOnly(fs.readFileSync(file, 'utf8'));
+    // Every element given role="button" by hand, with the JSX that follows it
+    // up to the closing of its own tag's children.
+    let from = 0;
+    for (;;) {
+      const at = src.indexOf('role="button"', from);
+      if (at < 0) break;
+      from = at + 1;
+      // The enclosing element's children: from the end of its opening tag to
+      // the next same-depth close is hard to find with a regex, so take a
+      // generous window and look for what must never be there.
+      const window = src.slice(at, at + 1200);
+      const stop = window.search(/\n\s{0,6}<\/(Card|div|li|button)>/);
+      const children = stop > 0 ? window.slice(0, stop) : window;
+      if (/<Button\b|<a href|onClick=\{(?!\(\) => on)/.test(children.slice(children.indexOf('>')))) {
+        offenders.push(path.relative(WEB, file));
+      }
+    }
+  }
+  assert.deepStrictEqual([...new Set(offenders)], [],
+    `an element with role="button" wraps another control: ${offenders.join(', ')}`);
 });
 
 // --------------------------------------------------------------------------
@@ -1310,7 +1404,10 @@ test('the attestation states the contraindications the disclaimer names', () => 
  */
 const OFFER_SURFACES = [
   path.join(WEB, 'sections', 'Landing.tsx'),
-  path.join(WEB, 'sections', 'DoorChooser.tsx'),
+  // The catalog home replaced the door chooser as the front page (#68), and it
+  // is now the FIRST thing a cold visitor reads — so it is the surface these
+  // claims matter most on.
+  path.join(WEB, 'sections', 'CatalogHome.tsx'),
   path.join(WEB, '..', 'index.html'),
   path.join(__dirname, '..', 'README.md'),
 ];
