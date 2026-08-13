@@ -129,8 +129,15 @@ POST https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format=mp3_44
      body:   { text, model_id: "eleven_v3", voice_settings }
 ```
 
-`engine/render_track.py` holds the only `urlopen` in the project. A scoped key
-therefore needs **Text to Speech → Access** and nothing else.
+`engine/render_track.py` holds the only `urlopen` in the project. Since #25 the
+Node server makes one more call, with the same key:
+
+```
+GET https://api.elevenlabs.io/v1/user/subscription
+    header: xi-api-key
+```
+
+So a scoped key needs **Text to Speech → Access** and **User → Read**.
 
 Specifically *not* needed, including the ones that look plausible:
 
@@ -139,11 +146,44 @@ Specifically *not* needed, including the ones that look plausible:
 | Voices | voice IDs are hardcoded in `VOICE_SETS`; we never enumerate them |
 | Models | `eleven_v3` is a string literal in `render_track.py` |
 | History | generations are recorded automatically; nothing queries them |
-| User / Workspace | nothing reads the balance or the account |
+| Workspace | nothing reads the account or its members |
 | Everything else | no code path touches dubbing, agents, projects, music, STT, or sound effects |
 
-If #25 (preflight the credit balance before capturing payment) is built, that
-adds a `User` read — revisit the scope then rather than pre-granting it now.
+**User → Read was added by #25** and is the only scope change since this file
+was written. A key without it keeps working: the preflight logs the missing
+scope by name and falls back to the local monthly ledger rather than refusing
+every sale.
+
+### The credit preflight (#25)
+
+The plan quota and the daily cap were never reconciled — ~20k characters a
+program against a 500k plan is ~25 programs a month, while `MAX_JOBS_PER_DAY=6`
+permits ~180. Once money changes hands the gap has a specific shape: a customer
+pays, waits twenty minutes, and receives a quota-exhaustion failure.
+
+`POST /api/checkout` now refuses (`503 temporarily_unavailable`) before a
+Checkout Session exists, when **either**:
+
+- the local `MONTHLY_CHAR_BUDGET` ledger cannot cover the program, or
+- the ElevenLabs plan balance cannot.
+
+The local half needed no provider call at all, and it mattered most: since #23
+the render starts from the webhook, so every refusal `startRender()` makes now
+lands *after* the charge.
+
+Priced against the specific goal and voice set, not the worst-case program:
+since #9 a repeat of the same pair costs nothing, and refusing a render that is
+free would be a lost sale over credits that would not be spent.
+
+**When the balance cannot be read**, the sale proceeds. A stale reading is
+preferred to none — credits do not move quickly at ~20k a program — and a
+never-successful read (missing key, missing scope) is a configuration problem
+for the log, not a reason to stop selling. The local ledger still bounds spend
+in every one of those cases.
+
+`CREDIT_CACHE_MS` (default 60 s) keeps this off the critical path, and
+concurrent checkouts on a cold cache share one request rather than opening one
+each.
 
 ### Cost
 
