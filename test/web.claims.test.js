@@ -307,6 +307,63 @@ test('the policy pages say what is collected and how long it is kept', () => {
 });
 
 // --------------------------------------------------------------------------
+// The voice preview is the primary trust mechanism (#81)
+// --------------------------------------------------------------------------
+
+test('the preview clips are encoded for speech, not for music', () => {
+  // 128 kbps mono at 44.1 kHz is about four times what speech needs. Halving it
+  // halves what a phone downloads; the content above the new lowpass sits
+  // 34-43 dB below the programme, which is inaudible.
+  const dir = path.join(WEB, '..', 'public', 'voices');
+  const clips = fs.readdirSync(dir).filter((f) => f.endsWith('.mp3'));
+  assert.ok(clips.length >= 4, `expected the four voice clips, found ${clips.length}`);
+  for (const clip of clips) {
+    const bytes = fs.statSync(path.join(dir, clip)).size;
+    assert.ok(bytes < 100 * 1024,
+      `${clip} is ${(bytes / 1024).toFixed(0)} KB — the previews were re-encoded to ~64 kbps`);
+  }
+});
+
+test('the button says "loading" rather than "playing" over silence', () => {
+  // It used to set the playing state on press, so on a slow connection it read
+  // "Playing" for the best part of a second while nothing came out — on the one
+  // control that has to feel trustworthy.
+  const hook = fs.readFileSync(path.join(WEB, 'hooks', 'use-audio-preview.ts'), 'utf8');
+  assert.match(hook, /addEventListener\('playing'/,
+    'the playing state is not driven by the audio actually starting');
+  assert.match(hook, /pendingSrc/, 'there is no state between pressed and audible');
+
+  const btn = codeOnly(
+    fs.readFileSync(path.join(WEB, 'components', 'AudioPreviewButton.tsx'), 'utf8'));
+  assert.match(btn, /pending \? \(/, 'the button renders no pending state');
+  assert.match(btn, /aria-busy=\{pending\}/,
+    'a screen-reader user gets no acknowledgement of the press');
+});
+
+test('warming the clips cannot compete with an actual press', () => {
+  // Measured: firing all four prefetches at once on a 400 kbps link made the
+  // press slower, 854 ms to 1266 ms. Sequential, low priority, and abandoned
+  // the moment someone presses.
+  const hook = fs.readFileSync(path.join(WEB, 'hooks', 'use-audio-preview.ts'), 'utf8');
+  assert.match(hook, /priority: 'low'/, 'the warming competes at normal priority');
+  assert.match(hook, /warmingRef\.current\?\.abort\(\)/,
+    'a press does not cancel the background warming');
+  // Sequential: awaited inside the loop, not collected and raced.
+  const effect = hook.slice(hook.indexOf('const controller = new AbortController()'));
+  assert.match(effect.slice(0, effect.indexOf('return () =>')), /await fetch\(/,
+    'the clips are warmed in parallel, which saturates a slow connection');
+});
+
+test('the audio element is still constructed inside the user gesture', () => {
+  // iOS will not play audio created outside a gesture. Prefetching the bytes is
+  // orthogonal to that, and must not become a reason to hoist the construction.
+  const hook = fs.readFileSync(path.join(WEB, 'hooks', 'use-audio-preview.ts'), 'utf8');
+  const toggle = hook.slice(hook.indexOf('const toggle = useCallback'));
+  assert.match(toggle.slice(0, toggle.indexOf('[playingSrc')), /new Audio\(src\)/,
+    'the Audio element is no longer created in the press handler — iOS will not play it');
+});
+
+// --------------------------------------------------------------------------
 // One control per door (#72)
 // --------------------------------------------------------------------------
 
