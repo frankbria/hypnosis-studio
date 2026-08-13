@@ -128,6 +128,7 @@ export default function App() {
       setJob(jobFromPath(path))
       setOrder(orderFromPath(path))
       setResend(path === '/resend')
+      setInitialGoal(null)
       setView('landing')
     }
     window.addEventListener('popstate', onPop)
@@ -157,6 +158,7 @@ export default function App() {
     setJob(null)
     setOrder(null)
     setResend(false)
+    setInitialGoal(null)
     setView('landing')
   }, [])
 
@@ -167,6 +169,7 @@ export default function App() {
     setJob(null)
     setOrder(null)
     setResend(false)
+    setInitialGoal(null)
     setView('landing')
   }, [])
 
@@ -177,6 +180,7 @@ export default function App() {
     setJob(jobFromPath(path))
     setOrder(orderFromPath(path))
     setResend(path === '/resend')
+    setInitialGoal(null)
     setView('landing')
   }, [])
 
@@ -191,6 +195,11 @@ export default function App() {
    * a switch statement.
    */
   function startPurchase(next: TierId) {
+    // Cleared, or a program chosen earlier from the catalog leaks into this
+    // entry — and if it belonged to the OTHER door, `goal` resolves to null and
+    // the wizard renders a blank step. Entering from a tier CTA means the
+    // visitor has chosen a tier, not a program.
+    setInitialGoal(null)
     if (next !== 'program') {
       // #73 builds the intake this routes to. Until then, refusing loudly beats
       // selling someone the wrong thing.

@@ -387,6 +387,23 @@ test('choosing a program from the catalog carries the program, not just a tier',
     'the chosen program is dropped, so the wizard asks for it again');
 });
 
+test('a program chosen once does not leak into the next visit to the wizard', () => {
+  // The carried goal is only correct for the entry that set it. Left behind, a
+  // later entry from a tier CTA re-mounts the wizard pre-set to a program the
+  // visitor did not pick — and if it belonged to the OTHER door, `goal`
+  // resolves to null and the step renders blank.
+  const app = codeOnly(fs.readFileSync(path.join(WEB, 'App.tsx'), 'utf8'));
+  const clears = (app.match(/setInitialGoal\(null\)/g) || []).length;
+  assert.ok(clears >= 4,
+    `only ${clears} paths clear the carried program; every entry that is not `
+    + 'chooseProgram must');
+
+  // The tier CTA specifically: it means "this tier", never "this program".
+  const fn = app.slice(app.indexOf('function startPurchase'));
+  assert.match(fn.slice(0, fn.indexOf('\n  }')), /setInitialGoal\(null\)/,
+    'entering from a tier CTA keeps a program chosen earlier from the catalog');
+});
+
 // --------------------------------------------------------------------------
 // A chosen tier must survive the click (#69)
 // --------------------------------------------------------------------------
