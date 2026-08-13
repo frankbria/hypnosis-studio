@@ -446,6 +446,41 @@ test('a refunded order is never rendered, however late the retry arrives', async
   }
 });
 
+test('an order whose refund is still owed is not rendered either', async () => {
+  // `refunded` is not the only settled state. A refund that is pending or has
+  // failed is still money on its way back, and rendering alongside it hands the
+  // customer the program AND their money.
+  const stripe = await fakeStripe({ refundStatus: 500 });
+  const srv = await startServer({
+    engine: 'ok',
+    env: {
+      STRIPE_API_BASE: stripe.base, MONTHLY_CHAR_BUDGET: '1',
+      SWEEP_INTERVAL_MS: '600000', REFUND_UNSTARTED_GRACE_MS: '100',
+    },
+  });
+  try {
+    const raw = paidEvent();
+    await request(srv.port, 'POST', '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    await sleep(300);
+    // Force the owed-refund sweep by hand: it is the only thing that runs here.
+    const order = readOrder(srv.rendersDir);
+    order.refund = { state: 'failed', attempts: 1, reason: 'the studio could not start the render' };
+    order.claimedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    fs.writeFileSync(path.join(srv.rendersDir, '.sessions', 'cs_test_1.json'),
+      JSON.stringify(order));
+
+    const late = await request(srv.port, 'POST', '/api/stripe/webhook', raw,
+      { 'Stripe-Signature': sign(raw) });
+    assert.strictEqual(late.status, 200);
+    assert.strictEqual(late.json.duplicate, true);
+    await sleep(600);
+    assert.deepStrictEqual(jobs(srv.rendersDir), [],
+      'an order that is owed a refund was rendered as well');
+  } finally {
+    stop(srv); stripe.close();
+  }
+});
+
 // --------------------------------------------------------------------------
 // The customer can see it
 // --------------------------------------------------------------------------

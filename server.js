@@ -910,10 +910,19 @@ function jobsForSession(sessionId) {
 function claimIsRecoverable(claim, sessionId) {
   if (!claim || typeof claim !== 'object') return false;
 
-  // A refunded order must never render. The money has gone back; delivering
-  // afterwards would be giving the program away, and a late Stripe retry of a
-  // refusal is exactly how that would happen (#26).
-  if (claim.refund && claim.refund.state === 'refunded') return false;
+  // Once a refund has been STARTED, this order is settled as money and must
+  // never render (#26). Not just `refunded`:
+  //
+  //   pending  — the refund is in flight; rendering now races it, and the
+  //              customer would end up with the program and their money back.
+  //   failed   — the sweep still owes them the refund, so the same race is
+  //              merely slower.
+  //
+  // Which leaves the customer of a permanently unrefundable order with
+  // neither, deliberately: that case is already logged as NEEDS A HUMAN, and
+  // whether to hand over the program or the money is a decision for the human,
+  // not something to resolve by giving away both.
+  if (claim.refund) return false;
 
   const jobIds = new Set(jobsForSession(sessionId));
   if (claim.jobId) jobIds.add(claim.jobId);
