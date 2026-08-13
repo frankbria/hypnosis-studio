@@ -307,6 +307,46 @@ test('the policy pages say what is collected and how long it is kept', () => {
 });
 
 // --------------------------------------------------------------------------
+// One control per door (#72)
+// --------------------------------------------------------------------------
+
+test('a door has exactly one thing you can activate', () => {
+  // The card carried role="button" AND contained a real <Button> with the same
+  // handler, so a click on the CTA fired once and then bubbled to the card:
+  // two calls to onEnter, two history entries, and Back needing two presses to
+  // leave a door. It was also a button inside a button, which is invalid.
+  const src = codeOnly(
+    fs.readFileSync(path.join(WEB, 'sections', 'DoorChooser.tsx'), 'utf8'));
+
+  const handlers = (src.match(/onEnter\(door\.id\)/g) || []).length;
+  assert.strictEqual(handlers, 2,
+    `onEnter is wired ${handlers} times per door; expected exactly two — the click and the key`);
+
+  // And the second must be the KEYBOARD path, not a second pointer target.
+  const keydown = src.slice(src.indexOf('onKeyDown'), src.indexOf('className', src.indexOf('onKeyDown')));
+  assert.match(keydown, /onEnter\(door\.id\)/, 'keyboard activation was removed');
+  assert.match(keydown, /'Enter' \|\| e\.key === ' '/, 'space or enter no longer activates a door');
+
+  // No interactive element may sit inside the card.
+  assert.ok(!/<Button\b/.test(src),
+    'a real <Button> is back inside the door card — that is a button in a button');
+  const grid = src.slice(src.indexOf('DOORS.map'), src.indexOf('</section>', src.indexOf('DOORS.map')));
+  assert.ok(!/<a\b/.test(grid), 'a link inside the door card would bubble the same way');
+});
+
+test('the door card is still reachable and named for a screen reader', () => {
+  const src = codeOnly(
+    fs.readFileSync(path.join(WEB, 'sections', 'DoorChooser.tsx'), 'utf8'));
+  assert.match(src, /tabIndex=\{0\}/, 'the door card cannot be focused');
+  assert.match(src, /aria-label=\{door\.cta\}/,
+    'the card has no accessible name, so it is announced as its whole contents');
+  assert.match(src, /focus-visible:ring/,
+    'the card gives no visible focus indicator, and it is now the only control');
+  assert.match(src, /aria-hidden="true"/,
+    'the visual call to action is still announced separately from the card name');
+});
+
+// --------------------------------------------------------------------------
 // The failure copy must match what actually happened to the money (#30)
 // --------------------------------------------------------------------------
 

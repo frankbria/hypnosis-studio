@@ -1,8 +1,9 @@
 import { ArrowRight, Brain, Waves } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import type { DoorId } from '@/lib/data'
 import SiteFooter from '@/components/SiteFooter'
+import { cn } from '@/lib/utils'
 
 interface DoorChooserProps {
   onEnter: (door: DoorId) => void
@@ -69,6 +70,12 @@ export default function DoorChooser({ onEnter, onNavigate }: DoorChooserProps) {
               key={door.id}
               role="button"
               tabIndex={0}
+              // The whole card is the control. It used to contain a real
+              // <Button> carrying the same handler, so clicking the CTA fired
+              // once and then bubbled to the card — two calls, two history
+              // entries, and Back needing two presses to leave a door (#72).
+              // It was also a button inside a button, which is invalid.
+              aria-label={door.cta}
               onClick={() => onEnter(door.id)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
@@ -76,7 +83,7 @@ export default function DoorChooser({ onEnter, onNavigate }: DoorChooserProps) {
                   onEnter(door.id)
                 }
               }}
-              className="group cursor-pointer rounded-2xl border-white/10 bg-white/5 shadow-none transition-colors hover:border-violet-300/30"
+              className="group cursor-pointer rounded-2xl border-white/10 bg-white/5 shadow-none transition-colors hover:border-violet-300/30 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-violet-300/50"
             >
               <CardContent className="flex h-full flex-col p-10">
                 <door.icon className="size-6 text-violet-300 transition-colors group-hover:text-[#d4b87f]" />
@@ -89,13 +96,22 @@ export default function DoorChooser({ onEnter, onNavigate }: DoorChooserProps) {
                 <p className="mt-5 flex-1 text-sm leading-relaxed text-white/50">
                   {door.body}
                 </p>
-                <Button
-                  onClick={() => onEnter(door.id)}
-                  className="mt-8 w-full bg-primary text-primary-foreground hover:bg-violet-300"
+                {/*
+                  A span, not a Button. It looks like the call to action and is
+                  read as part of the card's content, but the card is what you
+                  activate — so there is exactly one interactive element per
+                  door and no handler to fire twice.
+                */}
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    buttonVariants(),
+                    'mt-8 w-full bg-primary text-primary-foreground group-hover:bg-violet-300',
+                  )}
                 >
                   {door.cta}
                   <ArrowRight className="size-4" />
-                </Button>
+                </span>
               </CardContent>
             </Card>
           ))}
