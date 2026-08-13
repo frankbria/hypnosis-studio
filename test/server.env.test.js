@@ -124,3 +124,105 @@ test('ENVIRONMENT.md stays true to the code it describes', () => {
   assert.ok(doc.includes('engine/api.env') && deployment.includes('engine/api.env'),
     'ENVIRONMENT.md and DEPLOYMENT.md disagree about where production reads env from');
 });
+
+test('no secret value is written into a tracked file', () => {
+  // ACCESS_CODE is the only gate on POST /api/programs, which spends ElevenLabs
+  // credits, and this repository is public. Its live value sat in
+  // DEPLOYMENT.md from the first commit until it was rotated (#32).
+  //
+  // Scrubbing HEAD does not remove it from history, so this guard exists to stop
+  // the next one being written down — which is the only part still preventable.
+  const tracked = execFileSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' })
+    .split('\n')
+    .filter(Boolean)
+    // Binary and vendored files: nothing here authors a secret into them.
+    .filter((f) => !/\.(png|jpg|jpeg|gif|ico|woff2?|mp3|wav|lock)$/i.test(f))
+    .filter((f) => !f.includes('package-lock.json'))
+    // Test fixtures assign ACCESS_CODE='test-code' to a stub server. Those are
+    // inputs to a test, not credentials, and flagging them would make the guard
+    // noise that gets muted.
+    .filter((f) => !f.startsWith('test/'));
+
+  const offenders = [];
+  for (const rel of tracked) {
+    const abs = path.join(ROOT, rel);
+    let src;
+    try { src = fs.readFileSync(abs, 'utf8'); } catch { continue; }
+
+    // An assignment with a literal on the right, for the variables that are
+    // secrets. `FOO=` with nothing after it is a template and is fine — that is
+    // what .env.example is made of.
+    for (const secret of ['ACCESS_CODE', 'ELEVENLABS_API_KEY']) {
+      // Skip the code that READS it: `process.env.ACCESS_CODE || ''`.
+      const re = new RegExp(`${secret}\\s*[=:]\\s*['"\`]?([A-Za-z0-9_-]{6,})`, 'g');
+      for (const m of src.matchAll(re)) {
+        const value = m[1];
+        // `process.env.X` is a read, not a value.
+        if (/^(process|os|import|environ|None|null|undefined)$/i.test(value)) continue;
+        // An obvious placeholder is the point of .env.example.
+        if (/replace|example|changeme|your[-_]|xxx|placeholder|<.*>/i.test(value)) continue;
+
+        // Two things make a string worth flagging: it is long enough to be a
+        // real credential, or it is prose. Documentation has no reason to
+        // contain a secret at any length — ACCESS_CODE's live value was 13
+        // characters and sat in DEPLOYMENT.md for the life of the repo.
+        const longEnoughToBeReal = value.length >= 20;
+        const isProse = /\.(md|txt|rst)$/i.test(rel);
+        if (!longEnoughToBeReal && !isProse) continue;
+
+        offenders.push(`${rel}: ${secret} = ${value.slice(0, 4)}… (${value.length} chars)`);
+      }
+    }
+
+    // Shape, independent of context. "The current key is `sk_live_abc123…`"
+    // has no assignment and need not mention ELEVENLABS_API_KEY on the same
+    // line, so both scans below miss it. An sk_ prefix followed by a long
+    // alphanumeric run is an ElevenLabs/OpenAI-style key wherever it appears.
+    // The documented placeholder (`sk_replace_me`, 10 chars after the prefix)
+    // is deliberately under the threshold.
+    for (const m of src.matchAll(/\bsk_[A-Za-z0-9_-]{16,}\b/g)) {
+      offenders.push(`${rel}: ${m[0].slice(0, 6)}… (${m[0].length} chars) — key-shaped literal`);
+    }
+
+    // Prose does not assign — it mentions. DEPLOYMENT.md read "`ACCESS_CODE`
+    // from `api.env` (currently **`polymath-2026`**)", which has no `=` after
+    // the name, so the assignment scan above sailed straight past the exact
+    // leak this guard was written for. Caught by mutation, not by running it.
+    //
+    // So in documentation, look for a backticked literal in the same sentence
+    // as a secret's name, and allow only tokens that are plainly identifiers.
+    if (!/\.(md|txt|rst)$/i.test(rel)) continue;
+    const ALLOW = new Set([
+      'ACCESS_CODE', 'ELEVENLABS_API_KEY', 'api.env', '.env', '.env.example',
+      'process.env', 'accessCode', 'rendering_disabled', 'EnvironmentFile',
+      'bad_access_code', 'xi-api-key', 'server.js', 'engine', 'systemctl',
+      'VITE_SUPPORT_EMAIL', 'loadEnvFile', 'text-to-speech', 'eleven_v3',
+    ]);
+    for (const secret of ['ACCESS_CODE', 'ELEVENLABS_API_KEY']) {
+      let from = 0;
+      for (;;) {
+        const at = src.indexOf(secret, from);
+        if (at < 0) break;
+        from = at + secret.length;
+        const start = src.lastIndexOf('\n', at) + 1;
+        const stop = src.indexOf('\n', at);
+        const line = src.slice(start, stop < 0 ? src.length : stop);
+        for (const m of line.matchAll(/`([^`]+)`/g)) {
+          const tok = m[1];
+          if (ALLOW.has(tok)) continue;
+          // Other variable NAMES share the sentence: "provides
+          // `ELEVENLABS_API_KEY`, `ACCESS_CODE`, `HYPNO_DTYPE` … to Node". A
+          // SCREAMING_SNAKE token is an identifier, not a credential — and a
+          // real value ("polymath-2026") does not look like one.
+          if (/^[A-Z][A-Z0-9_]*$/.test(tok)) continue;
+          if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{5,}$/.test(tok)) continue;
+          if (/^(https?:|\/|\.\/)/.test(tok)) continue;
+          offenders.push(`${rel}: "${tok}" appears alongside ${secret} — is that its value?`);
+        }
+      }
+    }
+  }
+  assert.deepStrictEqual(offenders, [],
+    'a secret value is written into a tracked file in a public repo:\n' +
+    offenders.join('\n'));
+});
