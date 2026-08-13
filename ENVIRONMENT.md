@@ -120,7 +120,8 @@ the TTS step rather than at startup — the failure is far from the cause.
 
 ### Scope: Text to Speech only
 
-The entire codebase makes **one** outbound call:
+This key buys exactly **one** call — the studio's other outbound call goes to
+Stripe with a different credential entirely (see below):
 
 ```
 POST https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format=mp3_44100_128
@@ -157,6 +158,60 @@ before a render starts:
 
 The content-keyed segment cache means a retry re-buys only what it never
 reached, and identical segments are paid for once across programs.
+
+---
+
+## The Stripe key (#22)
+
+**Optional, and currently it must stay unset in production.**
+
+`POST /api/checkout` creates a Stripe Checkout Session. Nothing yet turns a
+completed payment into a render — that is #23, which verifies the webhook
+signature and starts the job. **Setting `STRIPE_SECRET_KEY` before #23 ships
+means the studio can take $39 and produce nothing.** While it is empty the
+endpoint answers `503 checkout_disabled`, which is the correct state today.
+
+Test keys (`sk_test_…`) are safe locally at any point.
+
+### The second outbound call
+
+```
+POST https://api.stripe.com/v1/checkout/sessions
+     header: Authorization: Bearer $STRIPE_SECRET_KEY
+             Stripe-Version: 2024-06-20        (pinned in server.js)
+     body:   form-encoded — mode, line_items, metadata
+```
+
+Made with the runtime's own `fetch`. There is **no `stripe` package**: this repo
+has zero dependencies and the deploy workflow copies
+`server.js,package.json,engine/**,web/dist/**,deploy/**` without ever running
+`npm ci` at the root, so an SDK would mean shipping `node_modules` and rebuilding
+the pipeline to do it. A Checkout Session is a form POST and the webhook
+signature #23 needs is an HMAC — both are native.
+
+The API version is pinned in source rather than left to the account default,
+which Stripe can change from the dashboard: otherwise the shape of what this
+code sends and reads could change with no commit anywhere in this repository.
+
+### Where the price lives
+
+`PROGRAM_PRICE_CENTS` (default `3900`) is **the** price. Until #22 it existed
+only as the string `'$39'` in the frontend bundle, which meant it was whatever
+the browser said it was; the endpoint now reads `goal` and `voiceSet` from the
+request body and nothing else, and a test asserts that against every field name
+a tampered request would use.
+
+The `'$39'` on the site is still display text — fetching it at runtime would
+flash the wrong price for one paint — so a test in `test/web.claims.test.js`
+pins the two together, along with `PROGRAM_CURRENCY` against the `$` the site
+writes. Changing the price means changing both.
+
+### `PUBLIC_BASE_URL` is required, not derived
+
+Where Stripe returns the customer after paying or cancelling. The server refuses
+checkout (503) when it is unset rather than deriving it from the request's
+`Host` header: that header is client-supplied, and a forged one would send the
+customer to somebody else's site the instant after they paid us.
 
 ---
 

@@ -132,6 +132,47 @@ test('exactly one tier is purchasable today', () => {
     + 'decision, not a refactor');
 });
 
+test('the price on the page is the price the server charges', () => {
+  // Until #22 the price existed ONLY as a string in the bundle, so it was
+  // whatever the browser said it was. It now lives in server.js, and the two
+  // numbers are independent — which is the same drift shape as the retention
+  // window above, and the same fix: assert them against each other rather than
+  // hope.
+  //
+  // The frontend string stays a string deliberately. Fetching it at runtime
+  // would flash the wrong price on the landing page for one paint; this test is
+  // the cheaper guard.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const m = server.match(/PROGRAM_PRICE_CENTS \|\| '(\d+)'/);
+  assert.ok(m, 'could not find the server price default');
+  const cents = Number(m[1]);
+
+  const displayed = DATA.match(/export const PROGRAM_PRICE = '\$(\d+)'/);
+  assert.ok(displayed, 'PROGRAM_PRICE is missing or no longer a plain dollar string');
+  assert.strictEqual(cents, Number(displayed[1]) * 100,
+    `the site shows $${displayed[1]}; the server charges ${cents} cents`);
+
+  // And the purchasable tier must agree with both — it is the one carrying the
+  // payment CTA, so it is the number a customer believes they are agreeing to.
+  const buyable = PRICING_BLOCK.split('name:').slice(1).find((t) => /available: true/.test(t));
+  assert.ok(buyable, 'no purchasable tier to check the price against');
+  const tierPrice = buyable.match(/price: '\$([\d,]+)'/);
+  assert.ok(tierPrice, 'the purchasable tier has no parseable price');
+  assert.strictEqual(Number(tierPrice[1].replace(/,/g, '')) * 100, cents,
+    'the purchasable tier advertises a different price from the one Stripe is asked for');
+});
+
+test('the currency the server charges in is the one the page writes', () => {
+  // '$39' is a dollar sign. Setting PROGRAM_CURRENCY to gbp in production would
+  // charge £39 against a page that says $39 — a 25% surprise, and one nothing
+  // else in the system would notice.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const m = server.match(/PROGRAM_CURRENCY \|\| '(\w+)'/);
+  assert.ok(m, 'could not find the server currency default');
+  assert.strictEqual(m[1], 'usd',
+    'the default currency is no longer usd, but the site prices in $');
+});
+
 // --------------------------------------------------------------------------
 // The advertised program must match the engine that renders it
 // --------------------------------------------------------------------------
