@@ -16,11 +16,12 @@
  * different sentence from `unavailable` (Stripe is configured and refused), and
  * showing the customer the wrong one of those is how a support thread starts.
  */
-export type CheckoutFailure = 'disabled' | 'unavailable' | 'rejected' | 'network'
+export type CheckoutFailure = 'disabled' | 'unavailable' | 'busy' | 'rejected' | 'network'
 
 const FAILURE_BY_CODE: Record<string, CheckoutFailure> = {
   checkout_disabled: 'disabled',
   checkout_unavailable: 'unavailable',
+  rate_limited: 'busy',
   goal_in_production: 'rejected',
   bad_voice_set: 'rejected',
 }
@@ -28,6 +29,9 @@ const FAILURE_BY_CODE: Record<string, CheckoutFailure> = {
 export const CHECKOUT_MESSAGE: Record<CheckoutFailure, string> = {
   disabled: 'Checkout is not open yet.',
   unavailable: "We couldn't reach the payment provider. Please try again in a moment.",
+  // The server's own cap, not the provider's. "We couldn't reach Stripe" would
+  // send the customer to check a connection that is working fine.
+  busy: 'The studio is busy right now. Please try again in a minute.',
   rejected: 'That program is not available to buy.',
   network: "We couldn't reach the studio. Please check your connection and try again.",
 }
