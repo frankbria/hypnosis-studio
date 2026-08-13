@@ -825,7 +825,7 @@ function claimPath(sessionId) {
 // render — is answered from evidence below, not from the clock.
 const RECLAIM_AFTER_MS = 60 * 1000;
 
-// Which job was started for this session, asked of the jobs themselves.
+// EVERY job started for this session, asked of the jobs themselves.
 //
 // The claim file cannot answer it alone: if the write that records the jobId
 // fails, a claim with no jobId is indistinguishable from one whose render never
@@ -833,18 +833,24 @@ const RECLAIM_AFTER_MS = 60 * 1000;
 // customer already has. The job directory records its own session, so the
 // answer does not depend on a write that may not have happened.
 //
+// All of them, not the first: recovering a failed render leaves a session with
+// two jobs, and readdir order is not creation order. Returning whichever came
+// back first would let the failed one answer for the delivered one and
+// re-render an order the customer already has.
+//
 // ponytail: a linear scan, bounded by the retention window (~180 dirs at the
 // current caps) and only reached on the duplicate path. Index it if either
 // number ever changes by an order of magnitude.
-function findJobForSession(sessionId) {
+function jobsForSession(sessionId) {
   let dirs;
-  try { dirs = fs.readdirSync(RENDERS, { withFileTypes: true }); } catch { return null; }
+  try { dirs = fs.readdirSync(RENDERS, { withFileTypes: true }); } catch { return []; }
+  const out = [];
   for (const d of dirs) {
     if (!d.isDirectory() || !JOB_DIR_RE.test(d.name)) continue;
     const rec = readJsonSafe(path.join(RENDERS, d.name, 'session.json'));
-    if (rec && rec.sessionId === sessionId) return d.name;
+    if (rec && rec.sessionId === sessionId) out.push(d.name);
   }
-  return null;
+  return out;
 }
 
 // May this session be rendered, given a claim that already exists?
@@ -856,11 +862,18 @@ function findJobForSession(sessionId) {
 function claimIsRecoverable(claim, sessionId) {
   if (!claim || typeof claim !== 'object') return false;
 
-  const jobId = claim.jobId || findJobForSession(sessionId);
-  if (jobId) {
-    const st = readJsonSafe(path.join(jobDir(jobId), 'status.json'));
-    if (!st) return true;               // job directory gone; nothing was delivered
-    return st.state === 'failed';
+  const jobIds = new Set(jobsForSession(sessionId));
+  if (claim.jobId) jobIds.add(claim.jobId);
+  if (jobIds.size > 0) {
+    // Owed only if not ONE of them is still going or already delivered. A
+    // missing status.json counts as not delivered: either the render never got
+    // that far, or the retention sweep has taken the files the customer paid
+    // for, and both leave them with nothing.
+    for (const id of jobIds) {
+      const st = readJsonSafe(path.join(jobDir(id), 'status.json'));
+      if (st && st.state !== 'failed') return false;
+    }
+    return true;
   }
 
   // No render exists for this session at all.

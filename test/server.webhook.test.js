@@ -541,6 +541,47 @@ test('a render whose session link was not recorded is not rendered twice', async
   }
 });
 
+test('a session with both a failed and a delivered render is not rendered again', async () => {
+  // Recovering a failed render is what leaves a session with two jobs, and
+  // readdir order is not creation order. Answering from whichever came back
+  // first lets the failed one speak for the delivered one.
+  const srv = await startServer();
+  try {
+    const raw = completedEvent();
+    await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    await settle();
+    const [delivered] = jobs(srv.rendersDir);
+    assert.ok(delivered, 'no render started');
+
+    // An earlier, failed attempt at the same session. Named to sort BEFORE the
+    // delivered one, so a first-match implementation picks it.
+    const failed = 'job_aaaaaaaaaaaa';
+    assert.ok(failed < delivered, 'the fixture no longer sorts first');
+    fs.mkdirSync(path.join(srv.rendersDir, failed), { recursive: true });
+    fs.writeFileSync(path.join(srv.rendersDir, failed, 'session.json'),
+      JSON.stringify({ sessionId: 'cs_test_1' }));
+    fs.writeFileSync(path.join(srv.rendersDir, failed, 'status.json'), JSON.stringify({
+      jobId: failed, state: 'failed', error: 'an earlier attempt',
+      updatedAt: new Date().toISOString(),
+    }));
+
+    // Age the claim and strip its jobId, so the decision rests entirely on the
+    // jobs themselves.
+    fs.writeFileSync(path.join(srv.rendersDir, '.sessions', 'cs_test_1.json'), JSON.stringify({
+      sessionId: 'cs_test_1', goal: 'polymath', voiceSet: 'male',
+      claimedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    }));
+
+    const res = await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.json.duplicate, true, 'a delivered order was rendered again');
+    await settle();
+    assert.strictEqual(jobs(srv.rendersDir).length, 2, 'a third render was started');
+  } finally {
+    stop(srv);
+  }
+});
+
 test('a paid order refused at the time is rendered when the event is resent', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webhook-recover-'));
   const raw = completedEvent();
