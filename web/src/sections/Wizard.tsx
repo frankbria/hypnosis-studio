@@ -18,7 +18,11 @@ import {
   buildTracks,
 } from '@/lib/data'
 import type { DoorId, VoiceSet } from '@/lib/data'
-import { RENDER_FAILURE_GUARANTEE, SUPPORT_EMAIL } from '@/lib/legal'
+import {
+  NOTHING_CHARGED_ASSURANCE,
+  RENDER_FAILURE_GUARANTEE,
+  SUPPORT_EMAIL,
+} from '@/lib/legal'
 import { CHECKOUT_MESSAGE, startCheckout } from '@/lib/checkout'
 import type { CheckoutFailure } from '@/lib/checkout'
 import GoalCardText from '@/components/GoalCardText'
@@ -39,9 +43,16 @@ interface WizardProps {
 /**
  * What the studio said, in the customer's terms.
  *
- * Every one of these used to be a fabricated success screen. They are separate
- * sentences rather than one apology because they call for different things:
- * two are permanent, two are "later", and one is a fault worth reporting.
+ * Every one of these used to be a fabricated success screen (#29). They are
+ * separate sentences rather than one apology because they call for different
+ * things: two are permanent, three come back on their own, one is a fault
+ * worth reporting.
+ *
+ * Every one of them happens BEFORE any charge — this screen is the last point
+ * before checkout, and the early-access path only exists while payment is
+ * switched off. So NOTHING_CHARGED_ASSURANCE is appended to all of them rather
+ * than written into each, which is what stops one of them quietly acquiring a
+ * different claim about the customer's money (#30).
  */
 const START_ERRORS: Record<string, string> = {
   // The studio takes payment now, so the early-access door is shut for good.
@@ -49,7 +60,7 @@ const START_ERRORS: Record<string, string> = {
     'Early access has closed — programs are now bought through checkout.',
   // No ACCESS_CODE is configured, so this path is switched off entirely.
   rendering_disabled:
-    'The studio is not taking early-access programs at the moment. Nothing has started.',
+    'The studio is not taking early-access programs at the moment.',
   // Real limits, and both come back on their own.
   budget_exhausted:
     'The studio is at capacity for this month and is not taking new programs right now.',
@@ -58,12 +69,10 @@ const START_ERRORS: Record<string, string> = {
   daily_cap: "The studio's limit for today is reached — please try again tomorrow.",
   busy: 'Another program is rendering right now. Please try again in a few minutes.',
   storage_unavailable:
-    'The studio could not start your program because of a problem on our side. '
-    + 'Nothing has started.',
+    'The studio could not start your program because of a problem on our side.',
 }
 
-const GENERIC_START_ERROR =
-  'The studio could not start your program. Nothing has started.'
+const GENERIC_START_ERROR = 'The studio could not start your program.'
 
 // ─── Stepper ─────────────────────────────────────────────────────────────────
 
@@ -206,7 +215,8 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
     } catch {
       setStarting(false)
       setStartError(
-        "We couldn't reach the studio. Check your connection and try again — nothing has started.",
+        `We couldn't reach the studio. Check your connection and try again. `
+        + NOTHING_CHARGED_ASSURANCE,
       )
       return
     }
@@ -222,7 +232,8 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
       // unhandled blank screen (#66).
       setStarting(false)
       setStartError(
-        "That program isn't in production yet — choose one of the available goals.",
+        "That program isn't in production yet — choose one of the available goals. "
+        + NOTHING_CHARGED_ASSURANCE,
       )
       return
     }
@@ -236,7 +247,10 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
       }
       // Every branch names what happened. The old code showed a fabricated
       // success for all of these (#29).
-      setStartError(START_ERRORS[reason] ?? `${GENERIC_START_ERROR} (HTTP ${res.status})`)
+      setStartError(
+        `${START_ERRORS[reason] ?? `${GENERIC_START_ERROR} (HTTP ${res.status})`} `
+        + NOTHING_CHARGED_ASSURANCE,
+      )
       return
     }
     // Guarded: an unparseable body here would reject the handler and leave
@@ -254,6 +268,9 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
       setStartError(
         'Your program started, but the studio did not say where to find it. ' +
           'Please get in touch before trying again.',
+        // Deliberately no charge claim: the render DID start, so this is the
+        // one failure on this screen where "nothing was charged" might not be
+        // true (#30).
       )
       return
     }

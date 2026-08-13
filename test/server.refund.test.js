@@ -481,6 +481,42 @@ test('an order whose refund is still owed is not rendered either', async () => {
   }
 });
 
+test('a paid job whose back-pointer was lost is still refunded, and not called unpaid', async () => {
+  // The back-pointer inside the job directory is written in a swallowed
+  // try/catch, so its absence does NOT mean the render was unpaid. Treating it
+  // that way told a charged customer "nothing was charged, there is nothing to
+  // refund" — and separately meant their failed render was never refunded,
+  // because the order could not be found either.
+  const stripe = await fakeStripe();
+  const srv = await startServer({
+    engine: 'hang',
+    env: { STRIPE_API_BASE: stripe.base, SWEEP_INTERVAL_MS: '600000' },
+  });
+  try {
+    await pay(srv);
+    const [job] = jobs(srv.rendersDir);
+    assert.ok(job, 'no render started');
+
+    // The pointer write failed.
+    fs.unlinkSync(path.join(srv.rendersDir, job, 'order.json'));
+
+    // Now the render fails.
+    const rec = JSON.parse(fs.readFileSync(path.join(srv.rendersDir, job, 'worker.json'), 'utf8'));
+    try { process.kill(rec.pid, 'SIGKILL'); } catch { /* already gone */ }
+    await sleep(1500);
+
+    assert.strictEqual(stripe.refunds.length, 1,
+      'a paid customer was not refunded because a back-pointer write had failed');
+    const status = JSON.parse(
+      fs.readFileSync(path.join(srv.rendersDir, job, 'status.json'), 'utf8'));
+    assert.notStrictEqual(status.refund, 'none',
+      'a charged customer was told nothing was charged');
+    assert.strictEqual(status.refund, 'refunded');
+  } finally {
+    stop(srv); stripe.close();
+  }
+});
+
 // --------------------------------------------------------------------------
 // The customer can see it
 // --------------------------------------------------------------------------

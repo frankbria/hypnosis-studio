@@ -136,6 +136,50 @@ export const REFUND_FAILED_ASSURANCE =
   'please contact us and we will sort it out straight away.'
 
 /**
+ * When the studio knows for certain no money changed hands.
+ *
+ * Distinct from RENDER_FAILED_ASSURANCE, which hedges. The hedge is for the
+ * case where the answer is unknown; using it when the answer IS known reads as
+ * evasion, and this is the screen where that costs the most.
+ */
+export const NOTHING_CHARGED_ASSURANCE =
+  'Nothing was charged for this — there is nothing to refund.'
+
+/**
+ * What a render failure means for the customer's money (#30).
+ *
+ * A TOTAL function of the refund state the server reports, rather than a chain
+ * of conditionals, because the acceptance criterion is that neither message can
+ * appear in the other's situation — and the way that breaks is a future edit
+ * adding a state and falling through to whatever the last branch happened to
+ * be. Adding a state here is a type error until it has a sentence.
+ *
+ * `unknown` covers a server that said nothing: a status written before #26, or
+ * one whose refund state could not be recorded. It is the only case that may
+ * hedge, and it must, because it is the only case where hedging is true.
+ */
+export type RefundState = 'none' | 'pending' | 'refunded' | 'failed' | 'unknown'
+
+export const FAILURE_ASSURANCE: Record<RefundState, string> = {
+  none: NOTHING_CHARGED_ASSURANCE,
+  refunded: REFUND_ISSUED_ASSURANCE,
+  // In flight. Stating it as done would be a promise about money that has not
+  // moved yet; stating it as failed would be worse.
+  pending: 'Your refund is being issued now — you do not need to ask for it.',
+  failed: REFUND_FAILED_ASSURANCE,
+  unknown: RENDER_FAILED_ASSURANCE,
+}
+
+/** Whether the customer should still be offered a way to start again. */
+export const FAILURE_IS_SETTLED: Record<RefundState, boolean> = {
+  none: false,
+  refunded: true,
+  pending: true,
+  failed: true,
+  unknown: false,
+}
+
+/**
  * Why there is no automatic refund after a successful render.
  *
  * Stated plainly rather than buried: the audio is downloadable the moment it

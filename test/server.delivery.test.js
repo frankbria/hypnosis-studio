@@ -376,6 +376,41 @@ test('a failed render is not announced as ready', async () => {
   }
 });
 
+test('a paid job whose back-pointer was lost is still emailed', async () => {
+  // Same root as the refund case: a missing back-pointer is a failed write, not
+  // proof that nobody bought this. Getting it wrong is a paid customer who is
+  // never told their program is ready.
+  const mail = await fakeMail();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'deliver-nopointer-'));
+  let srv = await startServer({
+    rendersDir: dir,
+    env: { EMAIL_API_BASE: mail.base, EMAIL_API_KEY: '' },   // cannot email yet
+  });
+  let job;
+  try {
+    await pay(srv);
+    [job] = jobs(dir);
+    assert.ok(job, 'no render started');
+    fs.unlinkSync(path.join(dir, job, 'order.json'));
+    const order = readOrder(dir);
+    delete order.delivery;
+    fs.writeFileSync(path.join(dir, '.sessions', 'cs_test_1.json'), JSON.stringify(order));
+  } finally {
+    stop(srv, { keepDir: true });
+  }
+
+  srv = await startServer({ rendersDir: dir, env: { EMAIL_API_BASE: mail.base } });
+  try {
+    await sleep(1500);
+    assert.strictEqual(mail.sent.length, 1,
+      'a paid customer was never told, because a back-pointer write had failed');
+  } finally {
+    stop(srv, { keepDir: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+    mail.close();
+  }
+});
+
 test('an unpaid render emails nobody', async () => {
   // The early-access path has no order and no address.
   const mail = await fakeMail();

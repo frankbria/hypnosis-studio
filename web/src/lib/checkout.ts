@@ -33,21 +33,31 @@ const FAILURE_BY_CODE: Record<string, CheckoutFailure> = {
   bad_voice_set: 'rejected',
 }
 
+/**
+ * Every one of these happens before a Checkout Session exists, so no charge has
+ * been made and none can have been. Said plainly rather than left to inference
+ * (#30) — this is a payment screen, and silence about money on a payment screen
+ * is what people assume the worst about.
+ */
 export const CHECKOUT_MESSAGE: Record<CheckoutFailure, string> = {
-  disabled: 'Checkout is not open yet.',
-  unavailable: "We couldn't reach the payment provider. Please try again in a moment.",
+  disabled: 'Checkout is not open yet. Nothing was charged.',
+  unavailable:
+    "We couldn't reach the payment provider. Please try again in a moment — "
+    + 'nothing was charged.',
   // The server's own cap, not the provider's. "We couldn't reach Stripe" would
   // send the customer to check a connection that is working fine.
-  busy: 'The studio is busy right now. Please try again in a minute.',
+  busy: 'The studio is busy right now. Please try again in a minute — nothing was charged.',
   // The studio cannot render this program at all at the moment (#25). Said
   // plainly, and without the "nothing has been charged" reassurance the other
   // messages carry — nothing was charged because nothing was ever attempted,
   // and volunteering it here invites the question.
   at_capacity:
     'The studio is at capacity and is not taking new programs right now. ' +
-    'Please try again later.',
-  rejected: 'That program is not available to buy.',
-  network: "We couldn't reach the studio. Please check your connection and try again.",
+    'Please try again later — nothing was charged.',
+  rejected: 'That program is not available to buy. Nothing was charged.',
+  network:
+    "We couldn't reach the studio. Please check your connection and try again — "
+    + 'nothing was charged.',
 }
 
 /**
