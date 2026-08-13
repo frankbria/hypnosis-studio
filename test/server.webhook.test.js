@@ -522,7 +522,7 @@ test('a render whose session link was not recorded is not rendered twice', async
     const [job] = jobs(srv.rendersDir);
     assert.ok(job, 'no render started');
     assert.strictEqual(
-      JSON.parse(fs.readFileSync(path.join(srv.rendersDir, job, 'session.json'), 'utf8')).sessionId,
+      JSON.parse(fs.readFileSync(path.join(srv.rendersDir, job, 'order.json'), 'utf8')).sessionId,
       'cs_test_1', 'the job does not record which purchase it belongs to');
 
     // Simulate the failed link write: an aged claim that never got its jobId.
@@ -558,7 +558,7 @@ test('a session with both a failed and a delivered render is not rendered again'
     const failed = 'job_aaaaaaaaaaaa';
     assert.ok(failed < delivered, 'the fixture no longer sorts first');
     fs.mkdirSync(path.join(srv.rendersDir, failed), { recursive: true });
-    fs.writeFileSync(path.join(srv.rendersDir, failed, 'session.json'),
+    fs.writeFileSync(path.join(srv.rendersDir, failed, 'order.json'),
       JSON.stringify({ sessionId: 'cs_test_1' }));
     fs.writeFileSync(path.join(srv.rendersDir, failed, 'status.json'), JSON.stringify({
       jobId: failed, state: 'failed', error: 'an earlier attempt',

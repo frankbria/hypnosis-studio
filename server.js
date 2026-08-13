@@ -802,9 +802,19 @@ function verifyStripeSignature(raw, header, secret) {
   });
 }
 
-// One file per paid session. The record is never deleted — it is the evidence
-// that money changed hands, and #24 grows it into the order proper. What makes
-// replay safe is not the file's existence but what it says.
+// One file per paid session: the ORDER (#24).
+//
+// It lives here rather than inside the job directory on purpose.
+// sweepExpiredJobs() deletes whole job directories after RETENTION_DAYS, and an
+// order stored there would be destroyed on day 31 — taking the payment
+// reference and the customer email with it, exactly when a refund or a support
+// query needs them. A refund request arrives after the audio is gone, not
+// before. JOB_DIR_RE requires a `job_` prefix, so the sweep can never select
+// this directory.
+//
+// It is also the replay guard from #23: never deleted, because it is the
+// evidence money changed hands. What makes replay safe is not the file's
+// existence but what it says.
 //
 // ponytail: these accumulate — ~150 bytes per order, never reaped. At any
 // plausible volume that is kilobytes a year, and expiring them would let an old
@@ -847,7 +857,7 @@ function jobsForSession(sessionId) {
   const out = [];
   for (const d of dirs) {
     if (!d.isDirectory() || !JOB_DIR_RE.test(d.name)) continue;
-    const rec = readJsonSafe(path.join(RENDERS, d.name, 'session.json'));
+    const rec = readJsonSafe(path.join(RENDERS, d.name, 'order.json'));
     if (rec && rec.sessionId === sessionId) out.push(d.name);
   }
   return out;
@@ -913,6 +923,30 @@ function claimSession(sessionId, record) {
     console.warn('session', sessionId, 'is claimed but never delivered - rendering it again');
     return writeClaim(sessionId, record) ? true : null;
   }
+}
+
+// What the customer paid, pulled out of the session object.
+//
+// `payment_intent` is a string id normally, or the whole object when the
+// endpoint expands it — storing "[object Object]" would make the refund in #26
+// fail at the moment it is needed. The email is optional: Stripe fills
+// customer_details.email or customer_email depending on how the session was
+// created, and a render that is paid for must not be refused because an
+// optional string is absent.
+function paymentDetails(session) {
+  const pi = session.payment_intent;
+  const details = session.customer_details || {};
+  const email = typeof details.email === 'string' ? details.email
+    : typeof session.customer_email === 'string' ? session.customer_email
+      : null;
+  return {
+    paymentIntent: typeof pi === 'string' ? pi
+      : (pi && typeof pi.id === 'string' ? pi.id : null),
+    email,
+    // What was actually taken, not what the price happens to be at refund time.
+    amountTotal: Number.isFinite(session.amount_total) ? session.amount_total : null,
+    currency: typeof session.currency === 'string' ? session.currency : null,
+  };
 }
 
 // Atomically, the way writeStatus writes status.json. A half-written claim is
@@ -982,15 +1016,19 @@ function startRender(goal, voiceSet, sessionId = null) {
     console.error('could not create a job directory:', e && e.message);
     return refuse(503, { error: 'storage_unavailable' });
   }
-  // Which purchase this render belongs to, written by the job rather than only
-  // by the claim. A sidecar rather than a status.json field, for the same
-  // reason worker.json is one: the Python worker rewrites status.json wholesale
-  // on every transition and would erase it.
+  // Which purchase this render belongs to. A back-pointer only: the order
+  // itself lives outside the job directory, because this one is deleted by the
+  // retention sweep and an order must outlive the audio.
+  //
+  // A sidecar rather than a status.json field, for the same reason worker.json
+  // is one: the Python worker rewrites status.json wholesale on every
+  // transition and would erase it. It is also why the order cannot be a status
+  // field even if retention were not a factor.
   if (sessionId) {
     try {
-      fs.writeFileSync(path.join(jobDir(jobId), 'session.json'), JSON.stringify({ sessionId }));
+      fs.writeFileSync(path.join(jobDir(jobId), 'order.json'), JSON.stringify({ sessionId }));
     } catch (e) {
-      // Recoverable — the claim also records the link. Losing both is what the
+      // Recoverable — the order also records the jobId. Losing both is what the
       // duplicate check is careful about.
       console.error('could not record the session on job', jobId, e && e.message);
     }
@@ -1243,10 +1281,17 @@ async function handleRequest(req, res) {
     // one. The claim is written first and filled in after, because the atomic
     // create is the lock.
     const claimedAt = new Date();
-    const claimed = claimSession(sessionId, {
-      sessionId, goal: meta.goal, voiceSet: meta.voiceSet,
+    // The order, written once and spread into every state below. Three separate
+    // object literals were three chances for one of them to forget a field —
+    // and the field it would forget is the payment reference a refund needs.
+    const order = {
+      sessionId,
+      goal: meta.goal,
+      voiceSet: meta.voiceSet,
+      ...paymentDetails(session),
       claimedAt: claimedAt.toISOString(),
-    });
+    };
+    const claimed = claimSession(sessionId, order);
     if (claimed === null) {
       // Could not write the claim. Failing loudly makes Stripe retry, which is
       // the only path back to rendering an order that has been paid for.
@@ -1263,8 +1308,7 @@ async function handleRequest(req, res) {
       // owed a render. It carries no jobId, so it reads as recoverable: a
       // Stripe retry or a manual resend past RECLAIM_AFTER_MS renders it.
       writeClaim(sessionId, {
-        sessionId, goal: meta.goal, voiceSet: meta.voiceSet,
-        claimedAt: claimedAt.toISOString(),
+        ...order,
         lastError: started.error,
         lastErrorAt: new Date().toISOString(),
       });
@@ -1281,13 +1325,10 @@ async function handleRequest(req, res) {
         started.error, '- Stripe will retry');
       return sendJson(res, 500, { error: started.error });
     }
-    // Record the job against the session now that there is one. The `wx` create
-    // above was the lock; this is the content. #24 grows it into the order
-    // record; #27 is what lets the customer find it again.
-    if (!writeClaim(sessionId, {
-      sessionId, jobId: started.jobId, goal: meta.goal, voiceSet: meta.voiceSet,
-      claimedAt: claimedAt.toISOString(),
-    })) {
+    // Record the job against the order now that there is one. The `wx` create
+    // above was the lock; this is the content. #27 is what lets the customer
+    // find it again.
+    if (!writeClaim(sessionId, { ...order, jobId: started.jobId })) {
       // The render is running; only the link is lost. Not fatal, because the
       // job records the session itself — which is exactly why it does.
       console.error('could not link job', started.jobId, 'to session', sessionId,

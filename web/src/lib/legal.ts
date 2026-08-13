@@ -25,7 +25,13 @@ export const RETENTION_WINDOW = `${RETENTION_DAYS} days`
  *   - the app sets no cookie and writes nothing to localStorage/sessionStorage.
  *   - the server stores, per render: the goal and voice set chosen, progress
  *     state, the track manifest, a worker log, and the audio itself.
- *   - there are no accounts, so no name, email, or password is collected.
+ *   - since #24 it also stores, per purchase: the email address Stripe collects
+ *     at checkout, Stripe's payment reference, and the amount paid. This page
+ *     said the opposite until that change, and the sentence had to move with
+ *     the code — a privacy policy that is out of date is not a smaller problem
+ *     than one that was never written.
+ *   - card details are never seen by this service. Payment happens on Stripe's
+ *     own page; what comes back is a reference, not a number.
  */
 export const DATA_WE_KEEP: ReadonlyArray<{ what: string; why: string }> = [
   {
@@ -40,11 +46,37 @@ export const DATA_WE_KEEP: ReadonlyArray<{ what: string; why: string }> = [
     what: 'The audio files themselves',
     why: `So you can download them. Deleted automatically after ${RETENTION_WINDOW}.`,
   },
+  {
+    what: 'Your email address, as you entered it at checkout',
+    why:
+      'To send you your program and to reach you if a render fails. It is kept ' +
+      'with the record of your purchase and is not used for anything else — no ' +
+      'mailing list, and it is never sold or shared.',
+  },
+  {
+    what: "Stripe's reference for your payment, and the amount",
+    why:
+      'To issue a refund without asking you for anything, and as the record ' +
+      'that the purchase happened. Kept after the audio is deleted, because a ' +
+      'refund or a question can come later than that.',
+  },
 ]
 
 export const NO_ACCOUNT_NOTICE =
-  'There are no accounts. We do not ask for your name, email address, or a password, ' +
-  'and we do not have one on file for you.'
+  'There are no accounts. There is no password and nothing to sign in to, and we ' +
+  'do not ask for your name. The one thing we do have is the email address you ' +
+  'enter at checkout, which Stripe passes to us so we can send you your program.'
+
+/**
+ * Where the card details go — which is to say, not here.
+ *
+ * Worth stating plainly on a page that now admits to holding an email and a
+ * payment reference: the two facts are easily read together as "they have my
+ * card", and they should not be.
+ */
+export const CARD_DETAILS_NOTICE =
+  'Payment is handled entirely by Stripe, on their own page. This studio never ' +
+  'sees your card number and never stores it.'
 
 /**
  * The refund guarantee, stated once (#17).

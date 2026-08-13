@@ -224,10 +224,55 @@ reads the body separately from every other route: `JSON.stringify(JSON.parse(x))
 is not `x`, and verifying against a re-serialisation fails on genuine events.
 Parsing happens only after the signature checks out.
 
-Replay is handled by a claim file per session under `<RENDERS_DIR>/.sessions/`,
-created with the `wx` flag so the create *is* the lock — two concurrent
-deliveries of the same event cannot both pass. A claim is released again if the
-render fails to start, so Stripe's retry can still fulfil a paid order.
+Replay is handled by the order record under `<RENDERS_DIR>/.sessions/`, created
+with the `wx` flag so the create *is* the lock — two concurrent deliveries of
+the same event cannot both pass. It is never deleted; whether a paid order is
+still owed is answered from what the record and the jobs say, not from a clock.
+
+---
+
+## The order record (#24)
+
+One file per purchase, at `<RENDERS_DIR>/.sessions/<sessionId>.json`:
+
+```json
+{
+  "sessionId":     "cs_…",
+  "paymentIntent": "pi_…",
+  "email":         "buyer@example.com",
+  "amountTotal":   3900,
+  "currency":      "usd",
+  "goal":          "polymath",
+  "voiceSet":      "male",
+  "jobId":         "job_…",
+  "claimedAt":     "2026-08-13T…"
+}
+```
+
+**It is deliberately not inside the job directory.** `sweepExpiredJobs()`
+deletes whole job directories after `RETENTION_DAYS`, and an order stored there
+would be destroyed on day 31 — taking the payment reference and the customer
+email with it, exactly when a refund or a support query needs them. A refund
+request arrives *after* the audio is gone, not before. `JOB_DIR_RE` requires a
+`job_` prefix, so the sweep can never select `.sessions/`.
+
+The job holds a back-pointer (`<job>/order.json` → `{ sessionId }`), so
+`job → order` is one hop. A sidecar rather than a `status.json` field, for the
+same reason `worker.json` is one: the Python worker rewrites `status.json`
+wholesale on every transition and would erase it.
+
+`amountTotal` and `currency` record what was actually taken, not what
+`PROGRAM_PRICE_CENTS` happens to be later — a refund after a price change must
+return the amount paid.
+
+**It is never served.** `/api/jobs/<id>` merges `status.json` and
+`manifest.json` only, and `/api/jobs/<id>/files/<name>` is allowlisted from the
+manifest's tracks. Both are pinned by tests, because the endpoint is public and
+unauthenticated and the record holds an email address.
+
+Storing an email is a new category of personal data, so `/privacy` changed in
+the same commit — it used to say "we do not have one on file for you", which was
+true until it wasn't.
 
 Locally: `stripe listen --forward-to localhost:4100/api/stripe/webhook` prints a
 `whsec_` for the session.
