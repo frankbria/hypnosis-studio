@@ -357,6 +357,96 @@ test('a lost refund record cannot move the money twice', async () => {
 });
 
 // --------------------------------------------------------------------------
+// A paid order whose render never started
+// --------------------------------------------------------------------------
+
+test('an order that could never be rendered is refunded, not just logged', async () => {
+  // budget_exhausted is answered 422, which Stripe does not retry — so without
+  // this the customer has paid, has nothing, and no failure path ever runs
+  // because there is no job to fail.
+  const stripe = await fakeStripe();
+  const srv = await startServer({
+    engine: 'ok',
+    env: {
+      STRIPE_API_BASE: stripe.base, MONTHLY_CHAR_BUDGET: '1',
+      SWEEP_INTERVAL_MS: '300', REFUND_UNSTARTED_GRACE_MS: '100',
+    },
+  });
+  try {
+    const raw = paidEvent();
+    const res = await request(srv.port, 'POST', '/api/stripe/webhook', raw,
+      { 'Stripe-Signature': sign(raw) });
+    assert.strictEqual(res.status, 422, res.body);
+    assert.deepStrictEqual(jobs(srv.rendersDir), [], 'a render started with no budget');
+
+    await sleep(1500);
+    assert.strictEqual(stripe.refunds.length, 1, 'the customer was never refunded');
+    const order = readOrder(srv.rendersDir);
+    assert.strictEqual(order.refund.state, 'refunded');
+    assert.match(order.refund.reason, /budget_exhausted/);
+  } finally {
+    stop(srv); stripe.close();
+  }
+});
+
+test('a refused order is left alone while a retry could still fulfil it', async () => {
+  // Stripe retries a 500 within minutes. Refunding immediately would race the
+  // retry that is about to succeed.
+  const stripe = await fakeStripe();
+  const srv = await startServer({
+    engine: 'ok',
+    env: {
+      STRIPE_API_BASE: stripe.base, MONTHLY_CHAR_BUDGET: '1',
+      SWEEP_INTERVAL_MS: '300', REFUND_UNSTARTED_GRACE_MS: '900000',
+    },
+  });
+  try {
+    const raw = paidEvent();
+    await request(srv.port, 'POST', '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    await sleep(1200);
+    assert.deepStrictEqual(stripe.refunds, [],
+      'an order was refunded while its retry window was still open');
+  } finally {
+    stop(srv); stripe.close();
+  }
+});
+
+test('a refunded order is never rendered, however late the retry arrives', async () => {
+  // The money has gone back. Delivering afterwards would be giving the program
+  // away — and a late Stripe retry of a refused delivery is exactly how.
+  const stripe = await fakeStripe();
+  const srv = await startServer({
+    engine: 'ok',
+    env: {
+      STRIPE_API_BASE: stripe.base, MONTHLY_CHAR_BUDGET: '1',
+      SWEEP_INTERVAL_MS: '300', REFUND_UNSTARTED_GRACE_MS: '100',
+    },
+  });
+  try {
+    const raw = paidEvent();
+    await request(srv.port, 'POST', '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    await sleep(1500);
+    assert.strictEqual(readOrder(srv.rendersDir).refund.state, 'refunded');
+
+    // Stripe retries, long after. Age the claim so it is not simply "someone is
+    // mid-spawn", and give the studio budget again so nothing else refuses it.
+    const order = readOrder(srv.rendersDir);
+    order.claimedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    fs.writeFileSync(path.join(srv.rendersDir, '.sessions', 'cs_test_1.json'),
+      JSON.stringify(order));
+    const late = await request(srv.port, 'POST', '/api/stripe/webhook', raw,
+      { 'Stripe-Signature': sign(raw) });
+    assert.strictEqual(late.status, 200);
+    assert.strictEqual(late.json.duplicate, true);
+    await sleep(600);
+    assert.deepStrictEqual(jobs(srv.rendersDir), [],
+      'a refunded order was rendered anyway — the program was given away');
+  } finally {
+    stop(srv); stripe.close();
+  }
+});
+
+// --------------------------------------------------------------------------
 // The customer can see it
 // --------------------------------------------------------------------------
 

@@ -910,6 +910,11 @@ function jobsForSession(sessionId) {
 function claimIsRecoverable(claim, sessionId) {
   if (!claim || typeof claim !== 'object') return false;
 
+  // A refunded order must never render. The money has gone back; delivering
+  // afterwards would be giving the program away, and a late Stripe retry of a
+  // refusal is exactly how that would happen (#26).
+  if (claim.refund && claim.refund.state === 'refunded') return false;
+
   const jobIds = new Set(jobsForSession(sessionId));
   if (claim.jobId) jobIds.add(claim.jobId);
   if (jobIds.size > 0) {
@@ -1124,6 +1129,18 @@ const REFUND_CLAIM_STALE_MS = 5 * 60 * 1000;
 // disputed, say) does not call Stripe every minute forever.
 const REFUND_MAX_ATTEMPTS = 5;
 
+// How long a paid order whose render was REFUSED waits before it is refunded.
+//
+// A transient refusal is answered 500 and Stripe retries, so the order may yet
+// be fulfilled; a permanent one (`budget_exhausted`) is answered 422 and Stripe
+// never retries, so it would sit paid and undelivered forever. This window is
+// long enough for the first case and short enough that the second does not hold
+// someone's money for a day.
+const REFUND_UNSTARTED_GRACE_MS = (() => {
+  const n = parseInt(process.env.REFUND_UNSTARTED_GRACE_MS || '900000', 10);
+  return Number.isFinite(n) && n > 0 ? n : 15 * 60 * 1000;
+})();
+
 function readTextSafe(p) {
   try { return fs.readFileSync(p, 'utf8'); } catch { return ''; }
 }
@@ -1250,6 +1267,9 @@ function markRefund(sessionId, refund) {
 // public and unauthenticated, and #24 exists to keep the order off it. "Your
 // money is on its way back" is the whole of what someone needs here.
 function writeRefundStatus(jobId, state) {
+  // An order refunded before any render existed has no job to write to. The
+  // sweep refunds those, and nobody is watching a page for them.
+  if (!jobId) return;
   const st = readJsonSafe(path.join(jobDir(jobId), 'status.json'));
   if (!st) return;
   writeStatus(jobId, { ...st, refund: state });
@@ -1988,17 +2008,43 @@ function sweepOwedRefunds() {
   for (const name of names) {
     if (!name.endsWith('.json')) continue;
     const order = readJsonSafe(path.join(sessionsDir(), name));
-    if (!order || !order.refund || !order.jobId) continue;
-    if (order.refund.state === 'refunded') continue;
-    // Give up quietly after the cap. Each failed attempt already logged
-    // NEEDS A HUMAN; repeating that every sixty seconds forever buries it.
-    if ((order.refund.attempts || 0) >= REFUND_MAX_ATTEMPTS) continue;
-    console.warn('retrying an owed refund for session', order.sessionId,
-      `(attempt ${(order.refund.attempts || 0) + 1} of ${REFUND_MAX_ATTEMPTS})`);
-    refundOrder(order.jobId, {
-      reason: order.refund.reason || 'the render failed',
-      session: order.sessionId,
-    }).catch((e) => console.error('refund retry threw:', e && e.message));
+    if (!order || !order.paymentIntent) continue;
+    if (order.refund && order.refund.state === 'refunded') continue;
+
+    let reason;
+    if (order.refund) {
+      // An attempt was made and did not stick.
+      // Give up quietly after the cap. Each failed attempt already logged
+      // NEEDS A HUMAN; repeating that every sixty seconds forever buries it.
+      if ((order.refund.attempts || 0) >= REFUND_MAX_ATTEMPTS) continue;
+      reason = order.refund.reason || 'the render failed';
+    } else if (order.lastError && !order.jobId) {
+      // Paid, but the render was REFUSED and never existed — a spent monthly
+      // allowance, a full disk, a busy studio. No job means releaseJob never
+      // ran, so nothing has refunded this and nothing will.
+      //
+      // `budget_exhausted` is answered 422, which Stripe does not retry at all,
+      // so that order would sit paid and undelivered forever. The transient
+      // ones are answered 500 and Stripe does retry — hence the grace window,
+      // which is what separates "a retry is still coming" from "nobody is
+      // going to fulfil this".
+      //
+      // ponytail: a fixed window rather than tracking Stripe's retry schedule.
+      // The ceiling is that a retry arriving after it finds an order already
+      // refunded — which claimIsRecoverable now refuses to render, so the
+      // outcome is a refunded customer rather than a double delivery.
+      const age = Date.now() - Date.parse(order.lastErrorAt || order.claimedAt || 0);
+      if (!Number.isFinite(age) || age < REFUND_UNSTARTED_GRACE_MS) continue;
+      reason = `the studio could not start the render (${order.lastError})`;
+      console.error('PAID SESSION', order.sessionId, 'never rendered -', order.lastError,
+        '- refunding it');
+    } else {
+      continue;
+    }
+
+    console.warn('refunding an owed order for session', order.sessionId);
+    refundOrder(order.jobId || null, { reason, session: order.sessionId })
+      .catch((e) => console.error('refund retry threw:', e && e.message));
   }
 }
 
