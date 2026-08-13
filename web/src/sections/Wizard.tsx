@@ -74,6 +74,18 @@ const START_ERRORS: Record<string, string> = {
 
 const GENERIC_START_ERROR = 'The studio could not start your program.'
 
+/**
+ * Every voice clip the wizard can play, fetched ahead of the press (#81).
+ *
+ * Four files, ~70 KB each since they were re-encoded for speech. Module-level
+ * so the array identity is stable across renders, which is what the prefetch
+ * effect keys on.
+ */
+const PREVIEW_CLIPS: readonly string[] = VOICE_SETS.flatMap((v) => [
+  v.narrator.src,
+  v.whisper.src,
+]).filter((src, i, all) => all.indexOf(src) === i)
+
 // ─── Stepper ─────────────────────────────────────────────────────────────────
 
 function Stepper({ current }: { current: number }) {
@@ -168,7 +180,10 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
   const [starting, setStarting] = useState(false)
   const [checkoutBusy, setCheckoutBusy] = useState(false)
   const [checkoutError, setCheckoutError] = useState<CheckoutFailure | null>(null)
-  const audio = useAudioPreview()
+  // Warm the clips the voice step is about to offer. A module-level constant,
+  // so the prefetch effect keys on something stable — and every visitor who
+  // reaches the wizard sees this step, so there is nothing speculative about it.
+  const audio = useAudioPreview(PREVIEW_CLIPS)
 
   // Only what can be bought. Step 1 is the purchase screen: someone who has
   // already decided to pay was being shown two products they cannot have, one
@@ -438,6 +453,7 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
                             <AudioPreviewButton
                               src={voice.src}
                               playingSrc={audio.playingSrc}
+                              pendingSrc={audio.pendingSrc}
                               onToggle={audio.toggle}
                               // Not lowercased: the role now begins with "AI", and "ai narrator" is
                               // read aloud as a word by some screen readers rather than as
