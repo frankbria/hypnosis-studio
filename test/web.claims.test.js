@@ -143,7 +143,7 @@ test('the price on the page is the price the server charges', () => {
   // would flash the wrong price on the landing page for one paint; this test is
   // the cheaper guard.
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  const m = server.match(/PROGRAM_PRICE_CENTS \|\| '(\d+)'/);
+  const m = server.match(/DEFAULT_PROGRAM_PRICE_CENTS = (\d+)/);
   assert.ok(m, 'could not find the server price default');
   const cents = Number(m[1]);
 

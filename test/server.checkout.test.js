@@ -114,8 +114,24 @@ async function startServer(env = {}) {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  await sleep(1300);
+  // Poll rather than sleep a fixed interval. The sibling suites use a flat
+  // 1300 ms, which is a bet on how loaded the machine is — under CI load the
+  // first request lands before the listener and the failure looks like a bug in
+  // the endpoint. /api/health needs no configuration to answer.
+  await waitUntilListening(port);
   return { proc, port, rendersDir: dir };
+}
+
+async function waitUntilListening(port, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const res = await request(port, 'GET', '/api/health');
+      if (res.status === 200) return;
+    } catch { /* not up yet */ }
+    if (Date.now() > deadline) throw new Error(`server on ${port} never became ready`);
+    await sleep(50);
+  }
 }
 
 function stop({ proc, rendersDir }) {
@@ -167,8 +183,6 @@ test('the amount comes from the server, not the request', async () => {
     assert.strictEqual(form.get('line_items[0][price_data][unit_amount]'), '3900');
     assert.strictEqual(form.get('line_items[0][price_data][currency]'), 'usd');
     assert.strictEqual(form.get('line_items[0][quantity]'), '1');
-    // Nothing the caller sent may appear anywhere on the wire as an amount.
-    assert.ok(!/(^|[^0-9])1($|[^0-9])/.test(form.get('line_items[0][price_data][unit_amount]')));
     assert.ok(!stripe.calls[0].raw.includes('xxx'), 'client currency reached Stripe');
   } finally {
     stop(srv);
@@ -206,6 +220,145 @@ test('a nonsense price falls back to the documented default rather than charging
     });
     assert.strictEqual(res.status, 200, res.body);
     assert.strictEqual(stripe.calls[0].form.get('line_items[0][price_data][unit_amount]'), '3900');
+  } finally {
+    stop(srv);
+    stripe.close();
+  }
+});
+
+test('a scientific-notation price does not silently become one cent', async () => {
+  // parseInt('1e21', 10) is 1 — it stops at the 'e'. An operator writing that to
+  // mean "a lot" would charge $0.01, and Number.isInteger(1) is true, so the
+  // obvious guard waves it through. This is the assertion that the price is
+  // parsed as money rather than as whatever a lenient parser salvages.
+  const stripe = await fakeStripe();
+  const srv = await startServer({ STRIPE_API_BASE: stripe.base, PROGRAM_PRICE_CENTS: '1e21' });
+  try {
+    const res = await request(srv.port, 'POST', '/api/checkout', {
+      goal: 'polymath', voiceSet: 'male',
+    });
+    assert.strictEqual(res.status, 200, res.body);
+    assert.strictEqual(stripe.calls[0].form.get('line_items[0][price_data][unit_amount]'), '3900');
+  } finally {
+    stop(srv);
+    stripe.close();
+  }
+});
+
+test('a price past the safe integer range is refused, not rounded', async () => {
+  const stripe = await fakeStripe();
+  const srv = await startServer({
+    STRIPE_API_BASE: stripe.base,
+    PROGRAM_PRICE_CENTS: '99999999999999999999',
+  });
+  try {
+    await request(srv.port, 'POST', '/api/checkout', { goal: 'polymath', voiceSet: 'male' });
+    assert.strictEqual(stripe.calls[0].form.get('line_items[0][price_data][unit_amount]'), '3900');
+  } finally {
+    stop(srv);
+    stripe.close();
+  }
+});
+
+test('a currency Stripe would reject never reaches the moment of purchase', async () => {
+  const stripe = await fakeStripe();
+  const srv = await startServer({ STRIPE_API_BASE: stripe.base, PROGRAM_CURRENCY: 'dollars' });
+  try {
+    await request(srv.port, 'POST', '/api/checkout', { goal: 'polymath', voiceSet: 'male' });
+    assert.strictEqual(stripe.calls[0].form.get('line_items[0][price_data][currency]'), 'usd');
+  } finally {
+    stop(srv);
+    stripe.close();
+  }
+});
+
+test('a malformed return address disables checkout rather than 502ing at purchase', async () => {
+  // `hypnosisstudio.com` with no scheme builds a success_url Stripe rejects. The
+  // operator would see only checkout_unavailable, with nothing pointing at their
+  // env file. checkout_disabled is the code that means "you have not configured
+  // this", so that is the one they get.
+  const stripe = await fakeStripe();
+  const srv = await startServer({
+    STRIPE_API_BASE: stripe.base,
+    PUBLIC_BASE_URL: 'hypnosisstudio.com',
+  });
+  try {
+    const res = await request(srv.port, 'POST', '/api/checkout', {
+      goal: 'polymath', voiceSet: 'male',
+    });
+    assert.strictEqual(res.status, 503);
+    assert.strictEqual(res.json.error, 'checkout_disabled');
+    assert.deepStrictEqual(stripe.calls, []);
+  } finally {
+    stop(srv);
+    stripe.close();
+  }
+});
+
+test('a body of literal null is a client error, not an internal one', async () => {
+  // JSON.parse('null') succeeds and is not an object, so `body.goal` throws and
+  // the request backstop reports 500 for what is plainly a bad request.
+  const stripe = await fakeStripe();
+  const srv = await startServer({ STRIPE_API_BASE: stripe.base });
+  try {
+    const res = await new Promise((resolve, reject) => {
+      const r = http.request({
+        host: '127.0.0.1', port: srv.port, path: '/api/checkout', method: 'POST',
+        timeout: 5000,
+        headers: { 'Content-Type': 'application/json', 'Content-Length': 4 },
+      }, (res2) => {
+        let out = '';
+        res2.on('data', (c) => (out += c));
+        res2.on('end', () => resolve({ status: res2.statusCode, json: safeJson(out) }));
+      });
+      r.on('error', reject);
+      r.end('null');
+    });
+    assert.strictEqual(res.status, 422, 'a null body is reported as an internal error');
+    assert.strictEqual(res.json.error, 'goal_in_production');
+    assert.deepStrictEqual(stripe.calls, []);
+  } finally {
+    stop(srv);
+    stripe.close();
+  }
+});
+
+test('the number of sessions asked of Stripe is capped', async () => {
+  // /api/programs is gated by ACCESS_CODE, the daily quota and the monthly
+  // budget. /api/checkout can have none of those — it is what a customer who
+  // has not bought anything reaches — so a loop against it would otherwise run
+  // unbounded requests against our Stripe account.
+  const stripe = await fakeStripe();
+  const srv = await startServer({ STRIPE_API_BASE: stripe.base, CHECKOUT_MAX_PER_MINUTE: '3' });
+  try {
+    const codes = [];
+    for (let i = 0; i < 5; i += 1) {
+      const res = await request(srv.port, 'POST', '/api/checkout', {
+        goal: 'polymath', voiceSet: 'male',
+      });
+      codes.push(res.status);
+    }
+    assert.deepStrictEqual(codes, [200, 200, 200, 429, 429]);
+    assert.strictEqual(stripe.calls.length, 3, 'the cap did not bound calls to Stripe');
+  } finally {
+    stop(srv);
+    stripe.close();
+  }
+});
+
+test('a rejected request does not spend a slot in the cap', async () => {
+  // The cap exists to bound calls to Stripe. A 422 never makes one, so charging
+  // it a slot would let junk requests lock out real customers.
+  const stripe = await fakeStripe();
+  const srv = await startServer({ STRIPE_API_BASE: stripe.base, CHECKOUT_MAX_PER_MINUTE: '2' });
+  try {
+    for (let i = 0; i < 5; i += 1) {
+      await request(srv.port, 'POST', '/api/checkout', { goal: 'nope', voiceSet: 'male' });
+    }
+    const res = await request(srv.port, 'POST', '/api/checkout', {
+      goal: 'polymath', voiceSet: 'male',
+    });
+    assert.strictEqual(res.status, 200, res.body);
   } finally {
     stop(srv);
     stripe.close();

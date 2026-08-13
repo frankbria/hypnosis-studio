@@ -206,6 +206,19 @@ flash the wrong price for one paint — so a test in `test/web.claims.test.js`
 pins the two together, along with `PROGRAM_CURRENCY` against the `$` the site
 writes. Changing the price means changing both.
 
+### The cap on session creation
+
+`/api/programs` is gated by `ACCESS_CODE`, `MAX_JOBS_PER_DAY` and
+`MONTHLY_CHAR_BUDGET`. `/api/checkout` can have none of those — it is the
+endpoint a customer who has not bought anything must be able to reach — so
+`CHECKOUT_MAX_PER_MINUTE` (default 30) is what bounds a loop against it.
+
+It is a **global** cap, not per-IP: behind nginx every peer address is
+`127.0.0.1`, so a per-IP bucket would have to key on `X-Forwarded-For`, which a
+client can forge. The ceiling that buys is that one attacker can lock out real
+customers for a minute. Rejected (422) and unconfigured (503) requests never
+spend a slot, because they never reach Stripe.
+
 ### `PUBLIC_BASE_URL` is required, not derived
 
 Where Stripe returns the customer after paying or cancelling. The server refuses

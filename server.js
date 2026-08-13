@@ -154,28 +154,79 @@ const STRIPE_API_VERSION = '2024-06-20';
 // THE price. It lived only in the frontend bundle until now, which meant it was
 // whatever the browser said it was. Nothing in the request body may reach this
 // number — a test asserts that against every field name a tamperer would try.
-//
-// Same "nonsense lands on the documented default" shape as RETENTION_DAYS: a
-// negative is truthy, so `|| 3900` never fires, and unit_amount is signed on
-// Stripe's side. Charging minus thirty-nine dollars is a refund with extra
-// steps.
+const DEFAULT_PROGRAM_PRICE_CENTS = 3900;
+
+// Same "nonsense lands on the documented default" stance as RETENTION_DAYS, but
+// it cannot be written the same way, because parseInt is the wrong tool for
+// money. `parseInt('1e21', 10)` is **1** — it stops at the 'e' — so an operator
+// writing scientific notation to mean "a lot" would charge one cent, and
+// Number.isInteger(1) waves it through. Require plain digits instead, and use
+// isSafeInteger so a value past 2^53 cannot round on its way to Stripe.
 const PROGRAM_PRICE_CENTS = (() => {
-  const n = parseInt(process.env.PROGRAM_PRICE_CENTS || '3900', 10);
-  return Number.isInteger(n) && n > 0 ? n : 3900;
+  const raw = (process.env.PROGRAM_PRICE_CENTS || '').trim();
+  if (!raw) return DEFAULT_PROGRAM_PRICE_CENTS;
+  const n = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (Number.isSafeInteger(n) && n > 0) return n;
+  console.error('PROGRAM_PRICE_CENTS is not a whole number of cents:', raw,
+    '- charging the documented default instead');
+  return DEFAULT_PROGRAM_PRICE_CENTS;
 })();
+
 // The site writes the price with a '$'. A test pins this to that, because
 // setting it to gbp in production would charge £39 against a page saying $39
-// and nothing else in the system would notice.
-const PROGRAM_CURRENCY = (process.env.PROGRAM_CURRENCY || 'usd').toLowerCase();
+// and nothing else in the system would notice. A value Stripe would reject is
+// refused here rather than becoming an opaque 502 at the moment of purchase.
+const PROGRAM_CURRENCY = (() => {
+  const raw = (process.env.PROGRAM_CURRENCY || 'usd').trim().toLowerCase();
+  if (/^[a-z]{3}$/.test(raw)) return raw;
+  console.error('PROGRAM_CURRENCY is not a three-letter code:', raw, '- using usd');
+  return 'usd';
+})();
 
 // Where Stripe sends the customer back to. Required — NOT derived from the
 // request's Host header, which is attacker-controlled: a forged Host would make
 // success_url point at somebody else's site, and the customer would land there
 // straight after paying us. One env var is cheaper than being careful about
 // that forever.
-const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
+//
+// Validated at startup rather than trusted. A value like `hypnosisstudio.com`
+// (no scheme) builds a success_url Stripe rejects, and the operator would see
+// only `502 checkout_unavailable` at purchase time with nothing pointing at
+// their env file. Treating it as unset instead means they get
+// `checkout_disabled` — the code that means "you have not configured this" —
+// plus a log line naming the variable.
+const PUBLIC_BASE_URL = (() => {
+  const raw = (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (!raw) return '';
+  let parsed;
+  try { parsed = new URL(raw); } catch { parsed = null; }
+  if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')) {
+    console.error('PUBLIC_BASE_URL is not an http(s) URL:', raw,
+      '- checkout stays disabled');
+    return '';
+  }
+  return raw;
+})();
 
 const CHECKOUT_TIMEOUT_MS = 10000;
+
+// A ceiling on how many Checkout Sessions this service will ask Stripe for.
+//
+// /api/programs is gated by ACCESS_CODE, the daily quota and the monthly budget;
+// /api/checkout has none of those and cannot — it is the endpoint a customer who
+// has not bought anything yet must be able to reach. Without a cap, a loop
+// against it runs unbounded requests against our Stripe account.
+//
+// ponytail: deliberately a GLOBAL cap, not per-IP. Behind nginx every peer
+// address is 127.0.0.1, so a per-IP bucket would have to trust X-Forwarded-For,
+// which a client can forge — a bucket keyed on a forgeable value is not a
+// bucket. The ceiling that buys is that one attacker can lock out real
+// customers for a minute; move to a per-IP bucket keyed on a
+// trusted-proxy-verified address if that ever happens.
+const CHECKOUT_MAX_PER_MINUTE = (() => {
+  const n = parseInt(process.env.CHECKOUT_MAX_PER_MINUTE || '30', 10);
+  return Number.isInteger(n) && n > 0 ? n : 30;
+})();
 
 const SAFE_ID = /^[A-Za-z0-9_-]+$/;
 // Stricter than SAFE_ID, and only used by the retention sweep. Every job id is
@@ -215,7 +266,16 @@ function readBody(req) {
   return new Promise((resolve) => {
     let data = '';
     req.on('data', (c) => { data += c; if (data.length > 64 * 1024) req.destroy(); });
-    req.on('end', () => { try { resolve(JSON.parse(data || '{}')); } catch { resolve({}); } });
+    req.on('end', () => {
+      let parsed;
+      try { parsed = JSON.parse(data || '{}'); } catch { parsed = null; }
+      // A body of the literal `null` parses fine and is not an object, so every
+      // caller's first `body.field` read throws — which the request backstop
+      // turns into a 500 for what is plainly a client error. Guarded here rather
+      // than at each route: both callers would otherwise need the same check,
+      // and the next one would forget it.
+      resolve(parsed && typeof parsed === 'object' ? parsed : {});
+    });
   });
 }
 
@@ -670,6 +730,18 @@ function goalTitle(goal) {
   return goal.split('_').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
 }
 
+// Timestamps of the sessions asked for in the last minute. A plain array
+// because CHECKOUT_MAX_PER_MINUTE bounds its length — there is nothing to grow.
+const checkoutHits = [];
+
+function checkoutRateOk() {
+  const now = Date.now();
+  while (checkoutHits.length && now - checkoutHits[0] > 60000) checkoutHits.shift();
+  if (checkoutHits.length >= CHECKOUT_MAX_PER_MINUTE) return false;
+  checkoutHits.push(now);
+  return true;
+}
+
 // Create the Checkout Session. Every field is built here; the caller passes an
 // already-validated goal and voice set and nothing else.
 //
@@ -869,6 +941,12 @@ async function handleRequest(req, res) {
     // moment to find it out.
     if (!STRIPE_SECRET_KEY || !PUBLIC_BASE_URL) {
       return sendJson(res, 503, { error: 'checkout_disabled' });
+    }
+    // Last, so a rejected or unconfigured request never spends a slot — the cap
+    // exists to bound calls to Stripe, and those two never reach it.
+    if (!checkoutRateOk()) {
+      console.warn('checkout rate cap reached -', CHECKOUT_MAX_PER_MINUTE, 'per minute');
+      return sendJson(res, 429, { error: 'rate_limited' });
     }
     // NOTE: the body is read for `goal` and `voiceSet` and nothing else. No
     // amount, price or currency from the request reaches Stripe — that is the
