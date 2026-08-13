@@ -1,30 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import {
-  ArrowLeft,
-  ArrowRight,
-  Check,
-  CheckCircle2,
-  Clock,
-  Download,
-  Loader2,
-  Lock,
-  RotateCcw,
-  X,
-} from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
+import { useMemo, useState } from 'react'
+import { ArrowLeft, ArrowRight, Check, Clock, Loader2, Lock, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Progress } from '@/components/ui/progress'
 import { Textarea } from '@/components/ui/textarea'
 import { AudioPreviewButton } from '@/components/AudioPreviewButton'
 import { useAudioPreview } from '@/hooks/use-audio-preview'
 import {
   ATTESTATION,
   DISCLAIMER,
-  GENERATION_STAGES,
-  GENERATION_TOTAL_MS,
   GOALS,
   HEALING_NONMEDICAL,
   SAFETY_WARNING,
@@ -32,24 +17,17 @@ import {
   VOICE_SETS,
   buildTracks,
 } from '@/lib/data'
-import type { DoorId, TrackPhase, VoiceSet } from '@/lib/data'
-import {
-  REFUND_FAILED_ASSURANCE,
-  REFUND_ISSUED_ASSURANCE,
-  RENDER_FAILED_ASSURANCE,
-  RENDER_FAILURE_GUARANTEE,
-  SUPPORT_EMAIL,
-} from '@/lib/legal'
+import type { DoorId, VoiceSet } from '@/lib/data'
+import { RENDER_FAILURE_GUARANTEE } from '@/lib/legal'
 import { CHECKOUT_MESSAGE, startCheckout } from '@/lib/checkout'
 import type { CheckoutFailure } from '@/lib/checkout'
 import GoalCardText from '@/components/GoalCardText'
 import SiteFooter from '@/components/SiteFooter'
 import { cn } from '@/lib/utils'
 
-const STEP_LABELS = ['Goal', 'Voice', 'Review', 'Create', 'Program'] as const
-
-const fmtDuration = (sec: number) =>
-  `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, '0')}`
+// The wizard now ends at Review. Watching the render and downloading it live
+// at /program/<jobId>, which survives a reload and a closed tab (#27).
+const STEP_LABELS = ['Goal', 'Voice', 'Review'] as const
 
 interface WizardProps {
   door: DoorId
@@ -127,337 +105,6 @@ function StepHeader({
 
 // ─── Generation (real API + demo fallback) ──────────────────────────────────
 
-export interface ReadyTrack {
-  n: number
-  id: string
-  title: string
-  /**
-   * Typed as the union, not `string`. It was `string`, which is why the compiler
-   * never noticed the delivery screen showing "Mastery" where the purchase
-   * screen said "Suggestion" (#15).
-   */
-  phase: TrackPhase
-  durationSec: number
-  mp3: string
-  wav: string
-}
-
-export interface JobResult {
-  jobId: string
-  demo: boolean
-  tracks?: ReadyTrack[]
-}
-
-interface GenerationError {
-  message: string
-  retryable: boolean
-}
-
-const STAGE_INDEX: Record<string, number> = {
-  scripting: 0,
-  voicing: 1,
-  'whisper-layer': 2,
-  'entrainment-bed': 3,
-  'mastering-qa': 4,
-}
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-
-function GeneratingStep({
-  apiGoal,
-  voiceSetId,
-  custom,
-  accessCode,
-  onDone,
-  onBadCode,
-  onStartOver,
-}: {
-  apiGoal: string
-  voiceSetId: VoiceSet['id']
-  custom: string
-  accessCode: string
-  onDone: (result: JobResult) => void
-  onBadCode: () => void
-  onStartOver: () => void
-}) {
-  const [visibleStages, setVisibleStages] = useState(1)
-  const [progress, setProgress] = useState(0)
-  const [error, setError] = useState<GenerationError | null>(null)
-  const [runId, setRunId] = useState(0)
-  const onDoneRef = useRef(onDone)
-  onDoneRef.current = onDone
-  const onBadCodeRef = useRef(onBadCode)
-  onBadCodeRef.current = onBadCode
-
-  useEffect(() => {
-    let cancelled = false
-
-    // Static-preview fallback: stage the old mock flow when the API is unreachable.
-    async function mockFlow() {
-      const stageMs = GENERATION_TOTAL_MS / GENERATION_STAGES.length
-      const start = Date.now()
-      while (!cancelled) {
-        const elapsed = Date.now() - start
-        setProgress(Math.min(100, (elapsed / GENERATION_TOTAL_MS) * 100))
-        setVisibleStages(
-          Math.min(GENERATION_STAGES.length, Math.floor(elapsed / stageMs) + 1),
-        )
-        if (elapsed >= GENERATION_TOTAL_MS + 500) {
-          onDoneRef.current({ jobId: 'demo', demo: true })
-          return
-        }
-        await sleep(120)
-      }
-    }
-
-    async function poll(jobId: string) {
-      let failures = 0
-      // The refund is issued asynchronously the moment a job is declared
-      // failed, so `refund` lands a beat after `state: 'failed'` does. Settling
-      // on the failure copy at the first sight of `failed` therefore showed the
-      // hedged "if you were charged" wording — with Retry offered — to almost
-      // every customer whose money was already on its way back.
-      //
-      // So the poll waits a little longer for the answer, in short steps rather
-      // than another three-second one. The server writes `refund: 'none'` when
-      // there was never a payment, so an unpaid render does not wait at all.
-      let refundWaits = 0
-      let delay = 3000
-      while (!cancelled) {
-        await sleep(delay)
-        if (cancelled) return
-        try {
-          const r = await fetch(`/api/jobs/${jobId}`)
-          if (!r.ok) throw new Error(`status ${r.status}`)
-          failures = 0
-          const s = await r.json()
-          if (s.state === 'ready') {
-            setProgress(100)
-            setVisibleStages(GENERATION_STAGES.length)
-            onDoneRef.current({ jobId, demo: false, tracks: s.tracks })
-            return
-          }
-          if (s.state === 'failed') {
-            // Still resolving what happened to the money — give it a moment.
-            // Bounded, so a refund that never lands still reaches a screen.
-            if ((s.refund === undefined || s.refund === 'pending') && refundWaits < 8) {
-              refundWaits += 1
-              delay = 500
-              continue
-            }
-            // The server tells us what actually happened to the money (#26).
-            // Absent, the conditional wording stands — it is true whether or
-            // not payment is switched on. #30 branches the rest of this screen.
-            const assurance =
-              s.refund === 'refunded'
-                ? REFUND_ISSUED_ASSURANCE
-                : s.refund === 'failed'
-                  ? REFUND_FAILED_ASSURANCE
-                  : RENDER_FAILED_ASSURANCE
-            setError({
-              message: `${
-                s.error
-                  ? `The render didn't finish: ${s.error}`
-                  : "The render didn't finish."
-              } ${assurance}`,
-              // A refunded render is finished business. Offering Retry would
-              // start a second unpaid one, and the money is already back.
-              retryable: s.refund !== 'refunded',
-            })
-            return
-          }
-          const idx = STAGE_INDEX[s.stage] ?? 0
-          setVisibleStages(idx + 1)
-          setProgress(Math.round((s.progress ?? 0) * 100))
-        } catch {
-          failures += 1
-          if (failures >= 10) {
-            setError({
-              message: 'Lost contact with the studio — check your connection, then retry.',
-              retryable: true,
-            })
-            return
-          }
-        }
-      }
-    }
-
-    async function run() {
-      setError(null)
-      setProgress(0)
-      setVisibleStages(1)
-      let res: Response
-      try {
-        res = await fetch('/api/programs', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ goal: apiGoal, voiceSet: voiceSetId, custom, accessCode }),
-        })
-      } catch {
-        // API not reachable at all (static preview) — demo mode.
-        await mockFlow()
-        return
-      }
-      if (res.status === 403) {
-        onBadCodeRef.current()
-        return
-      }
-      if (res.status === 409) {
-        setError({
-          message: 'Another render is in progress — try again in a few minutes.',
-          retryable: true,
-        })
-        return
-      }
-      if (res.status === 422) {
-        setError({
-          message: "That program isn't in production yet — choose one of the available goals.",
-          retryable: false,
-        })
-        return
-      }
-      if (res.status === 429) {
-        setError({
-          message: "The studio's daily render limit is reached — please try again tomorrow.",
-          retryable: false,
-        })
-        return
-      }
-      if (res.status === 503) {
-        // The studio is refusing work it cannot deliver — a spent monthly
-        // allowance, or a renders volume it cannot write to. Distinct from 429:
-        // this one does not come back tomorrow on its own.
-        let reason = ''
-        try {
-          reason = ((await res.json()) as { error?: string }).error ?? ''
-        } catch {
-          reason = ''
-        }
-        // `rendering_requires_payment` is not a fault: the studio has switched
-        // the early-access code off because it now takes payment (#23). Telling
-        // someone to "try again shortly" would have them retrying a door that
-        // is never reopening.
-        const message =
-          reason === 'rendering_requires_payment'
-            ? 'Early access has closed — programs are now bought through checkout.'
-            : reason === 'budget_exhausted'
-              ? 'The studio is at capacity for this month and is not taking new programs right now. Nothing has been charged.'
-              : 'The studio is temporarily unavailable. Nothing has been charged — please try again shortly.'
-        setError({
-          message,
-          retryable: reason !== 'budget_exhausted' && reason !== 'rendering_requires_payment',
-        })
-        return
-      }
-      if (res.status === 404) {
-        // No API behind this host at all (static preview) — demo mode.
-        await mockFlow()
-        return
-      }
-      if (res.status !== 202) {
-        // Anything else is a real failure. It must NOT fall through to
-        // mockFlow(), which simulates a completed render — that would show
-        // "your program is ready" for a render that never started.
-        setError({
-          message: 'Something went wrong starting your program. Nothing has been charged — please try again.',
-          retryable: true,
-        })
-        return
-      }
-      const { jobId } = await res.json()
-      await poll(jobId)
-    }
-
-    run()
-    return () => {
-      cancelled = true
-    }
-  }, [runId, apiGoal, voiceSetId, custom, accessCode])
-
-  const complete = progress >= 100
-
-  if (error) {
-    return (
-      <div className="mx-auto max-w-md py-10 text-center">
-        <StepHeader
-          eyebrow="Creating your program"
-          title="Let's pause here."
-          copy={error.message}
-        />
-        <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
-          {error.retryable && (
-            <Button
-              size="lg"
-              onClick={() => setRunId((n) => n + 1)}
-              className="bg-primary text-primary-foreground hover:bg-violet-300"
-            >
-              <RotateCcw className="size-4" />
-              Retry
-            </Button>
-          )}
-          <Button
-            size="lg"
-            variant="outline"
-            onClick={onStartOver}
-            className="border-white/15 bg-transparent text-white/75 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white"
-          >
-            Start over
-          </Button>
-        </div>
-        {/*
-          #18 requires the address on the render-failure screen specifically.
-          This is the one moment a customer most needs a human, and until now
-          the screen offered Retry, Start over, and no way to reach anyone.
-        */}
-        <p className="mt-8 text-xs leading-relaxed text-white/60">
-          Still stuck?{' '}
-          <a
-            href={`mailto:${SUPPORT_EMAIL}`}
-            className="text-violet-300 underline underline-offset-2"
-          >
-            {SUPPORT_EMAIL}
-          </a>{' '}
-          — a person reads it.
-        </p>
-      </div>
-    )
-  }
-
-  return (
-    <div className="mx-auto max-w-md py-10">
-      <StepHeader
-        eyebrow="Creating your program"
-        title="Give the studio a moment."
-        copy="Script, voices, and entrainment bed — staged below as each pass completes. All four tracks render in one session; this takes ~15-20 minutes. You can safely wait here."
-      />
-      <Progress
-        value={progress}
-        className="h-1 bg-white/10 [&>div]:bg-violet-300"
-      />
-      <ol className="mt-10 space-y-4">
-        {GENERATION_STAGES.slice(0, visibleStages).map((stage, i) => {
-          const stageDone = i < visibleStages - 1 || complete
-          return (
-            <li
-              key={stage}
-              className="animate-fade-up flex items-center gap-3 text-sm"
-            >
-              {stageDone ? (
-                <CheckCircle2 className="size-4 shrink-0 text-violet-300" />
-              ) : (
-                <Loader2 className="size-4 shrink-0 animate-spin text-[#d4b87f]" />
-              )}
-              <span className={stageDone ? 'text-white/55' : 'text-white/90'}>
-                {stage}
-              </span>
-            </li>
-          )
-        })}
-      </ol>
-    </div>
-  )
-}
-
 // ─── Wizard ──────────────────────────────────────────────────────────────────
 
 export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps) {
@@ -469,7 +116,7 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
   const [attested, setAttested] = useState(false)
   const [accessCode, setAccessCode] = useState('')
   const [codeError, setCodeError] = useState<string | null>(null)
-  const [jobResult, setJobResult] = useState<JobResult | null>(null)
+  const [starting, setStarting] = useState(false)
   const [checkoutBusy, setCheckoutBusy] = useState(false)
   const [checkoutError, setCheckoutError] = useState<CheckoutFailure | null>(null)
   const audio = useAudioPreview()
@@ -492,29 +139,72 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
-  const reset = () => {
-    setGoalId(null)
-    setCustomText('')
-    setVoiceSetId(null)
-    setAgreed(false)
-    setAttested(false)
+  /**
+   * Start the render, then hand off to its own URL.
+   *
+   * The job id used to live only in this component's state, so a reload during
+   * a fifteen-minute render lost it for good (#27). The wizard's job ends the
+   * moment the render exists.
+   */
+  const startRender = async () => {
+    if (!goal || !voiceSet) return
+    setStarting(true)
     setCodeError(null)
-    setJobResult(null)
-    // A stale "Checkout is not open yet" would otherwise greet the next
-    // program's result screen, describing an attempt from the previous one.
-    setCheckoutBusy(false)
-    setCheckoutError(null)
-    goTo(0)
-  }
-
-  const handleDone = (result: JobResult) => {
-    setJobResult(result)
-    goTo(4)
-  }
-
-  const handleBadCode = () => {
-    setCodeError("That code didn't work — check it and try again.")
-    goTo(2)
+    let res: Response
+    try {
+      res = await fetch('/api/programs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          goal: goal.apiGoal ?? goal.id,
+          voiceSet: voiceSet.id,
+          custom: customText,
+          accessCode,
+        }),
+      })
+    } catch {
+      setStarting(false)
+      setCodeError("We couldn't reach the studio — check your connection and try again.")
+      return
+    }
+    if (res.status === 403) {
+      setStarting(false)
+      setCodeError("That code didn't work — check it and try again.")
+      return
+    }
+    if (res.status === 422) {
+      // Kept even though the UI filters unavailable goals: the API can still
+      // return it for a hand-crafted request, and deleting a server-error
+      // branch because the UI cannot trigger it is how a real 422 becomes an
+      // unhandled blank screen (#66).
+      setStarting(false)
+      setCodeError(
+        "That program isn't in production yet — choose one of the available goals.",
+      )
+      return
+    }
+    if (res.status !== 202) {
+      setStarting(false)
+      let reason = ''
+      try {
+        reason = ((await res.json()) as { error?: string }).error ?? ''
+      } catch {
+        reason = ''
+      }
+      // `rendering_requires_payment` is not a fault: early access has closed
+      // because the studio now takes payment (#23). Telling someone to try
+      // again would have them retrying a door that is not reopening.
+      setCodeError(
+        reason === 'rendering_requires_payment'
+          ? 'Early access has closed — programs are now bought through checkout.'
+          : reason === 'budget_exhausted' || reason === 'temporarily_unavailable'
+            ? 'The studio is at capacity and is not taking new programs right now.'
+            : "The studio couldn't start your program. Nothing has been charged — please try again.",
+      )
+      return
+    }
+    const { jobId } = (await res.json()) as { jobId: string }
+    onNavigate(`/program/${jobId}`)
   }
 
   const goalValid =
@@ -856,198 +546,6 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
             </section>
           )}
 
-          {/* ── Step 4 · Generating ───────────────────────── */}
-          {step === 3 && goal && voiceSet && (
-            <GeneratingStep
-              apiGoal={goal.apiGoal ?? goal.id}
-              voiceSetId={voiceSet.id}
-              custom={customText}
-              accessCode={accessCode}
-              onDone={handleDone}
-              onBadCode={handleBadCode}
-              onStartOver={reset}
-            />
-          )}
-
-          {/* ── Step 5 · Result ───────────────────────────── */}
-          {step === 4 && goal && voiceSet && jobResult && (
-            <section>
-              {(() => {
-                const realTracks = jobResult.demo ? undefined : jobResult.tracks
-                if (!realTracks || realTracks.length === 0) {
-                  // Demo fallback (API unreachable — e.g. static preview)
-                  return (
-                    <>
-                      <StepHeader
-                        eyebrow="Your program — demo"
-                        title="Your program is ready."
-                        copy={`Four tracks, voiced by ${voiceSet.narrator.name} with ${voiceSet.whisper.name} underneath. This demo plays short voice samples.`}
-                      />
-                      <div className="mx-auto grid max-w-4xl gap-4 sm:grid-cols-2">
-                        {tracks.map((track, i) => {
-                          const sample =
-                            i < 2 ? voiceSet.narrator : voiceSet.whisper
-                          return (
-                            <div
-                              key={track.numeral}
-                              className="rounded-2xl border border-white/10 bg-white/5 p-7"
-                            >
-                              <div className="flex items-center justify-between gap-3">
-                                <Badge
-                                  variant="outline"
-                                  className="rounded-full border-violet-300/30 px-3 py-1 text-[10px] font-normal uppercase tracking-[0.2em] text-violet-200/80"
-                                >
-                                  {track.phase}
-                                </Badge>
-                                <span className="flex items-center gap-1.5 text-xs text-white/40">
-                                  <Clock className="size-3" />
-                                  {track.duration}
-                                </span>
-                              </div>
-                              <h3 className="mt-5 text-sm font-medium leading-snug text-white/90">
-                                {track.title}
-                              </h3>
-                              <div className="mt-6 flex items-center justify-between gap-3 border-t border-white/5 pt-5">
-                                <span className="text-xs text-white/35">
-                                  Voice sample · {sample.name}
-                                </span>
-                                <AudioPreviewButton
-                                  src={sample.src}
-                                  playingSrc={audio.playingSrc}
-                                  onToggle={audio.toggle}
-                                  label={`${sample.name} voice sample`}
-                                />
-                              </div>
-                            </div>
-                          )
-                        })}
-                      </div>
-                      <p className="mt-8 text-center text-xs text-white/35">
-                        Demo preview — the studio API wasn't reachable, so this
-                        result is a staged sample, not a real render.
-                      </p>
-                    </>
-                  )
-                }
-                // Real render — all four tracks
-                const fileUrl = (name: string) =>
-                  `/api/jobs/${jobResult.jobId}/files/${encodeURIComponent(name)}`
-                return (
-                  <>
-                    <StepHeader
-                      eyebrow="Your program"
-                      title="Your program is ready."
-                      copy={`Four tracks, voiced by ${voiceSet.narrator.name} with ${voiceSet.whisper.name} underneath. Listen in order — each track builds on the last.`}
-                    />
-                    <div className="mx-auto grid max-w-4xl gap-4 sm:grid-cols-2">
-                      {realTracks.map((track) => (
-                        <div
-                          key={track.id}
-                          className="rounded-2xl border border-violet-300/30 bg-violet-300/5 p-7"
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <Badge
-                              variant="outline"
-                              className="rounded-full border-violet-300/30 px-3 py-1 text-[10px] font-normal uppercase tracking-[0.2em] text-violet-200/80"
-                            >
-                              {track.phase}
-                            </Badge>
-                            <span className="flex items-center gap-1.5 text-xs text-white/40">
-                              <Clock className="size-3" />
-                              {fmtDuration(track.durationSec)}
-                            </span>
-                          </div>
-                          <h3 className="mt-5 text-sm font-medium leading-snug text-white/90">
-                            {track.title}
-                          </h3>
-                          {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-                          <audio
-                            controls
-                            preload="none"
-                            src={fileUrl(track.mp3)}
-                            className="mt-5 w-full"
-                          />
-                          <div className="mt-5 flex gap-2 border-t border-white/5 pt-5">
-                            <Button
-                              asChild
-                              size="sm"
-                              variant="outline"
-                              className="border-white/15 bg-transparent text-white/75 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white"
-                            >
-                              <a href={fileUrl(track.mp3)} download={track.mp3}>
-                                <Download className="size-4" />
-                                Download MP3
-                              </a>
-                            </Button>
-                            <Button
-                              asChild
-                              size="sm"
-                              variant="outline"
-                              className="border-white/15 bg-transparent text-white/75 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white"
-                            >
-                              <a href={fileUrl(track.wav)} download={track.wav}>
-                                <Download className="size-4" />
-                                Download WAV
-                              </a>
-                            </Button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <p className="mt-8 text-center text-xs text-white/35">
-                      Save your files — this link lives as long as the studio
-                      keeps early-access renders on disk.
-                    </p>
-                  </>
-                )
-              })()}
-              <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
-                <Button
-                  size="lg"
-                  disabled={checkoutBusy}
-                  onClick={async () => {
-                    setCheckoutBusy(true)
-                    setCheckoutError(null)
-                    // Resolves to null only because the page is already
-                    // navigating to Stripe; there is nothing to do in that case.
-                    const failure = await startCheckout(
-                      goal.apiGoal ?? goal.id,
-                      voiceSet.id,
-                    )
-                    if (failure) {
-                      setCheckoutError(failure)
-                      setCheckoutBusy(false)
-                    }
-                  }}
-                  className="bg-primary text-primary-foreground hover:bg-violet-300 disabled:opacity-40"
-                >
-                  {checkoutBusy ? (
-                    <Loader2 className="size-4 animate-spin" />
-                  ) : (
-                    <Lock className="size-4" />
-                  )}
-                  {checkoutBusy ? 'Opening checkout…' : `Checkout · ${PROGRAM_PRICE}`}
-                </Button>
-                <Button
-                  size="lg"
-                  variant="outline"
-                  onClick={reset}
-                  className="border-white/15 bg-transparent text-white/75 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white"
-                >
-                  <RotateCcw className="size-4" />
-                  Create another
-                </Button>
-              </div>
-              {checkoutError && (
-                <p
-                  role="status"
-                  className="mt-4 text-center text-sm text-white/70"
-                >
-                  {CHECKOUT_MESSAGE[checkoutError]}
-                </p>
-              )}
-            </section>
-          )}
         </div>
 
         {/* Step navigation */}
@@ -1086,14 +584,59 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
               </Button>
             )}
             {step === 2 && (
-              <Button
-                onClick={() => goTo(3)}
-                disabled={!agreed || !attested || !accessCode.trim()}
-                className="bg-primary text-primary-foreground hover:bg-violet-300 disabled:opacity-30"
-              >
-                Generate my program
-                <ArrowRight className="size-4" />
-              </Button>
+              <div className="flex flex-col items-end gap-3">
+                <div className="flex flex-wrap items-center justify-end gap-3">
+                  {/*
+                    Buying starts where choosing ends. #22 parked the checkout
+                    button on the post-render screen, which only made sense
+                    while renders were free; this is the screen that shows the
+                    price and the consent the purchase is made under.
+                  */}
+                  <Button
+                    onClick={async () => {
+                      setCheckoutBusy(true)
+                      setCheckoutError(null)
+                      const failure = await startCheckout(
+                        goal ? (goal.apiGoal ?? goal.id) : '',
+                        voiceSet ? voiceSet.id : '',
+                      )
+                      if (failure) {
+                        setCheckoutError(failure)
+                        setCheckoutBusy(false)
+                      }
+                    }}
+                    disabled={!agreed || !attested || checkoutBusy || starting}
+                    className="bg-primary text-primary-foreground hover:bg-violet-300 disabled:opacity-30"
+                  >
+                    {checkoutBusy ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Lock className="size-4" />
+                    )}
+                    {checkoutBusy ? 'Opening checkout…' : `Checkout · ${PROGRAM_PRICE}`}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={startRender}
+                    disabled={
+                      !agreed || !attested || !accessCode.trim() || starting || checkoutBusy
+                    }
+                    className="border-white/15 bg-transparent text-white/75 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white disabled:opacity-30"
+                  >
+                    {starting ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <ArrowRight className="size-4" />
+                    )}
+                    {starting ? 'Starting…' : 'Use my early-access code'}
+                  </Button>
+                </div>
+                {checkoutError && (
+                  <p role="status" className="text-right text-sm text-white/70">
+                    {CHECKOUT_MESSAGE[checkoutError]}
+                  </p>
+                )}
+              </div>
             )}
           </div>
         )}

@@ -351,18 +351,24 @@ test('the failure screen states the refund definitely once it is done', () => {
     'the completed-refund wording still hedges about whether a charge happened');
   assert.match(text, /in full/i, 'the completed-refund wording does not say how much');
 
-  const wizard = codeOnly(WIZARD());
-  assert.match(wizard, /s\.refund === 'refunded'/,
+  const page = codeOnly(PROGRAM());
+  assert.match(page, /s\.refund === 'refunded'/,
     'the failure screen never consults what happened to the money');
-  assert.match(wizard, /REFUND_ISSUED_ASSURANCE/,
+  assert.match(page, /REFUND_ISSUED_ASSURANCE/,
     'the failure screen cannot state a completed refund');
 });
 
-test('a refunded render does not offer a retry', () => {
-  // The money is already back. Retry would start a second, unpaid render.
-  const wizard = codeOnly(WIZARD());
-  assert.match(wizard, /retryable: s\.refund !== 'refunded'/,
-    'a refunded render still offers Retry, which would render it again unpaid');
+test('a failed render offers no retry that would render it again', () => {
+  // The render already happened and was paid for. Since #27 the failure screen
+  // lives on the program page, which has no way to start a second one — a
+  // "Retry" there would either spend credits again or hand a refunded customer
+  // the program as well.
+  const page = codeOnly(PROGRAM());
+  const at = page.indexOf("kind === 'failed'");
+  assert.ok(at > 0, 'the program page has no failure screen');
+  const screen = page.slice(at, page.indexOf("kind === 'rendering'", at));
+  assert.ok(!/Retry|setRunId|api\/programs/.test(screen),
+    'the failure screen can start another render');
 });
 
 // --------------------------------------------------------------------------
@@ -421,7 +427,10 @@ test('the order record is not reachable from the public job status', () => {
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const at = server.indexOf("const jobMatch = url.match");
   assert.ok(at > 0, 'could not find the job status route');
-  const route = server.slice(at, server.indexOf('\n  }', at));
+  // Comments stripped: the route CARRIES a comment explaining why the order is
+  // deliberately not here, and a raw scan finds that explanation rather than
+  // any code. Fourth time this pattern has bitten in this repo.
+  const route = codeOnly(server.slice(at, server.indexOf('\n  }', at)));
   assert.ok(!/order|claimPath|sessionsDir|paymentIntent|email/i.test(route),
     'the public job status route now touches the order record');
 });
@@ -631,6 +640,8 @@ test('the privacy page matches the requests the site actually makes', () => {
 const LEGAL_TS = () => fs.readFileSync(path.join(WEB, 'lib', 'legal.ts'), 'utf8');
 const LEGAL_TSX = () => fs.readFileSync(path.join(WEB, 'sections', 'Legal.tsx'), 'utf8');
 const WIZARD = () => fs.readFileSync(path.join(WEB, 'sections', 'Wizard.tsx'), 'utf8');
+/** The render is watched at its own URL since #27; the screens moved there. */
+const PROGRAM = () => fs.readFileSync(path.join(WEB, 'sections', 'ProgramPage.tsx'), 'utf8');
 
 test('the refund page is reachable from the footer and the review step', () => {
   // #17's criteria name both surfaces. The footer is shared, so the link must be
@@ -713,10 +724,11 @@ test('the support address reaches the footer and the failure screen', () => {
 
   // The render-failure screen specifically: the one moment a customer most
   // needs a human. It offered Retry, Start over, and no way to reach anyone.
-  const wizard = codeOnly(WIZARD());
-  const at = wizard.indexOf('if (error) {');
+  // It lives on the program page since #27.
+  const page = codeOnly(PROGRAM());
+  const at = page.indexOf("kind === 'failed'");
   assert.ok(at > 0, 'could not find the failure screen');
-  const screen = wizard.slice(at, wizard.indexOf('\n  }', at));
+  const screen = page.slice(at, page.indexOf("kind === 'rendering'", at));
   assert.match(screen, /mailto:\$\{SUPPORT_EMAIL\}/,
     'the render-failure screen offers no way to reach a person');
 });
@@ -753,10 +765,10 @@ test('the render-failure message is true whether or not payment is live', () => 
   // It said "Nothing was charged — please try again", which is true only while
   // nothing is ever charged, and becomes a false claim about the customer's own
   // money in the screen they read straight after losing it.
-  const wizard = codeOnly(WIZARD());
-  assert.ok(!/Nothing was charged/i.test(wizard),
+  const surfaces = codeOnly(WIZARD()) + codeOnly(PROGRAM());
+  assert.ok(!/Nothing was charged/i.test(surfaces),
     'the failure copy still asserts nothing was charged');
-  assert.match(wizard, /\{RENDER_FAILED_ASSURANCE\}|RENDER_FAILED_ASSURANCE/,
+  assert.match(codeOnly(PROGRAM()), /RENDER_FAILED_ASSURANCE/,
     'the failure copy does not carry the refund assurance');
 
   const legal = LEGAL_TS();
@@ -802,20 +814,42 @@ test('generation stays disabled until BOTH boxes are checked', () => {
   assert.match(wizard, /const \[attested, setAttested\] = useState\(false\)/,
     'the attestation has no state of its own');
 
-  const gate = wizard.match(/disabled=\{![^}]*accessCode\.trim\(\)\}/);
-  assert.ok(gate, 'could not find the generate gate');
-  assert.match(gate[0], /!agreed/, 'the gate no longer requires the disclaimer');
-  assert.match(gate[0], /!attested/, 'the gate does not require the attestation');
+  // Both ways out of the review step — paying, and the early-access code — are
+  // gated on both boxes. Checking only one of them is how the other ships
+  // ungated.
+  const gates = wizard.match(/disabled=\{[^}]*\}/g) || [];
+  const consenting = gates.filter((g) => /!agreed/.test(g));
+  assert.ok(consenting.length >= 2,
+    `only ${consenting.length} action is gated on consent; both routes out of review must be`);
+  for (const gate of consenting) {
+    assert.match(gate, /!attested/, 'a gate requires the disclaimer but not the attestation');
+  }
+  assert.ok(gates.some((g) => /accessCode\.trim\(\)/.test(g)),
+    'the early-access route no longer requires a code');
 });
 
-test('the attestation resets when the wizard restarts', () => {
+test('the attestation cannot survive into someone else\'s session', () => {
   // A stale `true` would carry one person's attestation into the next person's
-  // session on a shared machine.
+  // session on a shared machine. Since #27 the wizard is unmounted rather than
+  // reset — leaving it, or starting a render, replaces it — so the guarantee is
+  // structural: the state cannot outlive the component.
+  const app = codeOnly(fs.readFileSync(path.join(WEB, 'App.tsx'), 'utf8'));
+  const branch = app.indexOf("view === 'landing' ?");
+  assert.ok(branch > 0, 'the wizard is no longer behind a view branch');
+  const wizardAt = app.indexOf('<Wizard', branch);
+  assert.ok(wizardAt > branch,
+    'the wizard is not conditionally mounted, so its state can outlive a visit');
+  // And starting a render navigates away, which unmounts it.
+  assert.match(codeOnly(WIZARD()), /onNavigate\(`\/program\//,
+    'the wizard does not hand off to the program URL, so it stays mounted');
+
   const wizard = codeOnly(WIZARD());
-  const at = wizard.indexOf('setAgreed(false)');
-  assert.ok(at > 0, 'the reset path no longer clears consent');
-  assert.match(wizard.slice(at, at + 120), /setAttested\(false\)/,
-    'the attestation is not cleared alongside consent on reset');
+  assert.match(wizard, /const \[attested, setAttested\] = useState\(false\)/,
+    'the attestation no longer starts false on mount');
+  // And nothing may keep it outside the component, where unmounting cannot
+  // clear it.
+  assert.ok(!/localStorage|sessionStorage/.test(wizard),
+    'the wizard persists state outside itself, so it can outlive the session');
 });
 
 test('the attestation states the contraindications the disclaimer names', () => {
@@ -1209,6 +1243,9 @@ test('the "not in production yet" error is unreachable through the UI', () => {
   const wizard = codeOnly(WIZARD());
   assert.match(wizard, /res\.status === 422/,
     'the 422 handler was deleted rather than made unreachable');
+  assert.ok(!/blank|throw/.test(wizard.slice(wizard.indexOf('res.status === 422'),
+    wizard.indexOf('res.status === 422') + 300)),
+    'the 422 branch no longer explains itself to the customer');
 
   const start = wizard.indexOf('const doorGoals');
   const decl = wizard.slice(start, start + 260);
