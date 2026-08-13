@@ -307,6 +307,67 @@ test('the policy pages say what is collected and how long it is kept', () => {
 });
 
 // --------------------------------------------------------------------------
+// The privacy page must match what the order record actually holds (#24)
+// --------------------------------------------------------------------------
+
+test('the privacy page does not deny holding an email the server stores', () => {
+  // Until #24 the page said "we do not have one on file for you", which was
+  // true. The order record now holds the address Stripe collects at checkout,
+  // and that sentence became a false statement about personal data on the exact
+  // page whose job is to be true about it.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const storesEmail = /email:\s*(?:typeof )?(?:details\.email|email)/.test(server)
+    || /\bemail,\s*$/m.test(server);
+  assert.ok(storesEmail, 'the server no longer stores an email — simplify this test');
+
+  const legal = LEGAL_TS();
+  const notice = legal.slice(legal.indexOf('export const NO_ACCOUNT_NOTICE'));
+  const text = notice.slice(0, notice.indexOf('\n\n')).replace(/'\s*\+\s*'/g, '');
+  assert.ok(!/do not (ask for your name, )?.*email/i.test(text)
+    || !/do not have one on file/i.test(text),
+    'the privacy page still denies having an email address on file');
+  assert.match(text, /email address you\s*enter at checkout|email address .*checkout/i,
+    'the notice does not say where the address comes from');
+});
+
+test('the stored inventory names the email and the payment reference', () => {
+  const legal = LEGAL_TS();
+  const at = legal.indexOf('export const DATA_WE_KEEP');
+  assert.ok(at > 0, 'DATA_WE_KEEP is missing');
+  const block = legal.slice(at, legal.indexOf('\n]', at));
+  assert.match(block, /email address/i, 'the inventory does not mention the email');
+  assert.match(block, /payment/i, 'the inventory does not mention the payment reference');
+  // And it must say the payment record outlives the audio, because it does.
+  assert.match(block, /after the audio is deleted|kept after/i,
+    'the inventory implies the payment record is deleted with the audio');
+});
+
+test('the privacy page says where card details go', () => {
+  // "We hold your email and a payment reference" reads as "they have my card"
+  // unless the opposite is stated.
+  const legal = LEGAL_TS();
+  assert.match(legal, /export const CARD_DETAILS_NOTICE/,
+    'nothing states that card details are never seen');
+  const at = legal.indexOf('export const CARD_DETAILS_NOTICE');
+  const text = legal.slice(at, legal.indexOf('\n\n', at)).replace(/'\s*\+\s*'/g, '');
+  assert.match(text, /never (sees|stores)/i, 'the notice does not say what is not stored');
+  assert.match(codeOnly(LEGAL_TSX()), /\{CARD_DETAILS_NOTICE\}/,
+    'the privacy page never renders the card notice');
+});
+
+test('the order record is not reachable from the public job status', () => {
+  // The runtime assertion lives in test/server.order.test.js. This one guards
+  // the shape: /api/jobs/<id> merges status.json and manifest.json, and adding
+  // the order to that merge would leak an email address to anyone with a job id.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const at = server.indexOf("const jobMatch = url.match");
+  assert.ok(at > 0, 'could not find the job status route');
+  const route = server.slice(at, server.indexOf('\n  }', at));
+  assert.ok(!/order|claimPath|sessionsDir|paymentIntent|email/i.test(route),
+    'the public job status route now touches the order record');
+});
+
+// --------------------------------------------------------------------------
 // Safety copy must be readable (#19) and the seizure warning must stand alone (#65)
 // --------------------------------------------------------------------------
 

@@ -3,6 +3,7 @@ import { DISCLAIMER } from '@/lib/data'
 import {
   DATA_WE_KEEP,
   DELIVERED_GOODS_NOTICE,
+  CARD_DETAILS_NOTICE,
   NO_ACCOUNT_NOTICE,
   NO_TRACKING_NOTICE,
   RENDER_FAILURE_GUARANTEE,
@@ -192,6 +193,7 @@ export function PrivacyPage({ onHome }: { onHome: () => void }) {
       <Section heading="No accounts, no tracking">
         <p>{NO_ACCOUNT_NOTICE}</p>
         <p>{NO_TRACKING_NOTICE}</p>
+        <p>{CARD_DETAILS_NOTICE}</p>
       </Section>
 
       <Section heading="What we store, and why">
