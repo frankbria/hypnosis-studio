@@ -119,10 +119,12 @@ test('only a purchasable tier gets a payment CTA', () => {
   assert.match(LANDING, /tier\.available \?/,
     'the pricing CTA is not gated on availability');
   const gate = LANDING.indexOf('tier.available ?');
-  const cta = LANDING.indexOf('onClick={onStart}', gate);
+  // Since #69 the CTA carries its own tier rather than calling a bare handler,
+  // so the purchase cannot land somewhere that has forgotten which tier it was.
+  const cta = LANDING.indexOf('onStart(tier.id)', gate);
   const elseArm = LANDING.indexOf(') : (', gate);
   assert.ok(cta > gate && cta < elseArm,
-    'onStart is not inside the available branch — an unbuyable tier can start a purchase');
+    'the purchase CTA is not inside the available branch — an unbuyable tier can start a purchase');
 });
 
 test('exactly one tier is purchasable today', () => {
@@ -304,6 +306,76 @@ test('the policy pages say what is collected and how long it is kept', () => {
   assert.match(legalPage, /RETENTION_WINDOW/, 'no retention window on the policy pages');
   assert.match(legalPage, /DATA_WE_KEEP/, 'the privacy page does not list what is stored');
   assert.match(legalPage, /DISCLAIMER/, 'the non-medical stance is not carried on the policy pages');
+});
+
+// --------------------------------------------------------------------------
+// A chosen tier must survive the click (#69)
+// --------------------------------------------------------------------------
+
+test('every tier has an id, and the ids are the ones the code routes on', () => {
+  // All three CTAs called the same bare `onStart`, so the tier was discarded
+  // the instant it was clicked: someone selecting the $129 personalized tier
+  // landed in the same one-off catalog flow as someone selecting $39.
+  const ids = [...PRICING_BLOCK.matchAll(/id: '([a-z]+)'/g)].map((m) => m[1]);
+  assert.strictEqual(ids.length, 3, `expected three tier ids, found ${ids.join(', ')}`);
+  assert.strictEqual(new Set(ids).size, 3, `tier ids are not unique: ${ids.join(', ')}`);
+
+  const union = DATA.match(/export type TierId =([^\n]+)/);
+  assert.ok(union, 'there is no TierId union');
+  const declared = [...union[1].matchAll(/'([a-z]+)'/g)].map((m) => m[1]).sort();
+  assert.deepStrictEqual(declared, ids.slice().sort(),
+    'the TierId union and the tiers themselves disagree');
+});
+
+test('no purchase can start without saying which tier it is', () => {
+  const landing = codeOnly(LANDING);
+  const bare = landing.match(/onClick=\{onStart\}/g);
+  assert.strictEqual(bare, null,
+    'a CTA still calls onStart with no tier, so the choice is discarded at the click');
+  assert.match(landing, /onStart\('program'\)/, 'the catalog CTA names no tier');
+  assert.match(landing, /onStart\(tier\.id\)/, 'the pricing CTA does not carry its own tier');
+});
+
+test('an unfulfillable tier is refused rather than quietly becoming the cheap one', () => {
+  // The failure mode this issue is about is a tier silently turning into a
+  // different one. A fallback that routed everything to the catalog flow would
+  // be the same bug wearing a switch statement.
+  const app = codeOnly(fs.readFileSync(path.join(WEB, 'App.tsx'), 'utf8'));
+  assert.match(app, /function startPurchase/, 'nothing owns the tier decision');
+  const fn = app.slice(app.indexOf('function startPurchase'));
+  const body = fn.slice(0, fn.indexOf('\n  }'));
+  assert.match(body, /next !== 'program'/,
+    'every tier routes to the same flow, which is what the issue is about');
+  assert.match(body, /return/, 'an unfulfillable tier still falls through to a purchase');
+});
+
+test('the nav CTA browses rather than entering a purchase', () => {
+  // A nav button that drops a visitor straight into a purchase decides which
+  // tier they wanted — and it decided "the cheapest" every time.
+  const landing = codeOnly(LANDING);
+  const fns = [...landing.matchAll(/^(?:export\s+(?:default\s+)?)?function (\w+)/gm)]
+    .map((m, i, all) => ({
+      name: m[1],
+      body: landing.slice(m.index, all[i + 1] ? all[i + 1].index : landing.length),
+    }));
+  for (const door of ['PerformanceLanding', 'HealingLanding']) {
+    const fn = fns.find((f) => f.name === door);
+    assert.ok(fn, `${door} no longer exists — update this test`);
+    const header = fn.body.slice(fn.body.indexOf('<header'), fn.body.indexOf('</header>'));
+    assert.ok(!/onStart/.test(header),
+      `${door}'s nav still starts a purchase instead of browsing`);
+    assert.match(header, /<a href="#(programs|practices)"/,
+      `${door}'s nav CTA does not scroll to anything`);
+  }
+});
+
+test('the price beside the buy button comes from the chosen tier', () => {
+  // The last place the choice could be forgotten. A hardcoded price would
+  // forget it at the final possible moment.
+  const wizard = codeOnly(WIZARD());
+  assert.match(wizard, /chosenTier\?\.price/,
+    'the buy button states a price that is not the chosen tier\'s');
+  assert.match(wizard, /tierById\(tier\)/, 'the wizard never resolves the chosen tier');
 });
 
 // --------------------------------------------------------------------------
@@ -1273,7 +1345,13 @@ test('the main offer does not claim the script is written for the buyer', () => 
 test('"personalized" survives only as the name of the tier that is not sold yet', () => {
   // #61 exempts the personalized tier — that tier genuinely would be. The point
   // is that the word must stay inside PRICING and not leak back into copy.
-  const outside = codeOnly(DATA).split('export const PRICING')[0];
+  // Identifiers are not copy. `TierId` is a union of tier ids, which exists so
+  // a chosen tier cannot be silently swapped for another (#69); the claim this
+  // test is about is prose sold to a visitor.
+  const outside = codeOnly(DATA)
+    .split('export const PRICING')[0]
+    .replace(/export type TierId =[^\n]*/g, '')
+    .replace(/\bid: '[a-z]+'/g, '');
   assert.ok(!/personali[sz]ed/i.test(outside),
     'the personalization claim has leaked out of the pricing tier into product copy');
 });

@@ -342,7 +342,19 @@ export function buildTracks(goal: Goal): Track[] {
 
 // ─── Pricing ─────────────────────────────────────────────────────────────────
 
+/**
+ * Which tier a customer chose (#69).
+ *
+ * All three CTAs used to call the same bare `onStart`, so the tier was
+ * discarded the instant it was clicked — someone selecting the $129
+ * personalized tier landed in the same one-off catalog flow as someone
+ * selecting $39. A tier CTA must never land somewhere that has forgotten the
+ * tier.
+ */
+export type TierId = 'program' | 'personalized' | 'studio'
+
 export interface PricingTier {
+  id: TierId
   name: string
   price: string
   cadence: string
@@ -380,6 +392,7 @@ export interface PricingTier {
  */
 export const PRICING: PricingTier[] = [
   {
+    id: 'program',
     name: 'Program',
     price: '$39',
     cadence: 'one-time',
@@ -393,6 +406,7 @@ export const PRICING: PricingTier[] = [
     ],
   },
   {
+    id: 'personalized',
     name: 'Personalized Program',
     price: '$129',
     cadence: 'one-time',
@@ -408,6 +422,7 @@ export const PRICING: PricingTier[] = [
     ],
   },
   {
+    id: 'studio',
     name: 'The Complete Studio',
     price: '$649',
     cadence: 'one-time',
@@ -423,6 +438,11 @@ export const PRICING: PricingTier[] = [
 ]
 
 export const PROGRAM_PRICE = '$39'
+
+/** The tier a customer chose, by id. */
+export function tierById(id: TierId): PricingTier | undefined {
+  return PRICING.find((t) => t.id === id)
+}
 
 // ─── Copy constants ──────────────────────────────────────────────────────────
 
