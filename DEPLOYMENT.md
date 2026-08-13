@@ -1,5 +1,7 @@
 # Deployment — prod-linode (45.33.41.124)
 
+> **Environment:** see [ENVIRONMENT.md](ENVIRONMENT.md) for where configuration comes from, which file production reads, and the ElevenLabs key scope.
+
 ## Architecture
 
 Push to `main` → GitHub Actions (environment `production`) → SSH (user `deploy`) → `/srv/hypnosis-studio` → **wait for no render in flight** → `sudo systemctl restart hypnosis-studio` → smoke test on 127.0.0.1:4100.

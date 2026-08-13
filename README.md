@@ -2,6 +2,8 @@
 
 Self-hypnosis program generator: the user picks a goal and a voice, and we script, voice, and master a multi-track audio program with entrainment beds — delivered as a simple download.
 
+Configuration: see [ENVIRONMENT.md](ENVIRONMENT.md).
+
 ## Status
 
 Infrastructure is live on prod-linode; the web app is currently a placeholder. See [DEPLOYMENT.md](DEPLOYMENT.md) for the full ops picture.
