@@ -307,6 +307,51 @@ test('the policy pages say what is collected and how long it is kept', () => {
 });
 
 // --------------------------------------------------------------------------
+// A program's URL has to survive being opened (#27)
+// --------------------------------------------------------------------------
+
+test('asset URLs are absolute, so a two-level route can boot at all', () => {
+  // vite's base was './'. Relative asset URLs resolve against the CURRENT path,
+  // so index.html served at /program/job_abc asked for
+  // /program/assets/index-*.js, which 404s — the app never boots and a reload
+  // lands on a blank page. That is the exact failure #27 exists to prevent, and
+  // it was invisible while every route was one level deep.
+  //
+  // A browser found it. Nothing else could: the source builds fine, the tests
+  // passed, and /performance kept working.
+  const config = fs.readFileSync(
+    path.join(__dirname, '..', 'web', 'vite.config.ts'), 'utf8');
+  const base = config.match(/base:\s*'([^']*)'/);
+  assert.ok(base, 'vite has no explicit base');
+  assert.strictEqual(base[1], '/',
+    `base is '${base[1]}'; a relative base breaks every route deeper than one level`);
+});
+
+test('the program route is resolved on first load, not only on navigation', () => {
+  // Reload and "open the link later" are the whole point. Resolving the job
+  // only in the click handler would work in the tab that started the render and
+  // nowhere else.
+  const app = codeOnly(fs.readFileSync(path.join(WEB, 'App.tsx'), 'utf8'));
+  assert.match(app, /useState<string \| null>\(\(\) => jobFromPath/,
+    'the job is not resolved from the path on first load');
+  const pop = app.slice(app.indexOf('const onPop'), app.indexOf('popstate'));
+  assert.match(pop, /jobFromPath/, 'back/forward does not resolve the program route');
+});
+
+test('an unknown program says so, rather than dead-ending', () => {
+  const page = codeOnly(PROGRAM());
+  assert.match(page, /kind: 'missing'/, 'a 404 from the job endpoint has no screen');
+  const at = page.indexOf("kind === 'missing'");
+  assert.ok(at > 0, 'the missing screen is never rendered');
+  const screen = page.slice(at, page.indexOf("kind === 'unreachable'", at));
+  assert.match(screen, /mailto:\$\{SUPPORT_EMAIL\}/,
+    'someone who lost their program is offered no person');
+  // And it must not confuse "gone" with "we cannot reach the studio right now".
+  assert.match(page, /kind: 'unreachable'/,
+    'a network failure is reported as a missing program');
+});
+
+// --------------------------------------------------------------------------
 // The refund the policy promises is the refund the code issues (#26)
 // --------------------------------------------------------------------------
 

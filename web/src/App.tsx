@@ -56,8 +56,11 @@ function doorFromPath(pathname: string): DoorId | null {
   return null
 }
 
-// vite base is './', so a trailing-slash URL like /healing/ would resolve
-// relative asset URLs against /healing/ and 404. Strip trailing slashes.
+// Trailing slashes are stripped so the URL bar stays tidy and routes match
+// exactly. (This also used to be load-bearing: with vite's base at './', a URL
+// like /healing/ resolved relative asset URLs against /healing/ and 404'd. The
+// base is absolute since #27, so that class of failure is gone — but an
+// unnormalised path would still miss the route table.)
 function normalizedPath(): string {
   const p = window.location.pathname
   if (p.length > 1 && p.endsWith('/')) {
