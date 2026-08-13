@@ -307,6 +307,65 @@ test('the policy pages say what is collected and how long it is kept', () => {
 });
 
 // --------------------------------------------------------------------------
+// The refund the policy promises is the refund the code issues (#26)
+// --------------------------------------------------------------------------
+
+test('the automatic refund the policy promises is actually implemented', () => {
+  // RENDER_FAILURE_GUARANTEE is written as a specification: "refunded in full,
+  // automatically... issued by the same system that noticed the failure". Each
+  // clause is checked against the server rather than trusted.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+
+  // "by the same system that noticed the failure" — hung off releaseJob, which
+  // every failure path already routes through.
+  const release = server.slice(server.indexOf('function releaseJob'));
+  assert.match(release.slice(0, release.indexOf('\n}')), /refundOrder\(/,
+    'nothing refunds the customer when a job is declared failed');
+
+  // "in full" — no amount is sent, which is what makes it the whole charge.
+  const fn = server.slice(server.indexOf('async function stripeRefund'));
+  const body = fn.slice(0, fn.indexOf('\n}\n'));
+  assert.match(body, /payment_intent/, 'the refund names no payment');
+  assert.ok(!/\bamount\b/.test(body),
+    'the refund sends an amount, so it is not the full refund the policy promises');
+
+  // "automatically" — no human, and idempotent, since two failure paths race.
+  assert.match(body, /Idempotency-Key/,
+    'the refund can be issued twice for one failure');
+});
+
+test('the failure screen states the refund definitely once it is done', () => {
+  // RENDER_FAILED_ASSURANCE is deliberately conditional ("if you were charged")
+  // so it is true whether or not payment is on. Once the server says the refund
+  // happened there is nothing conditional left, and hedging there reads as
+  // evasion in the one screen where that is least forgivable.
+  const legal = LEGAL_TS();
+  assert.match(legal, /export const REFUND_ISSUED_ASSURANCE/,
+    'there is no definite wording for a completed refund');
+  assert.match(legal, /export const REFUND_FAILED_ASSURANCE/,
+    'there is no wording for a refund that did not go through');
+
+  const issued = legal.slice(legal.indexOf('export const REFUND_ISSUED_ASSURANCE'));
+  const text = issued.slice(0, issued.indexOf('\n\n')).replace(/'\s*\+\s*'/g, '');
+  assert.ok(!/\bif you were charged\b/i.test(text),
+    'the completed-refund wording still hedges about whether a charge happened');
+  assert.match(text, /in full/i, 'the completed-refund wording does not say how much');
+
+  const wizard = codeOnly(WIZARD());
+  assert.match(wizard, /s\.refund === 'refunded'/,
+    'the failure screen never consults what happened to the money');
+  assert.match(wizard, /REFUND_ISSUED_ASSURANCE/,
+    'the failure screen cannot state a completed refund');
+});
+
+test('a refunded render does not offer a retry', () => {
+  // The money is already back. Retry would start a second, unpaid render.
+  const wizard = codeOnly(WIZARD());
+  assert.match(wizard, /retryable: s\.refund !== 'refunded'/,
+    'a refunded render still offers Retry, which would render it again unpaid');
+});
+
+// --------------------------------------------------------------------------
 // The privacy page must match what the order record actually holds (#24)
 // --------------------------------------------------------------------------
 

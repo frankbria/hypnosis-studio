@@ -34,6 +34,8 @@ import {
 } from '@/lib/data'
 import type { DoorId, TrackPhase, VoiceSet } from '@/lib/data'
 import {
+  REFUND_FAILED_ASSURANCE,
+  REFUND_ISSUED_ASSURANCE,
   RENDER_FAILED_ASSURANCE,
   RENDER_FAILURE_GUARANTEE,
   SUPPORT_EMAIL,
@@ -225,13 +227,24 @@ function GeneratingStep({
             return
           }
           if (s.state === 'failed') {
+            // The server tells us what actually happened to the money (#26).
+            // Absent, the conditional wording stands — it is true whether or
+            // not payment is switched on. #30 branches the rest of this screen.
+            const assurance =
+              s.refund === 'refunded'
+                ? REFUND_ISSUED_ASSURANCE
+                : s.refund === 'failed'
+                  ? REFUND_FAILED_ASSURANCE
+                  : RENDER_FAILED_ASSURANCE
             setError({
               message: `${
                 s.error
                   ? `The render didn't finish: ${s.error}`
                   : "The render didn't finish."
-              } ${RENDER_FAILED_ASSURANCE}`,
-              retryable: true,
+              } ${assurance}`,
+              // A refunded render is finished business. Offering Retry would
+              // start a second unpaid one, and the money is already back.
+              retryable: s.refund !== 'refunded',
             })
             return
           }
