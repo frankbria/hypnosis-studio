@@ -17,6 +17,9 @@ This file is the map.
 | `/srv/hypnosis-studio/engine/api.env` | systemd, as `EnvironmentFile` | service start | reread on restart |
 | `VITE_*` | Vite, at build time | `npm run build` | **baked into the bundle** |
 
+> **`engine/api.env` is on its way out.** It duplicates `.env` and is the reason
+> this page exists — see [Consolidating to one file](#consolidating-to-one-file).
+
 The third row is the one that surprises people. `VITE_*` variables are not read
 at runtime at all — Vite substitutes the literal value into the JavaScript when
 the bundle is built. Changing `VITE_SUPPORT_EMAIL` and restarting does nothing;
@@ -37,11 +40,57 @@ systemd EnvironmentFile  >  <repo>/.env  >  the default in server.js
 ### Which file do I put the key in?
 
 - **Locally:** `<repo>/.env`. Copy `.env.example` and fill it in.
-- **On the server:** `/srv/hypnosis-studio/engine/api.env`, which the systemd
-  unit loads. A `.env` in the deploy directory is not read by systemd and is not
-  the mechanism the service uses.
+- **On the server, today:** `/srv/hypnosis-studio/engine/api.env`, which the
+  systemd unit loads as an `EnvironmentFile`.
 
-Both work locally; only `api.env` is wired in production.
+**Two files is the state that caused this document to exist, and it should be
+one.** See the migration below.
+
+---
+
+## Consolidating to one file
+
+`engine/api.env` is misleadingly named: it is not engine-specific. It supplies
+`ACCESS_CODE` to Node, and Node passes its whole environment to the Python
+worker. Nothing about it belongs under `engine/`.
+
+Since `server.js` loads `.env` itself, **systemd does not need to supply
+configuration at all** — the `EnvironmentFile=` line can be removed, leaving one
+mechanism that behaves identically in development and production.
+
+    now:    systemd ──> engine/api.env  ┐
+            server.js ──> <repo>/.env   ┴─ two files, two mechanisms
+
+    after:  server.js ──> <repo>/.env   ─── one file, same as local
+
+### Migration, in an order that cannot break a render
+
+Each step is separately reversible, and the service keeps a working environment
+throughout. A deploy will not interfere: the workflow uses `scp` with an
+explicit source list, so it copies named paths and never deletes anything else.
+
+1. On the server, copy the file next to `server.js` — do not move it yet:
+
+       cd /srv/hypnosis-studio && cp engine/api.env .env
+
+   Both files now exist with the same contents. `server.js` reads `.env`;
+   systemd still reads `api.env`. The values are identical, so nothing changes.
+
+2. Restart and confirm a render still works end to end. If anything is wrong,
+   delete `.env` and you are back where you started.
+
+3. Remove `EnvironmentFile=/srv/hypnosis-studio/engine/api.env` from the systemd
+   unit, `systemctl daemon-reload`, restart, confirm again. Now only `.env` is
+   supplying anything.
+
+4. Delete `engine/api.env`.
+
+Do **not** reverse steps 1 and 3. Removing the `EnvironmentFile` before the new
+file exists starts the service with no `ELEVENLABS_API_KEY`, and the failure
+appears at the TTS step of the next paid render rather than at boot.
+
+The systemd unit is not in this repository (#43). Committing it there is what
+makes this change reviewable rather than a remembered server edit.
 
 ---
 
@@ -133,4 +182,6 @@ document, because the value is in git history either way.
    documented.
 3. If it is `VITE_*`, say in the comment that it is build-time and needs a
    rebuild.
-4. If production should set it, say which file: `api.env` on the server.
+4. If production should set it, say so. Once the consolidation above is done
+   that is `<repo>/.env` on the server and nowhere else; until then it is
+   `engine/api.env`.
