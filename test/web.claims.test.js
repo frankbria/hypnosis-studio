@@ -756,6 +756,33 @@ test('the support address is overridable without editing source', () => {
     '.env.example does not document the support address override');
 });
 
+test('the server and the site agree on the support address', () => {
+  // Since #28 the server writes it into the delivery email too. Two defaults
+  // for one address is how a customer is told to write somewhere the site does
+  // not show — and the email is the document they still have in three weeks.
+  const legal = LEGAL_TS();
+  const site = legal.match(/VITE_SUPPORT_EMAIL \|\| '([^']+)'/);
+  assert.ok(site, 'the site has no support address default');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const api = server.match(/SUPPORT_EMAIL \|\| '([^']+)'/);
+  assert.ok(api, 'the server has no support address default');
+  assert.strictEqual(api[1], site[1],
+    `the email says ${api[1]}; the site shows ${site[1]}`);
+});
+
+test('the delivery email states the window that actually deletes the files', () => {
+  // The email is read weeks later. A number typed into that copy would drift
+  // from the sweep that acts on it, exactly as the site's did before #21.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const at = server.indexOf('function deliveryEmail');
+  assert.ok(at > 0, 'there is no delivery email');
+  const body = server.slice(at, server.indexOf('\nfunction escapeHtml', at));
+  assert.match(body, /RETENTION_DAYS/,
+    'the email quotes a retention window that is not the real one');
+  assert.ok(!/\b30 days\b/.test(body), 'the retention window is hardcoded in the email copy');
+  assert.match(body, /SUPPORT_EMAIL/, 'the email names no way to reach a person');
+});
+
 test('the support address reaches the footer and the failure screen', () => {
   // #18's three criteria. The footer is shared, so putting it there covers
   // "both doors and inside the wizard" structurally rather than in three
