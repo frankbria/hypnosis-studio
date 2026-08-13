@@ -162,13 +162,19 @@ test('no secret value is written into a tracked file', () => {
         // An obvious placeholder is the point of .env.example.
         if (/replace|example|changeme|your[-_]|xxx|placeholder|<.*>/i.test(value)) continue;
 
-        // Two things make a string worth flagging: it is long enough to be a
-        // real credential, or it is prose. Documentation has no reason to
-        // contain a secret at any length — ACCESS_CODE's live value was 13
-        // characters and sat in DEPLOYMENT.md for the life of the repo.
-        const longEnoughToBeReal = value.length >= 20;
-        const isProse = /\.(md|txt|rst)$/i.test(rel);
-        if (!longEnoughToBeReal && !isProse) continue;
+        // No length gate. A named runtime secret is never legitimately
+        // hardcoded as a literal in a tracked file, at any length.
+        //
+        // The first version required >= 20 chars outside documentation, which
+        // let the guard miss its own target: ACCESS_CODE's live value was 13
+        // characters, so `ACCESS_CODE=polymath-2026` in .env.example, a .yml or
+        // a shell script sailed through — the file types where a value actually
+        // gets pasted. The original leak happened to be in a doc, which is the
+        // only reason the prose scan caught it.
+        //
+        // Type annotations are the one thing that reads like an assignment
+        // without being one.
+        if (/^(string|number|boolean|str|int|bool|any|unknown)$/i.test(value)) continue;
 
         offenders.push(`${rel}: ${secret} = ${value.slice(0, 4)}… (${value.length} chars)`);
       }
