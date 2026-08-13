@@ -18,3 +18,9 @@ web/dist/
 
 # voice preview clips ARE source assets — re-include them
 !web/public/voices/*.mp3
+
+# Planning and review documents (#18 follow-up, at the owner's request).
+# Untracked rather than deleted — the files stay on disk, they simply stop
+# being published. History still contains the earlier commits; removing those
+# would need a rewrite and a force-push, which is a separate decision.
+tasks/
