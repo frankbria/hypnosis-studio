@@ -339,6 +339,39 @@ customer to somebody else's site the instant after they paid us.
 
 ---
 
+## The retention floor (#103)
+
+`web/src/lib/legal.ts` bakes the retention window at **build** time, and /terms
+and /privacy state it in prose. The server reads `RETENTION_DAYS` at **run**
+time. So an operator reclaiming disk with `RETENTION_DAYS=7` would have the
+sweep deleting finished renders on day 7 while both policy pages continued to
+promise 30 — and the customer discovers it in week three, having already paid.
+
+**The server refuses to start** in that case, naming the value, the promise and
+where the promise is made. A failed deploy is the cheaper failure; nobody reads
+deploy logs.
+
+```
+RETENTION_DAYS=7 would delete finished renders sooner than the 30 days the site
+promises on /terms and /privacy.
+Refusing to start. Either raise RETENTION_DAYS, or change what the site says and
+set RETENTION_PROMISED_DAYS to match it.
+```
+
+The direction is asymmetric on purpose: **longer than the promise is fine** — we
+under-promised — and only a shortening override is refused.
+
+`RETENTION_PROMISED_DAYS` is the escape hatch, and it is deliberately a
+**declaration rather than a bypass**. Shortening retention means changing what
+the pages say *and* stating the new promise here. A flag called
+`ALLOW_SHORT_RETENTION` would let someone silence the check without changing
+anything a customer reads, which is the failure itself with an extra step.
+
+`ADVERTISED_RETENTION_DAYS` in `server.js` is pinned by test to the constant in
+`legal.ts`, so the floor is always the number the site actually shows.
+
+---
+
 ## The delivery email (#28)
 
 Nobody watches a progress bar for twenty minutes, so a finished program is

@@ -294,6 +294,40 @@ test('the advertised retention window matches what actually deletes the files', 
     `the site says ${declared[1]} days; the sweep deletes after ${m[1]}`);
 });
 
+test('the server knows what the site promises, not just what it defaults to', () => {
+  // #103: the site bakes the number at build time, so it cannot see an
+  // environment override. The floor the server refuses to go below has to BE
+  // that number, or the guard protects a value nobody advertises.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const advertised = server.match(/const ADVERTISED_RETENTION_DAYS = (\d+)/);
+  assert.ok(advertised, 'the server does not know what the site advertises');
+  const declared = LEGAL_LIB.match(/RETENTION_DAYS = (\d+)/);
+  assert.strictEqual(advertised[1], declared[1],
+    `the server guards ${advertised[1]} days; the site promises ${declared[1]}`);
+});
+
+test('shortening retention below the promise is a boot failure, not a log line', () => {
+  // The direction is asymmetric. Longer than the promise is harmless — we
+  // under-promised. Shorter deletes a customer's files while /terms still says
+  // they have another three weeks, and they find out by coming back.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const at = server.indexOf('if (RETENTION_DAYS < RETENTION_PROMISED_DAYS)');
+  assert.ok(at > 0, 'nothing stops a shortening override');
+  const guard = server.slice(at, server.indexOf('\n}', at));
+  assert.match(guard, /process\.exit\(1\)/,
+    'a shortening override only warns; nobody reads deploy logs');
+
+  // And the escape hatch must be a DECLARATION of the new promise, not a way to
+  // silence the check.
+  //
+  // Comments stripped: server.js NAMES the flag it deliberately does not have,
+  // in the comment explaining why. Fifth time this pattern has bitten here.
+  assert.ok(!/ALLOW_SHORT_RETENTION|SKIP_RETENTION|FORCE_RETENTION/i.test(codeOnly(server)),
+    'there is a flag that silences the check without changing what customers read');
+  assert.match(server, /RETENTION_PROMISED_DAYS/,
+    'there is no way to shorten retention even after changing what the site says');
+});
+
 test('the retention number appears once, not scattered through prose', () => {
   // Two pages quoting it separately is how they drift.
   const legalPage = fs.readFileSync(path.join(WEB, 'sections', 'Legal.tsx'), 'utf8');
