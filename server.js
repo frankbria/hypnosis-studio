@@ -74,6 +74,43 @@ const RETENTION_DAYS = (() => {
   const n = parseInt(process.env.RETENTION_DAYS || '30', 10);
   return Number.isInteger(n) && n > 0 ? n : 30;
 })();
+/**
+ * What the SITE promises (#103).
+ *
+ * web/src/lib/legal.ts bakes this number at build time and /terms and /privacy
+ * state it in prose, so it cannot see an environment override. Pinned to that
+ * constant by a test, because the two being equal is the whole point.
+ */
+const ADVERTISED_RETENTION_DAYS = 30;
+
+// What the site promises TODAY. Overridable only because the promise itself can
+// change — an operator who shortens retention must also have shortened what the
+// pages say, and saying so here is how they declare it. Deliberately NOT a
+// bypass flag: the invariant is "never delete sooner than you promised", and a
+// flag called `ALLOW_SHORT_RETENTION` would let someone silence it without
+// changing anything a customer reads.
+const RETENTION_PROMISED_DAYS = (() => {
+  const n = parseInt(process.env.RETENTION_PROMISED_DAYS || String(ADVERTISED_RETENTION_DAYS), 10);
+  return Number.isInteger(n) && n > 0 ? n : ADVERTISED_RETENTION_DAYS;
+})();
+
+// Refuse to run rather than quietly break a promise made at the point of sale.
+//
+// An override LONGER than the promise is harmless — we under-promised. A
+// shorter one deletes a customer's files on day 7 while /terms still says they
+// have until day 30, and they discover it in week three, having paid. There is
+// no log line loud enough for that, so this is a boot failure instead: the
+// deploy fails visibly rather than the customer failing silently.
+if (RETENTION_DAYS < RETENTION_PROMISED_DAYS) {
+  console.error(
+    `RETENTION_DAYS=${RETENTION_DAYS} would delete finished renders sooner than the `
+    + `${RETENTION_PROMISED_DAYS} days the site promises on /terms and /privacy.\n`
+    + 'Refusing to start. Either raise RETENTION_DAYS, or change what the site says '
+    + 'and set RETENTION_PROMISED_DAYS to match it.',
+  );
+  process.exit(1);
+}
+
 const RETENTION_DRY_RUN = process.env.RETENTION_DRY_RUN === '1';
 // `|| 6` treated 0 as absent, so an operator setting MAX_JOBS_PER_DAY=0 to stop
 // renders got six of them — the opposite of what they asked for, silently, on a

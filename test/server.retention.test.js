@@ -201,7 +201,7 @@ test('the window is configurable', async () => {
       makeJob(d, 'job_two_days', { state: 'ready', ageDays: 2 });
       makeJob(d, 'job_hours', { state: 'ready', ageDays: 0 });
     },
-    { RETENTION_DAYS: '1' },
+    { RETENTION_DAYS: '1', RETENTION_PROMISED_DAYS: '1' },
   );
   try {
     assert.strictEqual(s.exists('job_two_days'), false, 'older than RETENTION_DAYS=1');
@@ -433,4 +433,78 @@ test('an unwritable renders root does not kill the process', async (t) => {
     }
     s.stop();
   }
+});
+
+
+// --------------------------------------------------------------------------
+// A shortening override must not run at all (#103)
+// --------------------------------------------------------------------------
+
+const { spawn: spawnGuard } = require('node:child_process');
+
+/**
+ * Try to start the server and report how it exited.
+ *
+ * Distinct from boot() above, which waits for a listening server and returns a
+ * handle: the point here is the case where there IS no listening server.
+ */
+function tryBoot(env) {
+  return new Promise((resolve) => {
+    const proc = spawnGuard(process.execPath, [path.join(__dirname, '..', 'server.js')], {
+      cwd: path.join(__dirname, '..'),
+      env: {
+        ...process.env, HYPNO_NO_DOTENV: '1', PORT: '0',
+        RENDERS_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'floor-')),
+        ENGINE_PY: '/bin/false', SWEEP_INTERVAL_MS: '600000', ...env,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    proc.stdout.on('data', (c) => (out += c));
+    proc.stderr.on('data', (c) => (out += c));
+    // A server that starts successfully never exits, so give it a moment and
+    // then call it started.
+    const timer = setTimeout(() => {
+      proc.kill('SIGKILL');
+      resolve({ started: true, code: null, out });
+    }, 2000);
+    proc.on('exit', (code) => {
+      clearTimeout(timer);
+      resolve({ started: false, code, out });
+    });
+  });
+}
+
+test('a retention window shorter than the promise refuses to start', async () => {
+  // The failure this prevents is a customer coming back in week three to find
+  // the files they were promised until day 30 deleted on day 7. There is no log
+  // line loud enough for that, so the deploy fails instead.
+  const r = await tryBoot({ RETENTION_DAYS: '7' });
+  assert.strictEqual(r.started, false, 'the server started and would delete early');
+  assert.strictEqual(r.code, 1, `exited ${r.code}, so a deploy would not notice`);
+  assert.match(r.out, /RETENTION_DAYS=7/, 'the message does not name the value');
+  assert.match(r.out, /30 days the site promises/, 'the message does not name the promise');
+  assert.match(r.out, /\/terms/, 'the message does not say where the promise is made');
+});
+
+test('a longer retention window is fine — under-promising harms nobody', async () => {
+  const r = await tryBoot({ RETENTION_DAYS: '90' });
+  assert.strictEqual(r.started, true, `refused to start with a LONGER window: ${r.out}`);
+});
+
+test('the default starts, so nothing here breaks an ordinary deploy', async () => {
+  const r = await tryBoot({});
+  assert.strictEqual(r.started, true, `the default configuration refuses to start: ${r.out}`);
+});
+
+test('a shorter window runs once the site says the same thing', async () => {
+  // The escape hatch is a DECLARATION, not a bypass: an operator who shortens
+  // retention has to state what the pages now promise.
+  const r = await tryBoot({ RETENTION_DAYS: '7', RETENTION_PROMISED_DAYS: '7' });
+  assert.strictEqual(r.started, true, `a consistent short window refuses to start: ${r.out}`);
+});
+
+test('declaring a promise you do not keep still refuses', async () => {
+  const r = await tryBoot({ RETENTION_DAYS: '7', RETENTION_PROMISED_DAYS: '30' });
+  assert.strictEqual(r.started, false, 'the declaration is trusted over the actual window');
 });

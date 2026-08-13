@@ -336,7 +336,7 @@ test('the retention window in the email is the one that deletes the files', asyn
   // A number retyped into the copy would drift from the sweep that acts on it,
   // and the email is the document a customer still has in three weeks.
   const mail = await fakeMail();
-  const srv = await startServer({ env: { EMAIL_API_BASE: mail.base, RETENTION_DAYS: '7' } });
+  const srv = await startServer({ env: { EMAIL_API_BASE: mail.base, RETENTION_DAYS: '7', RETENTION_PROMISED_DAYS: '7' } });
   try {
     await pay(srv);
     assert.ok(/7 days/.test(mail.sent[0].text), mail.sent[0].text);

@@ -200,7 +200,7 @@ test('the order says when the files expire', async () => {
 
 test('the expiry follows the retention window that actually deletes the files', async () => {
   const mail = await fakeMail();
-  const srv = await startServer({ EMAIL_API_BASE: mail.base, RETENTION_DAYS: '7' });
+  const srv = await startServer({ EMAIL_API_BASE: mail.base, RETENTION_DAYS: '7', RETENTION_PROMISED_DAYS: '7' });
   try {
     await pay(srv);
     const res = await request(srv.port, 'GET', '/api/orders/cs_test_1');
