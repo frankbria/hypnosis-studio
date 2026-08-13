@@ -111,6 +111,31 @@ export const RENDER_FAILED_ASSURANCE =
   'If you were charged, your refund is already on its way. You do not need to ask for it.'
 
 /**
+ * When the server has told us the refund is actually done (#26).
+ *
+ * `RENDER_FAILED_ASSURANCE` above is deliberately conditional, because it has
+ * to be true whether or not payment is switched on. Once the job status says
+ * `refund: 'refunded'` there is nothing conditional left, and hedging at that
+ * point reads as evasion in the one screen where it would be least forgivable.
+ *
+ * #30 branches the whole failure screen on payment state; this is the half #26
+ * can state on its own.
+ */
+export const REFUND_ISSUED_ASSURANCE =
+  'Your payment has been refunded in full. It should reach your card within a ' +
+  'few working days, depending on your bank.'
+
+/**
+ * When the refund was attempted and did not go through.
+ *
+ * Never silently downgraded to the hopeful message: the customer has paid and
+ * has nothing, and the one useful thing this screen can do is point at a person.
+ */
+export const REFUND_FAILED_ASSURANCE =
+  'We could not complete your refund automatically. You are owed it in full — ' +
+  'please contact us and we will sort it out straight away.'
+
+/**
  * Why there is no automatic refund after a successful render.
  *
  * Stated plainly rather than buried: the audio is downloadable the moment it

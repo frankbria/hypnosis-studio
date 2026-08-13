@@ -726,9 +726,20 @@ function workerAlive(id) {
 
 // Both ledgers, at every point a job can be declared failed. Separate functions
 // would mean four call sites to keep in step.
+//
+// Since #26 this is also where the customer's MONEY goes back. Every path that
+// declares a job failed already routed through here — the worker exit handler,
+// failToStart, and the stale sweep — and none of them run on success, so it is
+// the one hook the refund needs rather than three.
 function releaseJob(id) {
   releaseQuota(id);
   refundBudget(id);
+  // Deliberately not awaited. Every caller is a synchronous callback — a child
+  // 'exit' handler or a sweep timer — where a rejection is an
+  // uncaughtException rather than something the request backstop can catch.
+  // refundOrder never throws and never rejects; the .catch is the belt to that
+  // brace.
+  refundOrder(id).catch((e) => console.error('refund path threw for', id, e && e.message));
 }
 
 function startWorker(id, goal, voiceSet) {
@@ -898,6 +909,20 @@ function jobsForSession(sessionId) {
 // and recoverable by a person; over-delivering is money already gone.
 function claimIsRecoverable(claim, sessionId) {
   if (!claim || typeof claim !== 'object') return false;
+
+  // Once a refund has been STARTED, this order is settled as money and must
+  // never render (#26). Not just `refunded`:
+  //
+  //   pending  — the refund is in flight; rendering now races it, and the
+  //              customer would end up with the program and their money back.
+  //   failed   — the sweep still owes them the refund, so the same race is
+  //              merely slower.
+  //
+  // Which leaves the customer of a permanently unrefundable order with
+  // neither, deliberately: that case is already logged as NEEDS A HUMAN, and
+  // whether to hand over the program or the money is a decision for the human,
+  // not something to resolve by giving away both.
+  if (claim.refund) return false;
 
   const jobIds = new Set(jobsForSession(sessionId));
   if (claim.jobId) jobIds.add(claim.jobId);
@@ -1089,6 +1114,209 @@ async function capacityProblem(goal, voiceSet) {
     return `the voice provider has ${credit} characters left, this program needs ${cost}`;
   }
   return null;
+}
+
+// ---- refunds (#26) ---------------------------------------------------------
+//
+// web/src/lib/legal.ts states the policy this implements, and states it as a
+// specification rather than a description:
+//
+//   "If your render fails, you are refunded in full, automatically. You do not
+//    have to ask, and you do not have to prove anything — the refund is issued
+//    by the same system that noticed the failure."
+//
+// So: full amount, no human in the loop, hung off the existing detection.
+
+const REFUND_TIMEOUT_MS = 10000;
+
+// How long a refund claim may sit before it is treated as abandoned by a
+// crashed process. Long enough that a slow Stripe call is never overtaken.
+const REFUND_CLAIM_STALE_MS = 5 * 60 * 1000;
+
+// How many times the sweep will re-attempt an owed refund before leaving it to
+// a person. Bounded so a permanently rejected refund (a payment already
+// disputed, say) does not call Stripe every minute forever.
+const REFUND_MAX_ATTEMPTS = 5;
+
+// How long a paid order whose render was REFUSED waits before it is refunded.
+//
+// A transient refusal is answered 500 and Stripe retries, so the order may yet
+// be fulfilled; a permanent one (`budget_exhausted`) is answered 422 and Stripe
+// never retries, so it would sit paid and undelivered forever. This window is
+// long enough for the first case and short enough that the second does not hold
+// someone's money for a day.
+const REFUND_UNSTARTED_GRACE_MS = (() => {
+  const n = parseInt(process.env.REFUND_UNSTARTED_GRACE_MS || '900000', 10);
+  return Number.isFinite(n) && n > 0 ? n : 15 * 60 * 1000;
+})();
+
+function readTextSafe(p) {
+  try { return fs.readFileSync(p, 'utf8'); } catch { return ''; }
+}
+
+function refundClaimPath(sessionId) {
+  return path.join(sessionsDir(), `${sessionId}.refunding`);
+}
+
+// Refund the order this job belongs to, if it has one and has not been refunded
+// already. Never throws and never rejects — see releaseJob().
+//
+// Idempotency has three independent layers, because this moves real money and
+// the two callers genuinely race (a worker can exit at the moment the sweep
+// decides it is stale):
+//
+//   1. an atomic `wx` claim file, so the filesystem picks the winner;
+//   2. the recorded state on the order, so a later sweep does not repeat it;
+//   3. a stable Idempotency-Key at Stripe, which holds even when 1 and 2 are
+//      lost — a crash between claiming and confirming leaves Stripe itself as
+//      the thing that refuses the duplicate.
+async function refundOrder(jobId, { reason = 'the render failed', session = null } = {}) {
+  let sessionId = null;
+  try {
+    if (session) {
+      // Supplied by the sweep, which reads the orders directly. The job's
+      // back-pointer is inside the job directory, and retention deletes that
+      // after RETENTION_DAYS — an owed refund must not become unretryable
+      // just because the audio has aged out.
+      sessionId = session;
+    } else {
+      const link = readJsonSafe(path.join(jobDir(jobId), 'order.json'));
+      // No order: this render was never paid for (the ACCESS_CODE path, or a
+      // prototype run). Nothing to give back — but say so, rather than leaving
+      // the field absent. The page watching this job cannot tell "no refund is
+      // coming" from "the refund has not landed yet" unless we tell it, and it
+      // would sit waiting for something that is never going to arrive.
+      if (!link || typeof link.sessionId !== 'string') {
+        writeRefundStatus(jobId, 'none');
+        return;
+      }
+      sessionId = link.sessionId;
+    }
+
+    const order = readJsonSafe(claimPath(sessionId));
+    if (!order) {
+      console.error('refund: job', jobId, 'names session', sessionId, 'but there is no order');
+      writeRefundStatus(jobId, 'failed');
+      return;
+    }
+    if (order.refund && order.refund.state === 'refunded') return;   // already done
+    if (!order.paymentIntent) {
+      console.error('refund: order', sessionId, 'has no payment reference - NEEDS A HUMAN');
+      writeRefundStatus(jobId, 'failed');
+      return;
+    }
+    if (!STRIPE_SECRET_KEY) {
+      console.error('refund: order', sessionId, 'is owed a refund but no Stripe key is set',
+        '- NEEDS A HUMAN');
+      writeRefundStatus(jobId, 'failed');
+      return;
+    }
+
+    // Layer 1. The create IS the lock; a second caller loses here.
+    try {
+      fs.writeFileSync(refundClaimPath(sessionId), String(Date.now()), { flag: 'wx' });
+    } catch (e) {
+      if (e.code !== 'EEXIST') {
+        console.error('refund: could not claim', sessionId, e && e.message);
+        return;
+      }
+      // Taken. Usually that means another caller is mid-refund and this one
+      // should stand down. But a crash between claiming and releasing would
+      // otherwise leave the claim forever, and with it an order that can never
+      // be refunded — so an old claim is treated as abandoned. Safe to take
+      // over because the Idempotency-Key means a genuine overlap is one refund
+      // at Stripe, not two.
+      const claimedAt = Number(readTextSafe(refundClaimPath(sessionId)));
+      if (Number.isFinite(claimedAt) && Date.now() - claimedAt < REFUND_CLAIM_STALE_MS) return;
+      console.warn('refund: taking over an abandoned claim for', sessionId);
+    }
+
+    const attempts = ((order.refund && order.refund.attempts) || 0) + 1;
+    markRefund(sessionId, { state: 'pending', reason, attempts, at: new Date().toISOString() });
+    const result = await stripeRefund(order.paymentIntent, sessionId);
+
+    if (result.ok) {
+      markRefund(sessionId, {
+        state: 'refunded', reason, attempts, refundId: result.id,
+        amount: order.amountTotal, currency: order.currency,
+        at: new Date().toISOString(),
+      });
+      writeRefundStatus(jobId, 'refunded');
+      console.log('refunded', order.amountTotal, order.currency, 'for failed job', jobId,
+        `(session ${sessionId}, refund ${result.id})`);
+    } else {
+      markRefund(sessionId, {
+        state: 'failed', reason, attempts, error: result.error, at: new Date().toISOString(),
+      });
+      writeRefundStatus(jobId, 'failed');
+      console.error('refund FAILED for', sessionId, '-', result.error,
+        '- NEEDS A HUMAN. The customer paid and has nothing.');
+    }
+    // Released either way. A failed attempt must be retryable — by the sweep,
+    // or by a person — and the Idempotency-Key is what makes that safe.
+    try { fs.unlinkSync(refundClaimPath(sessionId)); } catch { /* nothing to undo */ }
+  } catch (e) {
+    console.error('refund: unexpected failure for job', jobId, e && e.message);
+    if (sessionId) {
+      try { fs.unlinkSync(refundClaimPath(sessionId)); } catch { /* nothing to undo */ }
+    }
+  }
+}
+
+// Record the refund on the order, preserving everything else about it.
+function markRefund(sessionId, refund) {
+  const order = readJsonSafe(claimPath(sessionId));
+  if (!order) return false;
+  return writeClaim(sessionId, { ...order, refund });
+}
+
+// Tell the CUSTOMER, through the one file the job status endpoint serves.
+//
+// Deliberately only a state, with no refund id and no amount: /api/jobs/<id> is
+// public and unauthenticated, and #24 exists to keep the order off it. "Your
+// money is on its way back" is the whole of what someone needs here.
+function writeRefundStatus(jobId, state) {
+  // An order refunded before any render existed has no job to write to. The
+  // sweep refunds those, and nobody is watching a page for them.
+  if (!jobId) return;
+  const st = readJsonSafe(path.join(jobDir(jobId), 'status.json'));
+  if (!st) return;
+  writeStatus(jobId, { ...st, refund: state });
+}
+
+async function stripeRefund(paymentIntent, sessionId) {
+  const form = new URLSearchParams({ payment_intent: paymentIntent });
+  let r;
+  try {
+    r = await fetch(`${STRIPE_API_BASE}/v1/refunds`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${STRIPE_SECRET_KEY}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Stripe-Version': STRIPE_API_VERSION,
+        // Layer 3, and the only one that survives losing the filesystem. Keyed
+        // on the session so every retry of THIS order's refund is the same
+        // request as far as Stripe is concerned.
+        'Idempotency-Key': `refund-${sessionId}`,
+      },
+      body: form,
+      signal: AbortSignal.timeout(REFUND_TIMEOUT_MS),
+    });
+  } catch (e) {
+    return { ok: false, error: `request failed: ${e && e.message}` };
+  }
+  let json = null;
+  try { json = await r.json(); } catch { /* handled below */ }
+  if (!r.ok) {
+    return {
+      ok: false,
+      error: `HTTP ${r.status}: ${(json && json.error && json.error.message) || '(no message)'}`,
+    };
+  }
+  if (!json || typeof json.id !== 'string') {
+    return { ok: false, error: 'the refund response had no id' };
+  }
+  return { ok: true, id: json.id };
 }
 
 // ---- starting a render ----
@@ -1773,10 +2001,67 @@ function sweepExpiredJobs() {
   }
 }
 
+// Money the studio still owes back.
+//
+// The refund normally happens the moment a job is declared failed. This exists
+// for the ways that attempt can be lost: a Stripe blip, or the process dying
+// between claiming the refund and confirming it. Without it those become a
+// customer who paid, received nothing, and is never refunded — the outcome the
+// policy on /refunds explicitly rules out.
+//
+// Safe to re-attempt because the Idempotency-Key is keyed on the session, so
+// every retry is the same request as far as Stripe is concerned.
+function sweepOwedRefunds() {
+  let names;
+  try { names = fs.readdirSync(sessionsDir()); } catch { return; }
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    const order = readJsonSafe(path.join(sessionsDir(), name));
+    if (!order || !order.paymentIntent) continue;
+    if (order.refund && order.refund.state === 'refunded') continue;
+
+    let reason;
+    if (order.refund) {
+      // An attempt was made and did not stick.
+      // Give up quietly after the cap. Each failed attempt already logged
+      // NEEDS A HUMAN; repeating that every sixty seconds forever buries it.
+      if ((order.refund.attempts || 0) >= REFUND_MAX_ATTEMPTS) continue;
+      reason = order.refund.reason || 'the render failed';
+    } else if (order.lastError && !order.jobId) {
+      // Paid, but the render was REFUSED and never existed — a spent monthly
+      // allowance, a full disk, a busy studio. No job means releaseJob never
+      // ran, so nothing has refunded this and nothing will.
+      //
+      // `budget_exhausted` is answered 422, which Stripe does not retry at all,
+      // so that order would sit paid and undelivered forever. The transient
+      // ones are answered 500 and Stripe does retry — hence the grace window,
+      // which is what separates "a retry is still coming" from "nobody is
+      // going to fulfil this".
+      //
+      // ponytail: a fixed window rather than tracking Stripe's retry schedule.
+      // The ceiling is that a retry arriving after it finds an order already
+      // refunded — which claimIsRecoverable now refuses to render, so the
+      // outcome is a refunded customer rather than a double delivery.
+      const age = Date.now() - Date.parse(order.lastErrorAt || order.claimedAt || 0);
+      if (!Number.isFinite(age) || age < REFUND_UNSTARTED_GRACE_MS) continue;
+      reason = `the studio could not start the render (${order.lastError})`;
+      console.error('PAID SESSION', order.sessionId, 'never rendered -', order.lastError,
+        '- refunding it');
+    } else {
+      continue;
+    }
+
+    console.warn('refunding an owed order for session', order.sessionId);
+    refundOrder(order.jobId || null, { reason, session: order.sessionId })
+      .catch((e) => console.error('refund retry threw:', e && e.message));
+  }
+}
+
 // Order matters: failing a stale job refreshes its updatedAt, so its retention
 // clock starts from the terminal state rather than from when it hung.
 function sweepJobs() {
   sweepStaleJobs();
+  sweepOwedRefunds();
   sweepExpiredJobs();
 }
 // Overridable for the same reason RENDERS_DIR and ENGINE_PY are: a 60 s tick is

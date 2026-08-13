@@ -34,6 +34,8 @@ import {
 } from '@/lib/data'
 import type { DoorId, TrackPhase, VoiceSet } from '@/lib/data'
 import {
+  REFUND_FAILED_ASSURANCE,
+  REFUND_ISSUED_ASSURANCE,
   RENDER_FAILED_ASSURANCE,
   RENDER_FAILURE_GUARANTEE,
   SUPPORT_EMAIL,
@@ -210,8 +212,19 @@ function GeneratingStep({
 
     async function poll(jobId: string) {
       let failures = 0
+      // The refund is issued asynchronously the moment a job is declared
+      // failed, so `refund` lands a beat after `state: 'failed'` does. Settling
+      // on the failure copy at the first sight of `failed` therefore showed the
+      // hedged "if you were charged" wording — with Retry offered — to almost
+      // every customer whose money was already on its way back.
+      //
+      // So the poll waits a little longer for the answer, in short steps rather
+      // than another three-second one. The server writes `refund: 'none'` when
+      // there was never a payment, so an unpaid render does not wait at all.
+      let refundWaits = 0
+      let delay = 3000
       while (!cancelled) {
-        await sleep(3000)
+        await sleep(delay)
         if (cancelled) return
         try {
           const r = await fetch(`/api/jobs/${jobId}`)
@@ -225,13 +238,31 @@ function GeneratingStep({
             return
           }
           if (s.state === 'failed') {
+            // Still resolving what happened to the money — give it a moment.
+            // Bounded, so a refund that never lands still reaches a screen.
+            if ((s.refund === undefined || s.refund === 'pending') && refundWaits < 8) {
+              refundWaits += 1
+              delay = 500
+              continue
+            }
+            // The server tells us what actually happened to the money (#26).
+            // Absent, the conditional wording stands — it is true whether or
+            // not payment is switched on. #30 branches the rest of this screen.
+            const assurance =
+              s.refund === 'refunded'
+                ? REFUND_ISSUED_ASSURANCE
+                : s.refund === 'failed'
+                  ? REFUND_FAILED_ASSURANCE
+                  : RENDER_FAILED_ASSURANCE
             setError({
               message: `${
                 s.error
                   ? `The render didn't finish: ${s.error}`
                   : "The render didn't finish."
-              } ${RENDER_FAILED_ASSURANCE}`,
-              retryable: true,
+              } ${assurance}`,
+              // A refunded render is finished business. Offering Retry would
+              // start a second unpaid one, and the money is already back.
+              retryable: s.refund !== 'refunded',
             })
             return
           }
