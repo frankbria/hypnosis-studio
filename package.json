@@ -5,6 +5,6 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node --test test/*.test.js"
+    "test": "HYPNO_NO_DOTENV=1 node --test test/*.test.js"
   }
 }
