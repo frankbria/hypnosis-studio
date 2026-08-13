@@ -325,10 +325,23 @@ test('resend does not answer more slowly for an address it knows', async () => {
   // The other half of not leaking: a response that takes longer when it finds
   // something is the same disclosure, measured with a stopwatch. The search
   // runs AFTER the response, so it cannot be timed.
+  //
+  // Seeded with many orders, because the leak is proportional to how much
+  // scanning happens before the answer goes out. Even so this is a SMOKE check,
+  // not the real guard: a few hundred small files scan in single-digit
+  // milliseconds, so it cannot resolve the difference on a fast disk. The
+  // assertion with teeth is the structural one below.
   const mail = await fakeMail();
   const srv = await startServer({ EMAIL_API_BASE: mail.base });
   try {
     await pay(srv);
+    const sessions = path.join(srv.rendersDir, '.sessions');
+    for (let i = 0; i < 200; i += 1) {
+      fs.writeFileSync(path.join(sessions, `cs_filler_${i}.json`), JSON.stringify({
+        sessionId: `cs_filler_${i}`, email: `filler${i}@example.com`,
+        jobId: 'job_nonexistent', paymentIntent: 'pi_x',
+      }));
+    }
     const time = async (email) => {
       const t = Date.now();
       await request(srv.port, 'POST', '/api/orders/resend', JSON.stringify({ email }));
@@ -343,6 +356,29 @@ test('resend does not answer more slowly for an address it knows', async () => {
   } finally {
     stop(srv); mail.close();
   }
+});
+
+test('the resend search runs off the request path, not before the answer', () => {
+  // The structural guard, and the one with teeth. An async function runs
+  // SYNCHRONOUSLY up to its first await, and resendOrderLinks only reaches one
+  // when it finds a match — so calling it directly made an unknown address pay
+  // for the whole scan before the response went out, while a known address
+  // yielded early. That is the enumeration leak, measured with a stopwatch
+  // instead of read off a status code.
+  //
+  // A timing test cannot pin this: the difference is milliseconds on a fast
+  // disk and grows only with the order count. What pins it is that the scan is
+  // deferred, so the answer cannot depend on it at all.
+  const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+  const at = src.indexOf("url === '/api/orders/resend'");
+  assert.ok(at > 0, 'the resend route is gone');
+  const route = src.slice(at, src.indexOf('\n  }', at));
+  assert.match(route, /setImmediate\(/,
+    'the resend scan runs on the request path, so an unknown address is measurably slower');
+  const call = route.indexOf('resendOrderLinks(');
+  const defer = route.indexOf('setImmediate(');
+  assert.ok(defer >= 0 && defer < call,
+    'resendOrderLinks is called before it is deferred');
 });
 
 test('resend is capped, and the cap does not become a signal either', async () => {

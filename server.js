@@ -2167,7 +2167,15 @@ async function handleRequest(req, res) {
     }
     const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
     if (!email) return same();
-    resendOrderLinks(email).catch((e) => console.error('resend threw:', e && e.message));
+    // setImmediate, not a bare call. An async function runs SYNCHRONOUSLY up to
+    // its first await, and resendOrderLinks only reaches one when it finds a
+    // match — so calling it directly made an unknown address pay for the entire
+    // scan before the response went out, while a known address yielded early.
+    // That is the enumeration leak this endpoint exists to avoid, measured with
+    // a stopwatch instead of read off a status code.
+    setImmediate(() => {
+      resendOrderLinks(email).catch((e) => console.error('resend threw:', e && e.message));
+    });
     return same();
   }
 
