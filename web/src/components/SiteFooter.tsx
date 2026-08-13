@@ -1,4 +1,5 @@
 import { Moon } from 'lucide-react'
+import { SUPPORT_EMAIL } from '@/lib/legal'
 
 /**
  * One footer for every surface.
@@ -54,6 +55,18 @@ export default function SiteFooter({
           </a>
           <a href="/refunds" onClick={go('/refunds')} className="transition-colors hover:text-white">
             Refunds
+          </a>
+          {/*
+            #18: this was <a href="#top">Contact</a> — it scrolled the page up
+            and went nowhere. The footer is shared by every surface, so putting
+            the real address here satisfies "available on both doors and inside
+            the wizard" structurally rather than in three places.
+          */}
+          <a
+            href={`mailto:${SUPPORT_EMAIL}`}
+            className="transition-colors hover:text-white"
+          >
+            Contact
           </a>
         </nav>
       </div>

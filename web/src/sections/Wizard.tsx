@@ -33,7 +33,11 @@ import {
   buildTracks,
 } from '@/lib/data'
 import type { DoorId, TrackPhase, VoiceSet } from '@/lib/data'
-import { RENDER_FAILED_ASSURANCE, RENDER_FAILURE_GUARANTEE } from '@/lib/legal'
+import {
+  RENDER_FAILED_ASSURANCE,
+  RENDER_FAILURE_GUARANTEE,
+  SUPPORT_EMAIL,
+} from '@/lib/legal'
 import GoalCardText from '@/components/GoalCardText'
 import SiteFooter from '@/components/SiteFooter'
 import { cn } from '@/lib/utils'
@@ -360,6 +364,21 @@ function GeneratingStep({
             Start over
           </Button>
         </div>
+        {/*
+          #18 requires the address on the render-failure screen specifically.
+          This is the one moment a customer most needs a human, and until now
+          the screen offered Retry, Start over, and no way to reach anyone.
+        */}
+        <p className="mt-8 text-xs leading-relaxed text-white/60">
+          Still stuck?{' '}
+          <a
+            href={`mailto:${SUPPORT_EMAIL}`}
+            className="text-violet-300 underline underline-offset-2"
+          >
+            {SUPPORT_EMAIL}
+          </a>{' '}
+          — a person reads it.
+        </p>
       </div>
     )
   }
