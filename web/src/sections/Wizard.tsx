@@ -203,7 +203,24 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
       )
       return
     }
-    const { jobId } = (await res.json()) as { jobId: string }
+    // Guarded: an unparseable body here would reject the handler and leave
+    // `starting` true, disabling both ways out of this screen with nothing
+    // said. And a body without a jobId would navigate to /program/undefined,
+    // which reads as "deleted after 30 days" for a render that just started.
+    let jobId: unknown
+    try {
+      jobId = ((await res.json()) as { jobId?: unknown }).jobId
+    } catch {
+      jobId = undefined
+    }
+    if (typeof jobId !== 'string' || jobId === '') {
+      setStarting(false)
+      setCodeError(
+        'Your program started, but the studio did not say where to find it. ' +
+          'Please get in touch before trying again.',
+      )
+      return
+    }
     onNavigate(`/program/${jobId}`)
   }
 

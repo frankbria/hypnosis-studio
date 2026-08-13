@@ -72,6 +72,7 @@ type Screen =
   | { kind: 'rendering'; stages: number; progress: number }
   | { kind: 'ready'; tracks: ReadyTrack[]; voices: VoiceSet | null }
   | { kind: 'failed'; message: string; refunded: boolean }
+  | { kind: 'empty' }
   | { kind: 'missing' }
   | { kind: 'unreachable' }
 
@@ -184,9 +185,18 @@ export default function ProgramPage({
         }
 
         if (s.state === 'ready') {
+          // Ready, but nothing to hand over. Reachable from a legacy
+          // single-track manifest or an unreadable manifest.json — and
+          // "Your program is ready." above an empty grid is the worst possible
+          // way to say it. The old result step had a guard for this; the move
+          // dropped it.
+          if (!s.tracks || s.tracks.length === 0) {
+            setScreen({ kind: 'empty' })
+            return
+          }
           setScreen({
             kind: 'ready',
-            tracks: s.tracks ?? [],
+            tracks: s.tracks,
             voices: VOICE_SETS.find((v) => v.id === s.voiceSet) ?? null,
           })
           return
@@ -268,6 +278,29 @@ export default function ProgramPage({
               {SUPPORT_EMAIL}
             </a>{' '}
             — a person reads it.
+          </p>
+        </div>
+      </Frame>
+    )
+  }
+
+  if (screen.kind === 'empty') {
+    return (
+      <Frame onHome={onHome} onNavigate={onNavigate}>
+        <div className="mx-auto max-w-md py-10 text-center">
+          <Header
+            eyebrow="Your program"
+            title="Your program finished, but we can't list the files."
+            copy="The render completed and the audio should exist. Something is wrong with this page's view of it, not with your program — please get in touch and we will send it to you directly."
+          />
+          <p className="mt-8 text-xs leading-relaxed text-white/60">
+            <a
+              href={`mailto:${SUPPORT_EMAIL}`}
+              className="text-violet-300 underline underline-offset-2"
+            >
+              {SUPPORT_EMAIL}
+            </a>{' '}
+            — a person reads it. Quote this page's address.
           </p>
         </div>
       </Frame>
