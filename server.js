@@ -220,6 +220,36 @@ const WEBHOOK_TOLERANCE_S = 300;
 
 const CHECKOUT_TIMEOUT_MS = 10000;
 
+// ---- delivery email (#28) --------------------------------------------------
+//
+// A 15-20 minute render means nobody sits on the page, so without this a
+// finished program has no way of reaching the person who bought it. The email
+// carries the resume link from #27, not the audio — the masters are hundreds of
+// megabytes.
+//
+// Sent over an HTTP API rather than SMTP, because SMTP would mean a dependency
+// and this repo has none. The provider surface is one fetch in sendEmail(), so
+// swapping it is a contained change; EMAIL_API_BASE and the two fields below
+// are all that is provider-specific.
+const EMAIL_API_KEY = process.env.EMAIL_API_KEY || '';
+const EMAIL_API_BASE = process.env.EMAIL_API_BASE || 'https://api.resend.com';
+// Must be an address on a domain verified with the provider, or every send is
+// rejected. There is no sensible default, so an unset value disables delivery
+// rather than sending from something that will bounce.
+const EMAIL_FROM = process.env.EMAIL_FROM || '';
+
+// The address a customer can reply to. The frontend has its own copy of this
+// (VITE_SUPPORT_EMAIL, inlined at build time); a test pins the two defaults
+// together, because an email telling someone to write to an address the site
+// does not show is worse than no address at all.
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'frank.bria@pm.me';
+
+const EMAIL_TIMEOUT_MS = 10000;
+
+// Bounded for the same reason the refund retry is: a permanently rejected
+// address should not be retried every sixty seconds forever.
+const DELIVERY_MAX_ATTEMPTS = 5;
+
 // ---- credit preflight (#25) ------------------------------------------------
 //
 // The daily cap and the ElevenLabs plan quota were never reconciled: ~20k
@@ -793,7 +823,14 @@ function startWorker(id, goal, voiceSet) {
     }
     // The customer has nothing either way, so a crash and a clean failure are
     // not worth charging differently for. A `ready` job keeps its slot.
-    if (!st || st.state !== 'ready') releaseJob(id);
+    if (!st || st.state !== 'ready') {
+      releaseJob(id);
+    } else {
+      // Promptness only. sweepUndelivered() is what guarantees the email
+      // eventually goes — this handler does not run at all for a job that
+      // finishes while the service is restarting.
+      deliverProgram(id).catch((e) => console.error('delivery threw for', id, e && e.message));
+    }
   });
 }
 
@@ -1317,6 +1354,180 @@ async function stripeRefund(paymentIntent, sessionId) {
     return { ok: false, error: 'the refund response had no id' };
   }
   return { ok: true, id: json.id };
+}
+
+// ---- delivery email (#28) --------------------------------------------------
+
+function deliveryClaimPath(sessionId) {
+  return path.join(sessionsDir(), `${sessionId}.delivering`);
+}
+
+/**
+ * Tell the customer their program is ready.
+ *
+ * Never throws and never rejects: the callers are a child 'exit' handler and a
+ * sweep timer, where a rejection is an uncaughtException.
+ *
+ * Idempotent the same way the refund is, and for the same reason — two callers
+ * observe the same completion. The `wx` claim decides the winner, the recorded
+ * state stops a later sweep repeating it, and neither is trusted alone.
+ */
+async function deliverProgram(jobId) {
+  let sessionId = null;
+  try {
+    const link = readJsonSafe(path.join(jobDir(jobId), 'order.json'));
+    // No order means nobody bought this — the early-access path. There is no
+    // address to write to, and inventing a reason to email would be worse.
+    if (!link || typeof link.sessionId !== 'string') return;
+    sessionId = link.sessionId;
+
+    const order = readJsonSafe(claimPath(sessionId));
+    if (!order) return;
+    if (order.delivery && order.delivery.state === 'sent') return;
+    if (order.refund) return;    // refunded: there is nothing to deliver
+    if (!order.email) {
+      // Stripe did not give us one. Not an error worth shouting about — the
+      // customer still has the page — but it is why they got no email.
+      if (!order.delivery) {
+        markDelivery(sessionId, { state: 'skipped', why: 'no email address on the order' });
+      }
+      return;
+    }
+    if (!EMAIL_API_KEY || !EMAIL_FROM || !PUBLIC_BASE_URL) {
+      if (!order.delivery) {
+        console.warn('delivery: cannot email', sessionId,
+          '- set EMAIL_API_KEY, EMAIL_FROM and PUBLIC_BASE_URL');
+        markDelivery(sessionId, { state: 'skipped', why: 'email is not configured' });
+      }
+      return;
+    }
+
+    try {
+      fs.writeFileSync(deliveryClaimPath(sessionId), String(Date.now()), { flag: 'wx' });
+    } catch (e) {
+      if (e.code !== 'EEXIST') return;
+      const claimedAt = Number(readTextSafe(deliveryClaimPath(sessionId)));
+      if (Number.isFinite(claimedAt) && Date.now() - claimedAt < REFUND_CLAIM_STALE_MS) return;
+    }
+
+    const attempts = ((order.delivery && order.delivery.attempts) || 0) + 1;
+    const link2 = `${PUBLIC_BASE_URL}/program/${jobId}`;
+    const sent = await sendEmail(order.email, deliveryEmail(link2));
+    markDelivery(sessionId, sent.ok
+      ? { state: 'sent', attempts, at: new Date().toISOString() }
+      : { state: 'failed', attempts, error: sent.error, at: new Date().toISOString() });
+    if (sent.ok) console.log('delivery: emailed', sessionId, 'their program at', link2);
+    else console.error('delivery: could not email', sessionId, '-', sent.error);
+
+    try { fs.unlinkSync(deliveryClaimPath(sessionId)); } catch { /* nothing to undo */ }
+  } catch (e) {
+    console.error('delivery: unexpected failure for job', jobId, e && e.message);
+    if (sessionId) {
+      try { fs.unlinkSync(deliveryClaimPath(sessionId)); } catch { /* nothing to undo */ }
+    }
+  }
+}
+
+function markDelivery(sessionId, delivery) {
+  const order = readJsonSafe(claimPath(sessionId));
+  if (!order) return false;
+  return writeClaim(sessionId, { ...order, delivery });
+}
+
+/**
+ * The message.
+ *
+ * States the retention window and the support address because a customer
+ * reading this in three weeks needs both, and this email may be the only thing
+ * they still have. Both come from the same values the rest of the system uses —
+ * a number retyped here would drift from the one that deletes the files.
+ */
+function deliveryEmail(link) {
+  const days = RETENTION_DAYS;
+  const text = [
+    'Your program is ready.',
+    '',
+    'All four tracks are rendered and waiting here:',
+    link,
+    '',
+    `Download them within ${days} days — the studio deletes finished renders after that, `
+      + 'and the link outlives the files.',
+    '',
+    `Any problems, reply to this email or write to ${SUPPORT_EMAIL}. A person reads it.`,
+    '',
+    'Hypnosis Studio',
+  ].join('\n');
+
+  const html = [
+    '<div style="font-family:system-ui,sans-serif;font-size:15px;line-height:1.6;color:#1a1a1a">',
+    '<p>Your program is ready.</p>',
+    '<p>All four tracks are rendered and waiting here:</p>',
+    `<p><a href="${escapeHtml(link)}">${escapeHtml(link)}</a></p>`,
+    `<p>Download them within ${days} days — the studio deletes finished renders after `,
+    'that, and the link outlives the files.</p>',
+    `<p>Any problems, reply to this email or write to `,
+    `<a href="mailto:${escapeHtml(SUPPORT_EMAIL)}">${escapeHtml(SUPPORT_EMAIL)}</a>. `,
+    'A person reads it.</p>',
+    '<p>Hypnosis Studio</p>',
+    '</div>',
+  ].join('');
+
+  return { subject: 'Your program is ready', text, html };
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+// The one provider-specific call. Returns { ok } or { ok: false, error }.
+async function sendEmail(to, { subject, text, html }) {
+  let r;
+  try {
+    r = await fetch(`${EMAIL_API_BASE}/emails`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${EMAIL_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ from: EMAIL_FROM, to, subject, text, html }),
+      signal: AbortSignal.timeout(EMAIL_TIMEOUT_MS),
+    });
+  } catch (e) {
+    return { ok: false, error: `request failed: ${e && e.message}` };
+  }
+  if (!r.ok) {
+    let detail = '';
+    try { detail = JSON.stringify(await r.json()).slice(0, 200); } catch { /* no body */ }
+    return { ok: false, error: `HTTP ${r.status} ${detail}` };
+  }
+  return { ok: true };
+}
+
+// Programs that are finished and paid for but have not been emailed.
+//
+// State-driven rather than event-driven, the same correction #26 needed: a job
+// that completes while the service is restarting is observed by no exit
+// handler at all, and "did this customer get their email" is a question the
+// records can answer at any time.
+function sweepUndelivered() {
+  let dirs;
+  try { dirs = fs.readdirSync(RENDERS, { withFileTypes: true }); } catch { return; }
+  for (const d of dirs) {
+    if (!d.isDirectory() || !JOB_DIR_RE.test(d.name)) continue;
+    const st = readJsonSafe(path.join(RENDERS, d.name, 'status.json'));
+    if (!st || st.state !== 'ready') continue;
+    const link = readJsonSafe(path.join(RENDERS, d.name, 'order.json'));
+    if (!link || typeof link.sessionId !== 'string') continue;
+    const order = readJsonSafe(claimPath(link.sessionId));
+    if (!order || !order.email || order.refund) continue;
+    if (order.delivery) {
+      if (order.delivery.state === 'sent' || order.delivery.state === 'skipped') continue;
+      if ((order.delivery.attempts || 0) >= DELIVERY_MAX_ATTEMPTS) continue;
+    }
+    deliverProgram(d.name).catch((e) => console.error('delivery sweep threw:', e && e.message));
+  }
 }
 
 // ---- starting a render ----
@@ -2083,6 +2294,7 @@ function sweepOwedRefunds() {
 function sweepJobs() {
   sweepStaleJobs();
   sweepOwedRefunds();
+  sweepUndelivered();
   sweepExpiredJobs();
 }
 // Overridable for the same reason RENDERS_DIR and ENGINE_PY are: a 60 s tick is

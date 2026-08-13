@@ -91,6 +91,45 @@ changing the price means changing `web/src/lib/data.ts` in the same commit.
 service will ask Stripe for per minute, across all callers. The default is
 fine; raise it only if real traffic ever approaches it.
 
+## 🔴 Email provider — #28
+
+| | |
+|---|---|
+| Variables | `EMAIL_API_KEY`, `EMAIL_FROM` |
+| Current value | **both unset** |
+| Behaviour today | nothing is emailed; each order records `delivery: skipped` and the customer still has their `/program/<id>` page |
+
+A 15–20 minute render means nobody sits on the page, so without this a finished
+program has no way of reaching the person who bought it.
+
+**Defaults to [Resend](https://resend.com).** Nothing about that is load-bearing
+— the provider surface is one `fetch` in `sendEmail()` plus `EMAIL_API_BASE`, so
+Postmark, Mailgun or SendGrid are a contained swap. Resend was chosen because
+its API is a single JSON POST, which is what a zero-dependency server can do
+without an SMTP library.
+
+To get one:
+1. Create the account and **verify a sending domain** — this is the slow part
+   (DNS records, and propagation), so start it before you need it.
+2. Create an API key → `EMAIL_API_KEY`.
+3. Set `EMAIL_FROM` to an address **on that verified domain**. There is no
+   default: sending from something that will bounce is worse than not sending.
+4. `PUBLIC_BASE_URL` must also be set — the email's whole purpose is the link,
+   and it cannot be built without it.
+
+## 🟡 Support address — #28
+
+| | |
+|---|---|
+| Variable | `SUPPORT_EMAIL` (server), `VITE_SUPPORT_EMAIL` (site) |
+| Current value | both default to `frank.bria@pm.me` |
+
+Two variables for one address, because the site's copy is inlined by Vite at
+**build** time and the server's is read at **run** time. A test fails if the two
+defaults ever disagree. Set both, and remember the site one needs a rebuild.
+
+It must be monitored by a person: `/refunds` and the delivery email both say so.
+
 ---
 
 ## Already required, unchanged

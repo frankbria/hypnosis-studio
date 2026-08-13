@@ -339,6 +339,47 @@ customer to somebody else's site the instant after they paid us.
 
 ---
 
+## The delivery email (#28)
+
+Nobody watches a progress bar for twenty minutes, so a finished program is
+emailed to the address Stripe collected at checkout. The email carries the
+`/program/<id>` link from #27, not the audio — the masters are hundreds of
+megabytes.
+
+```
+POST https://api.resend.com/emails
+     header: Authorization: Bearer $EMAIL_API_KEY
+     body:   { from, to, subject, text, html }
+```
+
+The third and last outbound call, and the third to use the runtime's own
+`fetch`. SMTP would have meant a dependency; the provider surface is one
+function (`sendEmail`), so a swap is contained.
+
+**When it sends.** The trigger is state, not an event: `sweepUndelivered()`
+looks for a job that is `ready`, has an order with an email, and has no
+delivery record. The worker-exit handler also calls it for promptness, but the
+sweep is what makes it a guarantee — a job that finishes while the service is
+restarting is observed by no exit handler at all. That correction is the same
+one #26 needed.
+
+**Exactly once.** Same three layers as the refund: a `wx` claim file, a recorded
+`delivery` state on the order, and a bounded retry (5). A restart, a resent
+webhook and a sweep that keeps running afterwards all produce one email.
+
+**When it does not send:** a failed or refunded render, an order with no email
+address, or an unconfigured provider. Each records why on the order rather than
+retrying forever, and an unconfigured provider says so once rather than every
+sixty seconds.
+
+The copy states the retention window from `RETENTION_DAYS` and the support
+address from `SUPPORT_EMAIL` — both read from the same values the rest of the
+system uses, because this email is the document a customer still has three
+weeks later, and a number retyped into it would drift from the sweep that
+deletes their files.
+
+---
+
 ## Secrets
 
 `.gitignore` covers `.env` and `.env.*`, with `!.env.example` as the single
