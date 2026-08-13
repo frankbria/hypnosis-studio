@@ -75,6 +75,7 @@ function paidEvent({ sessionId = 'cs_test_1', email = EMAIL } = {}) {
 /** A mail provider that records what it was asked to send. */
 async function fakeMail({ status = 200 } = {}) {
   const sent = [];
+  const byKey = new Map();
   const state = { status };
   const port = await freePort();
   const srv = http.createServer((req, res) => {
@@ -87,9 +88,18 @@ async function fakeMail({ status = 200 } = {}) {
       }
       let parsed = {};
       try { parsed = JSON.parse(body); } catch { /* recorded raw below */ }
-      sent.push({ ...parsed, auth: req.headers.authorization || '', path: req.url });
+      const key = req.headers['idempotency-key'] || '';
+      if (key && byKey.has(key)) {
+        // What a provider honouring the key does: the original result, and no
+        // second message.
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(byKey.get(key)));
+      }
+      sent.push({ ...parsed, auth: req.headers.authorization || '', key, path: req.url });
+      const result = { id: `msg_${sent.length}` };
+      if (key) byKey.set(key, result);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ id: `msg_${sent.length}` }));
+      res.end(JSON.stringify(result));
     });
   });
   await new Promise((r) => srv.listen(port, '127.0.0.1', r));
@@ -444,6 +454,69 @@ test('a provider that recovers gets the email through', async () => {
     assert.strictEqual(readOrder(srv.rendersDir).delivery.state, 'sent');
     assert.strictEqual(mail.sent.length, 1);
   } finally {
+    stop(srv); mail.close();
+  }
+});
+
+test('the send carries an idempotency key the provider can honour', async () => {
+  const mail = await fakeMail();
+  const srv = await startServer({ env: { EMAIL_API_BASE: mail.base } });
+  try {
+    await pay(srv);
+    assert.strictEqual(mail.sent[0].key, 'deliver-cs_test_1');
+  } finally {
+    stop(srv); mail.close();
+  }
+});
+
+test('a lost delivery record cannot send the email twice', async () => {
+  // The window is real: the process can die in the ten seconds between the
+  // provider accepting the message and the `sent` state reaching disk, and the
+  // stale-claim takeover would then try again. The provider key is the only
+  // layer that survives that, so this erases the local evidence and checks.
+  const mail = await fakeMail();
+  const srv = await startServer({ env: { EMAIL_API_BASE: mail.base } });
+  try {
+    await pay(srv);
+    assert.strictEqual(mail.sent.length, 1);
+
+    const order = readOrder(srv.rendersDir);
+    order.delivery = { state: 'failed', attempts: 0 };
+    fs.writeFileSync(path.join(srv.rendersDir, '.sessions', 'cs_test_1.json'),
+      JSON.stringify(order));
+    await sleep(1500);
+
+    assert.strictEqual(mail.sent.length, 1,
+      'the customer was emailed twice once the local record was lost');
+  } finally {
+    stop(srv); mail.close();
+  }
+});
+
+test('a delivery whose record will not persist is not repeated every tick', async () => {
+  // If the write that says "sent" fails, the attempt counter cannot bound
+  // anything — the counter IS what would not write. The claim is held instead.
+  const mail = await fakeMail();
+  const srv = await startServer({ env: { EMAIL_API_BASE: mail.base } });
+  try {
+    await pay(srv);
+    assert.strictEqual(mail.sent.length, 1);
+
+    // Make the order unwritable, then invite the sweep to try again.
+    const orderPath = path.join(srv.rendersDir, '.sessions', 'cs_test_1.json');
+    const order = readOrder(srv.rendersDir);
+    order.delivery = { state: 'failed', attempts: 0 };
+    fs.writeFileSync(orderPath, JSON.stringify(order));
+    fs.chmodSync(path.join(srv.rendersDir, '.sessions'), 0o555);
+    await sleep(2000);
+    fs.chmodSync(path.join(srv.rendersDir, '.sessions'), 0o755);
+
+    // One extra send at most: the provider key deduplicates, and the held claim
+    // stops it being attempted every tick.
+    assert.strictEqual(mail.sent.length, 1,
+      `${mail.sent.length} messages reached the provider`);
+  } finally {
+    try { fs.chmodSync(path.join(srv.rendersDir, '.sessions'), 0o755); } catch { /* gone */ }
     stop(srv); mail.close();
   }
 });

@@ -1412,13 +1412,25 @@ async function deliverProgram(jobId) {
 
     const attempts = ((order.delivery && order.delivery.attempts) || 0) + 1;
     const link2 = `${PUBLIC_BASE_URL}/program/${jobId}`;
-    const sent = await sendEmail(order.email, deliveryEmail(link2));
-    markDelivery(sessionId, sent.ok
+    const sent = await sendEmail(order.email, deliveryEmail(link2), sessionId);
+    const recorded = markDelivery(sessionId, sent.ok
       ? { state: 'sent', attempts, at: new Date().toISOString() }
       : { state: 'failed', attempts, error: sent.error, at: new Date().toISOString() });
     if (sent.ok) console.log('delivery: emailed', sessionId, 'their program at', link2);
     else console.error('delivery: could not email', sessionId, '-', sent.error);
 
+    if (!recorded) {
+      // The email may well have gone, and the only local evidence of it just
+      // failed to persist. Keeping the claim stops the next sweep tick sending
+      // again — the attempt counter cannot bound anything when the counter is
+      // the thing that would not write.
+      //
+      // The provider's idempotency key is the real backstop; this only avoids
+      // leaning on it every sixty seconds.
+      console.error('delivery: could not record the send for', sessionId,
+        '- holding the claim so the sweep does not repeat it. NEEDS A HUMAN.');
+      return;
+    }
     try { fs.unlinkSync(deliveryClaimPath(sessionId)); } catch { /* nothing to undo */ }
   } catch (e) {
     console.error('delivery: unexpected failure for job', jobId, e && e.message);
@@ -1482,7 +1494,12 @@ function escapeHtml(s) {
 }
 
 // The one provider-specific call. Returns { ok } or { ok: false, error }.
-async function sendEmail(to, { subject, text, html }) {
+//
+// `key` makes the send idempotent at the PROVIDER, which is the only layer that
+// survives losing the local record. The window is real: the process can die in
+// the ten seconds between the provider accepting the message and the `sent`
+// state reaching disk, and the stale-claim takeover would then send again.
+async function sendEmail(to, { subject, text, html }, key) {
   let r;
   try {
     r = await fetch(`${EMAIL_API_BASE}/emails`, {
@@ -1490,6 +1507,7 @@ async function sendEmail(to, { subject, text, html }) {
       headers: {
         Authorization: `Bearer ${EMAIL_API_KEY}`,
         'Content-Type': 'application/json',
+        'Idempotency-Key': `deliver-${key}`,
       },
       body: JSON.stringify({ from: EMAIL_FROM, to, subject, text, html }),
       signal: AbortSignal.timeout(EMAIL_TIMEOUT_MS),
