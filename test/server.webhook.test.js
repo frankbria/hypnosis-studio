@@ -477,6 +477,70 @@ test('a refused render leaves the order recorded and still owed', async () => {
   }
 });
 
+test("Stripe's own retry after a transient refusal is not dropped as a duplicate", async () => {
+  // The retry arrives within seconds, well inside the mid-spawn window. Waiting
+  // out a clock there dropped the paid order: a fresh claim with no jobId read
+  // as "someone is working on it" when in fact the previous attempt had already
+  // refused and said so.
+  const srv = await startServer({ ENGINE_PY: '/bin/false' });
+  try {
+    const raw = completedEvent();
+    // Occupy the studio so the first delivery is refused as busy.
+    fs.mkdirSync(path.join(srv.rendersDir, 'job_occupant'), { recursive: true });
+    fs.writeFileSync(path.join(srv.rendersDir, 'job_occupant', 'status.json'), JSON.stringify({
+      jobId: 'job_occupant', state: 'rendering', updatedAt: new Date().toISOString(),
+    }));
+
+    const first = await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    assert.strictEqual(first.status, 500, 'a busy studio should ask Stripe to retry');
+    const claim = JSON.parse(
+      fs.readFileSync(path.join(srv.rendersDir, '.sessions', 'cs_test_1.json'), 'utf8'));
+    assert.strictEqual(claim.lastError, 'busy');
+
+    // The studio frees up, and Stripe retries — immediately, not in ten minutes.
+    fs.rmSync(path.join(srv.rendersDir, 'job_occupant'), { recursive: true, force: true });
+    const retry = await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    assert.strictEqual(retry.status, 200, retry.body);
+    assert.notStrictEqual(retry.json.duplicate, true, 'the retry was dropped as a duplicate');
+    await settle();
+    assert.strictEqual(jobs(srv.rendersDir).length, 1, 'the paid order never rendered');
+  } finally {
+    stop(srv);
+  }
+});
+
+test('a render whose session link was not recorded is not rendered twice', async () => {
+  // If the write that records the jobId on the claim fails, the claim is
+  // indistinguishable from one whose render never started — and re-rendering
+  // spends credits on a program the customer already has. The job records its
+  // own session so the answer does not depend on that write.
+  const srv = await startServer();
+  try {
+    const raw = completedEvent();
+    await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    await settle();
+    const [job] = jobs(srv.rendersDir);
+    assert.ok(job, 'no render started');
+    assert.strictEqual(
+      JSON.parse(fs.readFileSync(path.join(srv.rendersDir, job, 'session.json'), 'utf8')).sessionId,
+      'cs_test_1', 'the job does not record which purchase it belongs to');
+
+    // Simulate the failed link write: an aged claim that never got its jobId.
+    fs.writeFileSync(path.join(srv.rendersDir, '.sessions', 'cs_test_1.json'), JSON.stringify({
+      sessionId: 'cs_test_1', goal: 'polymath', voiceSet: 'male',
+      claimedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    }));
+
+    const res = await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.json.duplicate, true, 'a delivered order was rendered again');
+    await settle();
+    assert.strictEqual(jobs(srv.rendersDir).length, 1);
+  } finally {
+    stop(srv);
+  }
+});
+
 test('a paid order refused at the time is rendered when the event is resent', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webhook-recover-'));
   const raw = completedEvent();

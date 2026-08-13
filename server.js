@@ -817,13 +817,35 @@ function claimPath(sessionId) {
   return path.join(sessionsDir(), `${sessionId}.json`);
 }
 
-// How long a claim is treated as "someone is on it right now".
+// How long a claim with no evidence either way is treated as "a delivery is
+// mid-spawn right now".
 //
-// Two concurrent deliveries of the same event land milliseconds apart, so the
-// loser must back off. An operator hitting "Resend event" in the dashboard to
-// recover a paid order does so minutes or days later, and must NOT be told the
-// order is already handled when it visibly is not.
+// This covers ONLY the sub-second gap between taking the claim and the job
+// directory existing. Everything else — a refusal, a failed render, a finished
+// render — is answered from evidence below, not from the clock.
 const RECLAIM_AFTER_MS = 60 * 1000;
+
+// Which job was started for this session, asked of the jobs themselves.
+//
+// The claim file cannot answer it alone: if the write that records the jobId
+// fails, a claim with no jobId is indistinguishable from one whose render never
+// started — and re-rendering the first case spends credits on a program the
+// customer already has. The job directory records its own session, so the
+// answer does not depend on a write that may not have happened.
+//
+// ponytail: a linear scan, bounded by the retention window (~180 dirs at the
+// current caps) and only reached on the duplicate path. Index it if either
+// number ever changes by an order of magnitude.
+function findJobForSession(sessionId) {
+  let dirs;
+  try { dirs = fs.readdirSync(RENDERS, { withFileTypes: true }); } catch { return null; }
+  for (const d of dirs) {
+    if (!d.isDirectory() || !JOB_DIR_RE.test(d.name)) continue;
+    const rec = readJsonSafe(path.join(RENDERS, d.name, 'session.json'));
+    if (rec && rec.sessionId === sessionId) return d.name;
+  }
+  return null;
+}
 
 // May this session be rendered, given a claim that already exists?
 //
@@ -831,17 +853,29 @@ const RECLAIM_AFTER_MS = 60 * 1000;
 // claim means we do not know whether this order already rendered, and guessing
 // "no" spends TTS credits on a maybe. Under-delivering is visible in the log
 // and recoverable by a person; over-delivering is money already gone.
-function claimIsRecoverable(claim) {
+function claimIsRecoverable(claim, sessionId) {
   if (!claim || typeof claim !== 'object') return false;
+
+  const jobId = claim.jobId || findJobForSession(sessionId);
+  if (jobId) {
+    const st = readJsonSafe(path.join(jobDir(jobId), 'status.json'));
+    if (!st) return true;               // job directory gone; nothing was delivered
+    return st.state === 'failed';
+  }
+
+  // No render exists for this session at all.
+  //
+  // A recorded refusal is decisive: the studio said no (busy, daily cap, a full
+  // disk, a spent budget) and the order is still owed. Waiting out a clock here
+  // was the bug — Stripe retries a 500 within seconds, and a fresh claim with
+  // no jobId read as "someone is mid-spawn", so the retry was acknowledged as a
+  // duplicate and the paid order was dropped.
+  if (claim.lastError) return true;
+
+  // Nothing recorded either way: this is the only case the clock decides, and
+  // it is the genuine mid-spawn window.
   const age = Date.now() - Date.parse(claim.claimedAt || 0);
-  if (!Number.isFinite(age) || age < RECLAIM_AFTER_MS) return false;
-  // Claimed, but no render ever started — the process died between the claim
-  // and the spawn, or the studio refused at the time (a spent budget, a full
-  // disk). The order is paid and still owed.
-  if (!claim.jobId) return true;
-  const st = readJsonSafe(path.join(jobDir(claim.jobId), 'status.json'));
-  if (!st) return true;                 // job directory gone; nothing was delivered
-  return st.state === 'failed';
+  return Number.isFinite(age) && age >= RECLAIM_AFTER_MS;
 }
 
 // true = claimed by this call, false = already claimed by someone live,
@@ -858,7 +892,7 @@ function claimSession(sessionId, record) {
       return null;
     }
     const existing = readJsonSafe(claimPath(sessionId));
-    if (!claimIsRecoverable(existing)) return false;
+    if (!claimIsRecoverable(existing, sessionId)) return false;
     // Recoverable: take it over. The window between this read and the write is
     // reachable only by two deliveries of a session whose previous render
     // already failed, and startRender's own concurrency lock refuses the second
@@ -896,7 +930,7 @@ function writeClaim(sessionId, record) {
 // Returns `{ jobId }`, or `{ error, status, body }` describing the refusal. The
 // caller decides what to say: an HTTP client gets the status, Stripe gets a
 // retry-or-not decision.
-function startRender(goal, voiceSet) {
+function startRender(goal, voiceSet, sessionId = null) {
   const refuse = (status, body) => ({ error: body.error, status, body });
 
   if (anyJobRendering()) return refuse(409, { error: 'busy' });
@@ -934,6 +968,19 @@ function startRender(goal, voiceSet) {
   } catch (e) {
     console.error('could not create a job directory:', e && e.message);
     return refuse(503, { error: 'storage_unavailable' });
+  }
+  // Which purchase this render belongs to, written by the job rather than only
+  // by the claim. A sidecar rather than a status.json field, for the same
+  // reason worker.json is one: the Python worker rewrites status.json wholesale
+  // on every transition and would erase it.
+  if (sessionId) {
+    try {
+      fs.writeFileSync(path.join(jobDir(jobId), 'session.json'), JSON.stringify({ sessionId }));
+    } catch (e) {
+      // Recoverable — the claim also records the link. Losing both is what the
+      // duplicate check is careful about.
+      console.error('could not record the session on job', jobId, e && e.message);
+    }
   }
   writeStatus(jobId, {
     jobId, state: 'rendering', stage: 'scripting', progress: 0,
@@ -1197,7 +1244,7 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { received: true, duplicate: true });
     }
 
-    const started = startRender(meta.goal, meta.voiceSet);
+    const started = startRender(meta.goal, meta.voiceSet, sessionId);
     if (started.error) {
       // The claim STAYS, recording that this session was paid for and is still
       // owed a render. It carries no jobId, so it reads as recoverable: a
@@ -1224,10 +1271,15 @@ async function handleRequest(req, res) {
     // Record the job against the session now that there is one. The `wx` create
     // above was the lock; this is the content. #24 grows it into the order
     // record; #27 is what lets the customer find it again.
-    writeClaim(sessionId, {
+    if (!writeClaim(sessionId, {
       sessionId, jobId: started.jobId, goal: meta.goal, voiceSet: meta.voiceSet,
       claimedAt: claimedAt.toISOString(),
-    });
+    })) {
+      // The render is running; only the link is lost. Not fatal, because the
+      // job records the session itself — which is exactly why it does.
+      console.error('could not link job', started.jobId, 'to session', sessionId,
+        '- the job sidecar is the remaining record');
+    }
     console.log('webhook: session', sessionId, 'started render', started.jobId);
     return sendJson(res, 200, { received: true, jobId: started.jobId });
   }
