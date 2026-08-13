@@ -346,6 +346,25 @@ test('the order is written atomically', async () => {
 // It must not leak
 // --------------------------------------------------------------------------
 
+test('the job status says what it is rendering, so a resumed page can draw itself', async () => {
+  // A page arriving at /program/<id> knowing only the job id has none of the
+  // wizard's state (#27). The goal and voice set are what its copy is built
+  // from, and they must survive the worker rewriting status.json wholesale.
+  const srv = await startServer();
+  try {
+    await pay(srv, { goal: 'river', voiceSet: 'female' });
+    const [job] = jobs(srv.rendersDir);
+    const res = await request(srv.port, 'GET', `/api/jobs/${job}`);
+    assert.strictEqual(res.json.goal, 'river');
+    assert.strictEqual(res.json.voiceSet, 'female');
+    // The worker has already written `ready` over status.json by now, which is
+    // exactly why this lives in a sidecar rather than in that file.
+    assert.strictEqual(res.json.state, 'ready');
+  } finally {
+    stop(srv);
+  }
+});
+
 test('the job status endpoint exposes no part of the order', async () => {
   const srv = await startServer();
   try {

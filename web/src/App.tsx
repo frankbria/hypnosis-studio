@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import DoorChooser from '@/sections/DoorChooser'
 import Landing from '@/sections/Landing'
 import Wizard from '@/sections/Wizard'
+import ProgramPage from '@/sections/ProgramPage'
 import { PrivacyPage, RefundPage, TermsPage } from '@/sections/Legal'
 import type { LegalPageId } from '@/sections/Legal'
 import type { DoorId } from '@/lib/data'
@@ -30,6 +31,20 @@ function legalFromPath(pathname: string): LegalPageId | null {
   return LEGAL_PATHS[pathname] ?? null
 }
 
+/**
+ * A render lives at its own URL so it survives a reload, a closed tab, and a
+ * laptop that slept through the twenty-minute wait (#27).
+ *
+ * The character class matches what the server's own job-id regex accepts, so a
+ * path that could never name a job never reaches the page — it falls through to
+ * the door chooser instead of rendering "we can't find that program" for
+ * something that was never a program.
+ */
+function jobFromPath(pathname: string): string | null {
+  const m = pathname.match(/^\/program\/([A-Za-z0-9_-]+)$/)
+  return m ? m[1] : null
+}
+
 // Dependency-free routing: the door comes from window.location.pathname.
 // `/` (or anything unknown) → door chooser; `/performance` and `/healing` →
 // that door's landing. The wizard keeps the door path in the URL bar.
@@ -41,8 +56,11 @@ function doorFromPath(pathname: string): DoorId | null {
   return null
 }
 
-// vite base is './', so a trailing-slash URL like /healing/ would resolve
-// relative asset URLs against /healing/ and 404. Strip trailing slashes.
+// Trailing slashes are stripped so the URL bar stays tidy and routes match
+// exactly. (This also used to be load-bearing: with vite's base at './', a URL
+// like /healing/ resolved relative asset URLs against /healing/ and 404'd. The
+// base is absolute since #27, so that class of failure is gone — but an
+// unnormalised path would still miss the route table.)
 function normalizedPath(): string {
   const p = window.location.pathname
   if (p.length > 1 && p.endsWith('/')) {
@@ -76,6 +94,7 @@ export default function App() {
   const [legal, setLegal] = useState<LegalPageId | null>(() =>
     legalFromPath(normalizedPath()),
   )
+  const [job, setJob] = useState<string | null>(() => jobFromPath(normalizedPath()))
   const [view, setView] = useState<View>('landing')
 
   useEffect(() => {
@@ -85,6 +104,7 @@ export default function App() {
       const path = normalizedPath()
       setDoor(doorFromPath(path))
       setLegal(legalFromPath(path))
+      setJob(jobFromPath(path))
       setView('landing')
     }
     window.addEventListener('popstate', onPop)
@@ -92,21 +112,24 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    document.title = legal
-      ? LEGAL_TITLES[legal]
-      : door
-        ? DOC_TITLES[door]
-        : DOC_TITLES.chooser
-  }, [door, legal])
+    document.title = job
+      ? 'Your program — Hypnosis Studio'
+      : legal
+        ? LEGAL_TITLES[legal]
+        : door
+          ? DOC_TITLES[door]
+          : DOC_TITLES.chooser
+  }, [door, legal, job])
 
   useEffect(() => {
     window.scrollTo({ top: 0 })
-  }, [view, door, legal])
+  }, [view, door, legal, job])
 
   const goHome = useCallback(() => {
     window.history.pushState({}, '', '/')
     setDoor(null)
     setLegal(null)
+    setJob(null)
     setView('landing')
   }, [])
 
@@ -114,6 +137,7 @@ export default function App() {
     window.history.pushState({}, '', `/${next}`)
     setDoor(next)
     setLegal(null)
+    setJob(null)
     setView('landing')
   }, [])
 
@@ -121,8 +145,20 @@ export default function App() {
     window.history.pushState({}, '', path)
     setLegal(legalFromPath(path))
     setDoor(doorFromPath(path))
+    setJob(jobFromPath(path))
     setView('landing')
   }, [])
+
+  // Checked first: someone arriving at their program has come back for it, and
+  // must not be handed the door chooser because they happen to have no door in
+  // the URL.
+  if (job !== null) {
+    return (
+      <div className="min-h-screen">
+        <ProgramPage jobId={job} onHome={goHome} onNavigate={goTo} />
+      </div>
+    )
+  }
 
   // Checked before the door, so /terms renders the policy rather than the
   // chooser regardless of which door the visitor came from.

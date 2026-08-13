@@ -1369,6 +1369,18 @@ function startRender(goal, voiceSet, sessionId = null) {
     console.error('could not create a job directory:', e && e.message);
     return refuse(503, { error: 'storage_unavailable' });
   }
+  // What this render IS, for a page that arrives knowing only the job id (#27).
+  // A resumed /program/<id> has none of the wizard's state, and the goal and
+  // voice set are what its copy is built from.
+  //
+  // A sidecar rather than a status.json field, for the same reason worker.json
+  // and order.json are: the Python worker rewrites status.json wholesale on
+  // every transition and would erase it on the first stage change.
+  try {
+    fs.writeFileSync(path.join(jobDir(jobId), 'job.json'), JSON.stringify({ goal, voiceSet }));
+  } catch (e) {
+    console.error('could not record what job', jobId, 'is rendering:', e && e.message);
+  }
   // Which purchase this render belongs to. A back-pointer only: the order
   // itself lives outside the job directory, because this one is deleted by the
   // retention sweep and an order must outlive the audio.
@@ -1786,6 +1798,15 @@ async function handleRequest(req, res) {
     const st = readJsonSafe(path.join(jobDir(id), 'status.json'));
     if (!st) return sendJson(res, 404, { error: 'unknown job' });
     const out = { ...st };
+    // What was bought, so a page that arrives knowing only the job id can
+    // render itself (#27). Deliberately just the goal and voice set — the
+    // sidecar holds nothing else, and the order (payment reference, email)
+    // lives outside the job directory precisely so it cannot reach here.
+    const meta = readJsonSafe(path.join(jobDir(id), 'job.json'));
+    if (meta) {
+      out.goal = meta.goal;
+      out.voiceSet = meta.voiceSet;
+    }
     if (st.state === 'ready') {
       const manifest = readJsonSafe(path.join(jobDir(id), 'manifest.json'));
       if (manifest) Object.assign(out, manifest);
