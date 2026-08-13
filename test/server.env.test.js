@@ -37,7 +37,13 @@ test('server.js loads .env before reading any variable from it', () => {
 
   // Order matters: a load that happens after the constants are computed reads
   // the file and changes nothing.
-  const firstEnvRead = src.indexOf('process.env.');
+  // Not the opt-out guard: `if (!process.env.HYPNO_NO_DOTENV)` necessarily
+  // reads process.env before the load, and it is a switch for the loader rather
+  // than a value the loader is supposed to supply.
+  const firstEnvRead = [...src.matchAll(/process\.env\.([A-Z_0-9]+)/g)]
+    .filter((m) => m[1] !== 'HYPNO_NO_DOTENV')
+    .map((m) => m.index)[0];
+  assert.ok(firstEnvRead !== undefined, 'server.js reads no environment variables');
   assert.ok(load < firstEnvRead,
     'the .env is loaded after process.env is first read — the values arrive too late');
 
@@ -231,4 +237,24 @@ test('no secret value is written into a tracked file', () => {
   assert.deepStrictEqual(offenders, [],
     'a secret value is written into a tracked file in a public repo:\n' +
     offenders.join('\n'));
+});
+
+test('the test run does not inherit a developer .env', () => {
+  // server.js loads .env from its own directory — which is the repo root, where
+  // a developer's .env lives. Every harness spawns it with `...process.env`, so
+  // any variable a test relies on the DEFAULT for would silently take the
+  // developer's value: a suite that passes on one machine and not another, for
+  // reasons nothing in the test says.
+  //
+  // Set once for the whole run rather than at each spawn site. There are 13
+  // across 5 files, and patching them individually is how the 14th gets missed
+  // — which is exactly what happened on the first attempt.
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  assert.match(pkg.scripts.test, /HYPNO_NO_DOTENV=1/,
+    'npm test no longer disables .env loading — the suite can pick up local config');
+
+  // And the server must honour it.
+  const src = codeOnly(fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8'));
+  assert.match(src, /HYPNO_NO_DOTENV/,
+    'server.js ignores the opt-out, so setting it in npm test does nothing');
 });

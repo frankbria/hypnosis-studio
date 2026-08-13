@@ -26,13 +26,21 @@ const { spawn } = require('child_process');
 // The real environment WINS over the file — loadEnvFile does not overwrite
 // variables that are already set. That is the precedence prod needs: systemd or
 // the shell beats a stale .env left in the deploy directory.
-try {
-  process.loadEnvFile(path.join(__dirname, '.env'));
-} catch (err) {
-  // ENOENT is the normal case in production, where systemd supplies the
-  // environment and no .env exists. Anything else is worth seeing.
-  if (err.code !== 'ENOENT') {
-    console.error('could not read .env:', err.message);
+// HYPNO_NO_DOTENV lets the test harnesses opt out. They spawn this file from
+// the repo root and set every variable they depend on explicitly — but a
+// developer's .env sits in that same directory, so any variable a test relies
+// on the DEFAULT for would silently take the developer's value instead. That is
+// a test suite that passes on one machine and not another, for reasons nothing
+// in the test says.
+if (!process.env.HYPNO_NO_DOTENV) {
+  try {
+    process.loadEnvFile(path.join(__dirname, '.env'));
+  } catch (err) {
+    // ENOENT is the normal case in production, where systemd supplies the
+    // environment and no .env exists. Anything else is worth seeing.
+    if (err.code !== 'ENOENT') {
+      console.error('could not read .env:', err.message);
+    }
   }
 }
 
