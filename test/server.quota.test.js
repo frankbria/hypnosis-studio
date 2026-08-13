@@ -613,3 +613,21 @@ test('a render is refused if its slot cannot be recorded', async () => {
     try { fs.rmSync(rendersDir, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 });
+
+
+// --------------------------------------------------------------------------
+// Zero means zero (#29, found while demoing the error states)
+// --------------------------------------------------------------------------
+
+test('MAX_JOBS_PER_DAY=0 stops renders rather than allowing six', () => {
+  // `parseInt(x, 10) || 6` treats 0 as absent. An operator setting this to 0 to
+  // stop the studio spending anything got the default instead — silently, on
+  // the one switch whose entire purpose is to spend nothing.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const at = src.indexOf('const MAX_JOBS_PER_DAY');
+  assert.ok(at > 0, 'the daily cap is gone');
+  const decl = src.slice(at, src.indexOf('\n\n', at));
+  assert.ok(!/\)\s*\|\|\s*6/.test(decl),
+    'a falsy-coalescing default is back, so 0 silently becomes 6');
+  assert.match(decl, /n >= 0/, 'zero is not accepted as a value');
+});

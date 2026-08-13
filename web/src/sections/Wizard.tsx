@@ -18,7 +18,7 @@ import {
   buildTracks,
 } from '@/lib/data'
 import type { DoorId, VoiceSet } from '@/lib/data'
-import { RENDER_FAILURE_GUARANTEE } from '@/lib/legal'
+import { RENDER_FAILURE_GUARANTEE, SUPPORT_EMAIL } from '@/lib/legal'
 import { CHECKOUT_MESSAGE, startCheckout } from '@/lib/checkout'
 import type { CheckoutFailure } from '@/lib/checkout'
 import GoalCardText from '@/components/GoalCardText'
@@ -35,6 +35,35 @@ interface WizardProps {
   onHome: () => void
   onNavigate: (path: string) => void
 }
+
+/**
+ * What the studio said, in the customer's terms.
+ *
+ * Every one of these used to be a fabricated success screen. They are separate
+ * sentences rather than one apology because they call for different things:
+ * two are permanent, two are "later", and one is a fault worth reporting.
+ */
+const START_ERRORS: Record<string, string> = {
+  // The studio takes payment now, so the early-access door is shut for good.
+  rendering_requires_payment:
+    'Early access has closed — programs are now bought through checkout.',
+  // No ACCESS_CODE is configured, so this path is switched off entirely.
+  rendering_disabled:
+    'The studio is not taking early-access programs at the moment. Nothing has started.',
+  // Real limits, and both come back on their own.
+  budget_exhausted:
+    'The studio is at capacity for this month and is not taking new programs right now.',
+  temporarily_unavailable:
+    'The studio is at capacity and is not taking new programs right now. Please try later.',
+  daily_cap: "The studio's limit for today is reached — please try again tomorrow.",
+  busy: 'Another program is rendering right now. Please try again in a few minutes.',
+  storage_unavailable:
+    'The studio could not start your program because of a problem on our side. '
+    + 'Nothing has started.',
+}
+
+const GENERIC_START_ERROR =
+  'The studio could not start your program. Nothing has started.'
 
 // ─── Stepper ─────────────────────────────────────────────────────────────────
 
@@ -103,7 +132,14 @@ function StepHeader({
   )
 }
 
-// ─── Generation (real API + demo fallback) ──────────────────────────────────
+// ─── Starting a render ───────────────────────────────────────────────────────
+//
+// There is no demo fallback any more (#29). Any non-202 used to route into
+// mockFlow(), which fabricated a staged success — headline "Your program is
+// ready." over four cards playing voice samples — for a 500, an nginx 502, or
+// a `503 rendering_disabled`. That made sense while the frontend was a static
+// preview. With a real backend behind a real payment, a customer who has been
+// charged and hits a 500 must not be shown a success screen.
 
 // ─── Wizard ──────────────────────────────────────────────────────────────────
 
@@ -116,6 +152,10 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
   const [attested, setAttested] = useState(false)
   const [accessCode, setAccessCode] = useState('')
   const [codeError, setCodeError] = useState<string | null>(null)
+  // A server-side refusal, as opposed to a wrong access code. Kept apart
+  // because they belong in different places on the screen and only one of them
+  // is the customer's to fix.
+  const [startError, setStartError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   const [checkoutBusy, setCheckoutBusy] = useState(false)
   const [checkoutError, setCheckoutError] = useState<CheckoutFailure | null>(null)
@@ -150,6 +190,7 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
     if (!goal || !voiceSet) return
     setStarting(true)
     setCodeError(null)
+    setStartError(null)
     let res: Response
     try {
       res = await fetch('/api/programs', {
@@ -164,7 +205,9 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
       })
     } catch {
       setStarting(false)
-      setCodeError("We couldn't reach the studio — check your connection and try again.")
+      setStartError(
+        "We couldn't reach the studio. Check your connection and try again — nothing has started.",
+      )
       return
     }
     if (res.status === 403) {
@@ -178,7 +221,7 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
       // branch because the UI cannot trigger it is how a real 422 becomes an
       // unhandled blank screen (#66).
       setStarting(false)
-      setCodeError(
+      setStartError(
         "That program isn't in production yet — choose one of the available goals.",
       )
       return
@@ -191,16 +234,9 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
       } catch {
         reason = ''
       }
-      // `rendering_requires_payment` is not a fault: early access has closed
-      // because the studio now takes payment (#23). Telling someone to try
-      // again would have them retrying a door that is not reopening.
-      setCodeError(
-        reason === 'rendering_requires_payment'
-          ? 'Early access has closed — programs are now bought through checkout.'
-          : reason === 'budget_exhausted' || reason === 'temporarily_unavailable'
-            ? 'The studio is at capacity and is not taking new programs right now.'
-            : "The studio couldn't start your program. Nothing has been charged — please try again.",
-      )
+      // Every branch names what happened. The old code showed a fabricated
+      // success for all of these (#29).
+      setStartError(START_ERRORS[reason] ?? `${GENERIC_START_ERROR} (HTTP ${res.status})`)
       return
     }
     // Guarded: an unparseable body here would reject the handler and leave
@@ -215,7 +251,7 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
     }
     if (typeof jobId !== 'string' || jobId === '') {
       setStarting(false)
-      setCodeError(
+      setStartError(
         'Your program started, but the studio did not say where to find it. ' +
           'Please get in touch before trying again.',
       )
@@ -651,6 +687,27 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
                 {checkoutError && (
                   <p role="status" className="text-right text-sm text-white/70">
                     {CHECKOUT_MESSAGE[checkoutError]}
+                  </p>
+                )}
+                {startError && (
+                  <p
+                    role="alert"
+                    className="max-w-md text-right text-sm leading-relaxed text-white/70"
+                  >
+                    {startError}{' '}
+                    {/*
+                      The address on every failure, not only the ones that look
+                      like faults: the customer cannot tell which is which, and
+                      #18 exists because a screen like this offered no way to
+                      reach anyone.
+                    */}
+                    <a
+                      href={`mailto:${SUPPORT_EMAIL}`}
+                      className="text-violet-300 underline underline-offset-2"
+                    >
+                      {SUPPORT_EMAIL}
+                    </a>{' '}
+                    — a person reads it.
                   </p>
                 )}
               </div>

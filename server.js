@@ -75,7 +75,14 @@ const RETENTION_DAYS = (() => {
   return Number.isInteger(n) && n > 0 ? n : 30;
 })();
 const RETENTION_DRY_RUN = process.env.RETENTION_DRY_RUN === '1';
-const MAX_JOBS_PER_DAY = parseInt(process.env.MAX_JOBS_PER_DAY || '6', 10) || 6;
+// `|| 6` treated 0 as absent, so an operator setting MAX_JOBS_PER_DAY=0 to stop
+// renders got six of them — the opposite of what they asked for, silently, on a
+// switch whose whole purpose is to spend nothing. Zero is a legitimate value
+// here; only nonsense falls back, the same stance RETENTION_DAYS takes.
+const MAX_JOBS_PER_DAY = (() => {
+  const n = parseInt(process.env.MAX_JOBS_PER_DAY ?? '6', 10);
+  return Number.isInteger(n) && n >= 0 ? n : 6;
+})();
 
 const VALID_GOALS = new Set(['polymath', 'golden_thread', 'inner_studio', 'open_gate', 'river']);
 
