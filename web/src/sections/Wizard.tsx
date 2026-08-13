@@ -43,6 +43,11 @@ interface WizardProps {
    * last possible moment.
    */
   tier: TierId
+  /**
+   * A program already chosen on the catalog page (#68). The wizard opens on
+   * the voice step rather than asking someone to pick what they just picked.
+   */
+  initialGoalId?: string | null
   onExit: () => void
   onHome: () => void
   onNavigate: (path: string) => void
@@ -172,10 +177,17 @@ function StepHeader({
 
 // ─── Wizard ──────────────────────────────────────────────────────────────────
 
-export default function Wizard({ door, tier, onExit, onHome, onNavigate }: WizardProps) {
+export default function Wizard({
+  door,
+  tier,
+  initialGoalId = null,
+  onExit,
+  onHome,
+  onNavigate,
+}: WizardProps) {
   const chosenTier = tierById(tier)
-  const [step, setStep] = useState(0)
-  const [goalId, setGoalId] = useState<string | null>(null)
+  const [step, setStep] = useState(initialGoalId ? 1 : 0)
+  const [goalId, setGoalId] = useState<string | null>(initialGoalId)
   const [customText, setCustomText] = useState('')
   const [voiceSetId, setVoiceSetId] = useState<VoiceSet['id'] | null>(null)
   const [agreed, setAgreed] = useState(false)

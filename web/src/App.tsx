@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import DoorChooser from '@/sections/DoorChooser'
+import CatalogHome from '@/sections/CatalogHome'
 import Landing from '@/sections/Landing'
 import Wizard from '@/sections/Wizard'
 import ProgramPage from '@/sections/ProgramPage'
@@ -7,7 +7,7 @@ import OrderPage from '@/sections/OrderPage'
 import ResendPage from '@/sections/ResendPage'
 import { PrivacyPage, RefundPage, TermsPage } from '@/sections/Legal'
 import type { LegalPageId } from '@/sections/Legal'
-import type { DoorId, TierId } from '@/lib/data'
+import type { DoorId, Goal, TierId } from '@/lib/data'
 
 type View = 'landing' | 'wizard'
 
@@ -115,6 +115,8 @@ export default function App() {
   const [view, setView] = useState<View>('landing')
   /** Which tier the visitor chose, carried to the flow that fulfils it (#69). */
   const [tier, setTier] = useState<TierId>('program')
+  /** A program chosen from the catalog, so the wizard does not ask again. */
+  const [initialGoal, setInitialGoal] = useState<string | null>(null)
 
   useEffect(() => {
     // Back/forward must work for the policy pages too, so popstate resolves both
@@ -199,6 +201,26 @@ export default function App() {
     setView('wizard')
   }
 
+  /**
+   * Buy a specific program straight from the catalog (#68).
+   *
+   * The wizard lives inside a door, so this sets one from the program itself —
+   * the catalog has no door of its own, and picking a default would send a
+   * healing visitor into the performance flow. The goal is carried through so
+   * the wizard opens on the program that was chosen rather than asking again.
+   */
+  function chooseProgram(goal: Goal) {
+    window.history.pushState({}, '', `/${goal.door}`)
+    setDoor(goal.door)
+    setLegal(null)
+    setJob(null)
+    setOrder(null)
+    setResend(false)
+    setTier('program')
+    setInitialGoal(goal.id)
+    setView('wizard')
+  }
+
   // Checked first: someone arriving at their order or their program has come
   // back for something they bought, and must not be handed the door chooser
   // because they happen to have no door in the URL.
@@ -237,10 +259,18 @@ export default function App() {
     )
   }
 
+  // `/` is the catalog itself since #68, not a gate. The doors are still real
+  // routes below — they are simply no longer mandatory, and a cold visitor sees
+  // programs, audio and prices without first declaring who they are.
   if (door === null) {
     return (
       <div className="min-h-screen">
-        <DoorChooser onEnter={enterDoor} onNavigate={goTo} />
+        <CatalogHome
+          onEnterDoor={enterDoor}
+          onChooseProgram={chooseProgram}
+          onNavigate={goTo}
+          onHome={goHome}
+        />
       </div>
     )
   }
@@ -258,6 +288,7 @@ export default function App() {
         <Wizard
           door={door}
           tier={tier}
+          initialGoalId={initialGoal}
           onExit={() => setView('landing')}
           onHome={goHome}
           onNavigate={goTo}
