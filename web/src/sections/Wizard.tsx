@@ -38,6 +38,8 @@ import {
   RENDER_FAILURE_GUARANTEE,
   SUPPORT_EMAIL,
 } from '@/lib/legal'
+import { CHECKOUT_MESSAGE, startCheckout } from '@/lib/checkout'
+import type { CheckoutFailure } from '@/lib/checkout'
 import GoalCardText from '@/components/GoalCardText'
 import SiteFooter from '@/components/SiteFooter'
 import { cn } from '@/lib/utils'
@@ -430,6 +432,8 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
   const [accessCode, setAccessCode] = useState('')
   const [codeError, setCodeError] = useState<string | null>(null)
   const [jobResult, setJobResult] = useState<JobResult | null>(null)
+  const [checkoutBusy, setCheckoutBusy] = useState(false)
+  const [checkoutError, setCheckoutError] = useState<CheckoutFailure | null>(null)
   const audio = useAudioPreview()
 
   // Only what can be bought. Step 1 is the purchase screen: someone who has
@@ -458,6 +462,10 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
     setAttested(false)
     setCodeError(null)
     setJobResult(null)
+    // A stale "Checkout is not open yet" would otherwise greet the next
+    // program's result screen, describing an attempt from the previous one.
+    setCheckoutBusy(false)
+    setCheckoutError(null)
     goTo(0)
   }
 
@@ -957,12 +965,30 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
               })()}
               <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
                 <Button
-                  disabled
                   size="lg"
-                  className="cursor-not-allowed bg-white/10 text-white/40"
+                  disabled={checkoutBusy}
+                  onClick={async () => {
+                    setCheckoutBusy(true)
+                    setCheckoutError(null)
+                    // Resolves to null only because the page is already
+                    // navigating to Stripe; there is nothing to do in that case.
+                    const failure = await startCheckout(
+                      goal.apiGoal ?? goal.id,
+                      voiceSet.id,
+                    )
+                    if (failure) {
+                      setCheckoutError(failure)
+                      setCheckoutBusy(false)
+                    }
+                  }}
+                  className="bg-primary text-primary-foreground hover:bg-violet-300 disabled:opacity-40"
                 >
-                  <Lock className="size-4" />
-                  Checkout (coming soon)
+                  {checkoutBusy ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Lock className="size-4" />
+                  )}
+                  {checkoutBusy ? 'Opening checkout…' : `Checkout · ${PROGRAM_PRICE}`}
                 </Button>
                 <Button
                   size="lg"
@@ -974,6 +1000,14 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
                   Create another
                 </Button>
               </div>
+              {checkoutError && (
+                <p
+                  role="status"
+                  className="mt-4 text-center text-sm text-white/70"
+                >
+                  {CHECKOUT_MESSAGE[checkoutError]}
+                </p>
+              )}
             </section>
           )}
         </div>
