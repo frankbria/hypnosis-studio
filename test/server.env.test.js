@@ -85,3 +85,42 @@ test('.env supplies values, and the real environment beats it', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('ENVIRONMENT.md stays true to the code it describes', () => {
+  // The doc exists because a .env was created that nothing read. A doc that
+  // drifts is the same failure with extra steps, so the checkable claims are
+  // checked.
+  const doc = fs.readFileSync(path.join(ROOT, 'ENVIRONMENT.md'), 'utf8');
+
+  // 1. "one outbound call" — the scope recommendation rests entirely on this.
+  const engineDir = path.join(ROOT, 'engine');
+  const py = fs.readdirSync(engineDir).filter((f) => f.endsWith('.py'));
+  let urlopens = 0;
+  const hosts = new Set();
+  for (const f of py) {
+    const src = fs.readFileSync(path.join(engineDir, f), 'utf8');
+    urlopens += (src.match(/urlopen\(/g) || []).length;
+    for (const m of src.matchAll(/https:\/\/([a-z0-9.-]+)/gi)) hosts.add(m[1].toLowerCase());
+  }
+  assert.strictEqual(urlopens, 1,
+    `ENVIRONMENT.md says there is one outbound call; the engine now makes ${urlopens}. ` +
+    'If a second endpoint was added, the recommended key scope is wrong.');
+  assert.deepStrictEqual([...hosts], ['api.elevenlabs.io'],
+    `the engine now talks to ${[...hosts].join(', ')} — the documented scope covers only ElevenLabs`);
+
+  // 2. Voice ids and the model are hardcoded, which is WHY Voices/Models are
+  //    not needed on the key.
+  const track = fs.readFileSync(path.join(engineDir, 'render_track.py'), 'utf8');
+  assert.match(track, /model_id":\s*"eleven_v3"/,
+    'the model is no longer a literal — a Models scope may now be required');
+
+  // 3. The precedence claim.
+  const server = codeOnly(fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8'));
+  assert.match(server, /process\.loadEnvFile/,
+    'ENVIRONMENT.md documents a .env loader that no longer exists');
+
+  // 4. The doc names the production env file; it must match DEPLOYMENT.md.
+  const deployment = fs.readFileSync(path.join(ROOT, 'DEPLOYMENT.md'), 'utf8');
+  assert.ok(doc.includes('engine/api.env') && deployment.includes('engine/api.env'),
+    'ENVIRONMENT.md and DEPLOYMENT.md disagree about where production reads env from');
+});
