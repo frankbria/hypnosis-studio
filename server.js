@@ -802,44 +802,86 @@ function verifyStripeSignature(raw, header, secret) {
   });
 }
 
-// One file per paid session, created with `wx` so the create IS the claim:
-// the filesystem decides the winner, with no read-then-write window for two
-// concurrent deliveries of the same event to both pass through.
+// One file per paid session. The record is never deleted — it is the evidence
+// that money changed hands, and #24 grows it into the order proper. What makes
+// replay safe is not the file's existence but what it says.
 //
-// ponytail: these accumulate — ~100 bytes per order, never reaped. At any
-// plausible volume that is kilobytes a year, and the alternative (expiring
-// them) would let an old event replay into a second paid render. Revisit only
-// if it ever becomes a real number; #24 turns this record into the order.
+// ponytail: these accumulate — ~150 bytes per order, never reaped. At any
+// plausible volume that is kilobytes a year, and expiring them would let an old
+// event replay into a second paid render.
 function sessionsDir() {
   return path.join(RENDERS, '.sessions');
 }
 
-// true = claimed by this call, false = already claimed, null = could not tell.
-// null must not be treated as "already done": that would silently drop a paid
-// order on a full disk.
+function claimPath(sessionId) {
+  return path.join(sessionsDir(), `${sessionId}.json`);
+}
+
+// How long a claim is treated as "someone is on it right now".
+//
+// Two concurrent deliveries of the same event land milliseconds apart, so the
+// loser must back off. An operator hitting "Resend event" in the dashboard to
+// recover a paid order does so minutes or days later, and must NOT be told the
+// order is already handled when it visibly is not.
+const RECLAIM_AFTER_MS = 60 * 1000;
+
+// May this session be rendered, given a claim that already exists?
+//
+// Deliberately conservative about the cases it cannot read: an unparseable
+// claim means we do not know whether this order already rendered, and guessing
+// "no" spends TTS credits on a maybe. Under-delivering is visible in the log
+// and recoverable by a person; over-delivering is money already gone.
+function claimIsRecoverable(claim) {
+  if (!claim || typeof claim !== 'object') return false;
+  const age = Date.now() - Date.parse(claim.claimedAt || 0);
+  if (!Number.isFinite(age) || age < RECLAIM_AFTER_MS) return false;
+  // Claimed, but no render ever started — the process died between the claim
+  // and the spawn, or the studio refused at the time (a spent budget, a full
+  // disk). The order is paid and still owed.
+  if (!claim.jobId) return true;
+  const st = readJsonSafe(path.join(jobDir(claim.jobId), 'status.json'));
+  if (!st) return true;                 // job directory gone; nothing was delivered
+  return st.state === 'failed';
+}
+
+// true = claimed by this call, false = already claimed by someone live,
+// null = could not tell. null must not be read as "already done": that would
+// silently drop a paid order on a full disk.
 function claimSession(sessionId, record) {
   try {
     fs.mkdirSync(sessionsDir(), { recursive: true });
-    fs.writeFileSync(path.join(sessionsDir(), `${sessionId}.json`),
-      JSON.stringify(record, null, 2), { flag: 'wx' });
+    fs.writeFileSync(claimPath(sessionId), JSON.stringify(record, null, 2), { flag: 'wx' });
     return true;
   } catch (e) {
-    if (e.code === 'EEXIST') return false;
-    console.error('could not record session', sessionId, e && e.message);
-    return null;
+    if (e.code !== 'EEXIST') {
+      console.error('could not record session', sessionId, e && e.message);
+      return null;
+    }
+    const existing = readJsonSafe(claimPath(sessionId));
+    if (!claimIsRecoverable(existing)) return false;
+    // Recoverable: take it over. The window between this read and the write is
+    // reachable only by two deliveries of a session whose previous render
+    // already failed, and startRender's own concurrency lock refuses the second
+    // with `busy`. Naming the ceiling rather than reaching for a lock file.
+    console.warn('session', sessionId, 'is claimed but never delivered - rendering it again');
+    return writeClaim(sessionId, record) ? true : null;
   }
 }
 
-function releaseSession(sessionId) {
+// Atomically, the way writeStatus writes status.json. A half-written claim is
+// unparseable, and an unparseable claim is treated as "cannot tell" above —
+// which strands the order rather than losing it twice.
+function writeClaim(sessionId, record) {
+  const p = claimPath(sessionId);
+  const tmp = `${p}.tmp`;
   try {
-    fs.unlinkSync(path.join(sessionsDir(), `${sessionId}.json`));
+    fs.mkdirSync(sessionsDir(), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(record, null, 2));
+    fs.renameSync(tmp, p);
+    return true;
   } catch (e) {
-    // Left behind, the claim blocks Stripe's retry from ever starting the
-    // render — a paid order that never renders and never refunds.
-    if (e.code !== 'ENOENT') {
-      console.error('could not release session claim', sessionId, e && e.message,
-        '- a retry of this event will be ignored');
-    }
+    console.error('could not write session record', sessionId, e && e.message);
+    return false;
   }
 }
 
@@ -883,7 +925,16 @@ function startRender(goal, voiceSet) {
   }
 
   const jobId = 'job_' + Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
-  fs.mkdirSync(jobDir(jobId), { recursive: true });
+  // Guarded because this is the one synchronous fs call on the path, and the
+  // webhook caller has already taken a session claim by the time it runs. A
+  // throw here would skip every refusal branch below and surface as a bare 500,
+  // leaving that claim behind with no render against it.
+  try {
+    fs.mkdirSync(jobDir(jobId), { recursive: true });
+  } catch (e) {
+    console.error('could not create a job directory:', e && e.message);
+    return refuse(503, { error: 'storage_unavailable' });
+  }
   writeStatus(jobId, {
     jobId, state: 'rendering', stage: 'scripting', progress: 0,
     detail: 'Queued',
@@ -1131,9 +1182,10 @@ async function handleRequest(req, res) {
     // Claim before rendering, so two concurrent deliveries cannot both start
     // one. The claim is written first and filled in after, because the atomic
     // create is the lock.
+    const claimedAt = new Date();
     const claimed = claimSession(sessionId, {
       sessionId, goal: meta.goal, voiceSet: meta.voiceSet,
-      claimedAt: new Date().toISOString(),
+      claimedAt: claimedAt.toISOString(),
     });
     if (claimed === null) {
       // Could not write the claim. Failing loudly makes Stripe retry, which is
@@ -1147,26 +1199,35 @@ async function handleRequest(req, res) {
 
     const started = startRender(meta.goal, meta.voiceSet);
     if (started.error) {
-      // Give the claim back, or Stripe's retry finds it taken and the paid
-      // order never renders.
-      releaseSession(sessionId);
+      // The claim STAYS, recording that this session was paid for and is still
+      // owed a render. It carries no jobId, so it reads as recoverable: a
+      // Stripe retry or a manual resend past RECLAIM_AFTER_MS renders it.
+      writeClaim(sessionId, {
+        sessionId, goal: meta.goal, voiceSet: meta.voiceSet,
+        claimedAt: claimedAt.toISOString(),
+        lastError: started.error,
+        lastErrorAt: new Date().toISOString(),
+      });
+      // A spent monthly allowance does not come back inside Stripe's ~3-day
+      // retry window, so reporting it as transient means the delivery quietly
+      // drops out of the queue with the order unfulfilled and nobody told.
+      // 422 puts it in the dashboard as a permanent failure instead.
+      if (started.error === 'budget_exhausted') {
+        console.error('webhook: PAID SESSION', sessionId, 'cannot be rendered this month -',
+          'the monthly allowance is spent. THIS ORDER NEEDS A HUMAN (refund or a raised budget).');
+        return sendJson(res, 422, { error: started.error });
+      }
       console.error('webhook: PAID SESSION', sessionId, 'could not start a render:',
-        started.error);
+        started.error, '- Stripe will retry');
       return sendJson(res, 500, { error: started.error });
     }
-    // Record the job against the session now that there is one. Overwrites the
-    // claim rather than creating it — the claim above is the lock, this is the
-    // content. #24 grows this into the order record; #27 is what lets the
-    // customer find it again.
-    try {
-      fs.writeFileSync(path.join(sessionsDir(), `${sessionId}.json`), JSON.stringify({
-        sessionId, jobId: started.jobId, goal: meta.goal, voiceSet: meta.voiceSet,
-        claimedAt: new Date().toISOString(),
-      }, null, 2));
-    } catch (e) {
-      // The render is already running; losing the link only costs the lookup.
-      console.error('could not link job', started.jobId, 'to session', sessionId, e && e.message);
-    }
+    // Record the job against the session now that there is one. The `wx` create
+    // above was the lock; this is the content. #24 grows it into the order
+    // record; #27 is what lets the customer find it again.
+    writeClaim(sessionId, {
+      sessionId, jobId: started.jobId, goal: meta.goal, voiceSet: meta.voiceSet,
+      claimedAt: claimedAt.toISOString(),
+    });
     console.log('webhook: session', sessionId, 'started render', started.jobId);
     return sendJson(res, 200, { received: true, jobId: started.jobId });
   }

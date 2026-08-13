@@ -112,7 +112,9 @@ exit 0
 }
 
 async function startServer(env = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webhook-'));
+  // A caller may supply the directory when a test needs the same renders volume
+  // across two server lifetimes (the resend-recovery cases).
+  const dir = env.RENDERS_DIR || fs.mkdtempSync(path.join(os.tmpdir(), 'webhook-'));
   const port = await freePort();
   const proc = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
     cwd: ROOT,
@@ -366,6 +368,142 @@ test('two different sessions each get their own render', async () => {
     assert.strictEqual(jobs(srv.rendersDir).length, 2, 'the second session was treated as a replay');
   } finally {
     stop(srv);
+  }
+});
+
+// --------------------------------------------------------------------------
+// Recovering a paid order that did not render
+//
+// The replay guard must not become a trap. Every case below is an order the
+// customer has already paid for and has nothing to show for.
+// --------------------------------------------------------------------------
+
+test('a resend after the render failed starts a new render', async () => {
+  // The original delivery answered 200, so Stripe will not retry on its own.
+  // Hitting "Resend event" in the dashboard is the recovery path, and it has to
+  // actually recover something.
+  const srv = await startServer();
+  try {
+    const raw = completedEvent();
+    await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    await settle();
+    const [first] = jobs(srv.rendersDir);
+    assert.ok(first, 'no first render');
+
+    // The render failed, and the claim is old enough to no longer read as
+    // "another delivery is working on it right now".
+    fs.writeFileSync(path.join(srv.rendersDir, first, 'status.json'), JSON.stringify({
+      jobId: first, state: 'failed', stage: null, progress: 0, error: 'TTS gave up',
+      updatedAt: new Date().toISOString(),
+    }));
+    const claimFile = path.join(srv.rendersDir, '.sessions', 'cs_test_1.json');
+    const claim = JSON.parse(fs.readFileSync(claimFile, 'utf8'));
+    claim.claimedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    fs.writeFileSync(claimFile, JSON.stringify(claim));
+
+    const res = await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    assert.strictEqual(res.status, 200, res.body);
+    await settle();
+    assert.strictEqual(jobs(srv.rendersDir).length, 2,
+      'the paid order could not be recovered by a resend');
+  } finally {
+    stop(srv);
+  }
+});
+
+test('a resend does not re-render an order that succeeded', async () => {
+  const srv = await startServer();
+  try {
+    const raw = completedEvent();
+    await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    await settle();
+    // The stub engine writes `ready`. Age the claim past the window so only the
+    // job's own outcome decides.
+    const claimFile = path.join(srv.rendersDir, '.sessions', 'cs_test_1.json');
+    const claim = JSON.parse(fs.readFileSync(claimFile, 'utf8'));
+    claim.claimedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    fs.writeFileSync(claimFile, JSON.stringify(claim));
+
+    const res = await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.json.duplicate, true);
+    await settle();
+    assert.strictEqual(jobs(srv.rendersDir).length, 1, 'a delivered order was rendered twice');
+  } finally {
+    stop(srv);
+  }
+});
+
+test('a claim that could not be read is not rendered again', async () => {
+  // "Cannot tell whether this already rendered" must not resolve to spending
+  // credits. It is visible in the log and a person can clear the file.
+  const srv = await startServer();
+  try {
+    const raw = completedEvent();
+    await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    await settle();
+    fs.writeFileSync(path.join(srv.rendersDir, '.sessions', 'cs_test_1.json'), '{ truncated');
+
+    const res = await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.json.duplicate, true);
+    await settle();
+    assert.strictEqual(jobs(srv.rendersDir).length, 1);
+  } finally {
+    stop(srv);
+  }
+});
+
+test('a refused render leaves the order recorded and still owed', async () => {
+  // The studio is out of monthly allowance. The claim must survive — it is the
+  // evidence the customer paid — and must not read as delivered.
+  const srv = await startServer({ MONTHLY_CHAR_BUDGET: '1' });
+  try {
+    const raw = completedEvent();
+    const res = await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    // Not 500: a spent monthly allowance does not come back inside Stripe's
+    // ~3-day retry window, so a transient status drops the order silently.
+    assert.strictEqual(res.status, 422, res.body);
+    await settle();
+    assert.deepStrictEqual(jobs(srv.rendersDir), [], 'a render started with no budget');
+
+    const claim = JSON.parse(
+      fs.readFileSync(path.join(srv.rendersDir, '.sessions', 'cs_test_1.json'), 'utf8'));
+    assert.strictEqual(claim.jobId, undefined, 'the order claims a render that never started');
+    assert.strictEqual(claim.lastError, 'budget_exhausted');
+    assert.strictEqual(claim.goal, 'polymath', 'the order does not record what was bought');
+  } finally {
+    stop(srv);
+  }
+});
+
+test('a paid order refused at the time is rendered when the event is resent', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webhook-recover-'));
+  const raw = completedEvent();
+  let srv = await startServer({ RENDERS_DIR: dir, MONTHLY_CHAR_BUDGET: '1' });
+  try {
+    const res = await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    assert.strictEqual(res.status, 422, res.body);
+    await settle();
+    assert.deepStrictEqual(jobs(dir), []);
+  } finally {
+    try { srv.proc.kill('SIGKILL'); } catch { /* gone */ }
+  }
+
+  // Age the claim past the "someone is on it" window, then resend.
+  const claimFile = path.join(dir, '.sessions', 'cs_test_1.json');
+  const claim = JSON.parse(fs.readFileSync(claimFile, 'utf8'));
+  claim.claimedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  fs.writeFileSync(claimFile, JSON.stringify(claim));
+
+  srv = await startServer({ RENDERS_DIR: dir });
+  try {
+    const res = await post(srv.port, '/api/stripe/webhook', raw, { 'Stripe-Signature': sign(raw) });
+    assert.strictEqual(res.status, 200, res.body);
+    await settle();
+    assert.strictEqual(jobs(dir).length, 1, 'the recovered order still did not render');
+  } finally {
+    stop({ proc: srv.proc, rendersDir: dir });
   }
 });
 
