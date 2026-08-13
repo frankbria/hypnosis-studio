@@ -220,6 +220,33 @@ const WEBHOOK_TOLERANCE_S = 300;
 
 const CHECKOUT_TIMEOUT_MS = 10000;
 
+// ---- credit preflight (#25) ------------------------------------------------
+//
+// The daily cap and the ElevenLabs plan quota were never reconciled: ~20k
+// characters a program against a 500k plan is ~25 programs a month, while
+// MAX_JOBS_PER_DAY=6 permits ~180. Now that money changes hands the gap has a
+// specific shape — a customer pays, waits twenty minutes, and receives a
+// quota-exhaustion failure.
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
+// Overridable for the same reason STRIPE_API_BASE is: the tests need a provider
+// they control, and "no request was made" has to be an assertion.
+const ELEVENLABS_API_BASE = process.env.ELEVENLABS_API_BASE || 'https://api.elevenlabs.io';
+
+// How long a balance reading is reused. The acceptance criterion is that this
+// does not add a provider round-trip to every page view; a minute is far longer
+// than a burst of checkouts and far shorter than the time it takes to spend a
+// meaningful number of credits.
+const CREDIT_CACHE_MS = (() => {
+  const n = parseInt(process.env.CREDIT_CACHE_MS || '60000', 10);
+  return Number.isFinite(n) && n > 0 ? n : 60000;
+})();
+
+const CREDIT_TIMEOUT_MS = 5000;
+
+// The last reading, kept even once stale. See creditsRemaining().
+let creditReading = null;   // { remaining, at }
+let creditInFlight = null;  // de-duplicates concurrent refreshes
+
 // A ceiling on how many Checkout Sessions this service will ask Stripe for.
 //
 // /api/programs is gated by ACCESS_CODE, the daily quota and the monthly budget;
@@ -966,6 +993,104 @@ function writeClaim(sessionId, record) {
   }
 }
 
+// ---- credit preflight ----
+
+// Characters left on the ElevenLabs plan, or null when it cannot be told.
+//
+// null is a real third answer and the callers treat it as such. Refusing every
+// sale because a metering endpoint is briefly unreachable closes the shop over
+// something that is not the shop's problem; the monthly ledger
+// (MONTHLY_CHAR_BUDGET) is the guard that actually bounds our own spend, and it
+// is local and always available.
+//
+// A stale reading beats no reading: a value from ten minutes ago is far closer
+// to the truth than a shrug, and credits do not move quickly at ~20k a program.
+// So null is only returned when the balance has NEVER been read successfully —
+// which in practice means the key is missing or lacks the `user_read` scope,
+// and that is a configuration problem an operator has to see in the log rather
+// than a reason to stop selling.
+async function creditsRemaining() {
+  if (creditReading && Date.now() - creditReading.at < CREDIT_CACHE_MS) {
+    return creditReading.remaining;
+  }
+  if (!ELEVENLABS_API_KEY) return null;
+  // One refresh at a time. A burst of checkouts on a cold cache would otherwise
+  // each open their own request to the provider.
+  if (!creditInFlight) {
+    creditInFlight = fetchCredits().finally(() => { creditInFlight = null; });
+  }
+  const fresh = await creditInFlight;
+  if (fresh !== null) {
+    creditReading = { remaining: fresh, at: Date.now() };
+    return fresh;
+  }
+  return creditReading ? creditReading.remaining : null;
+}
+
+async function fetchCredits() {
+  let r;
+  try {
+    r = await fetch(`${ELEVENLABS_API_BASE}/v1/user/subscription`, {
+      headers: { 'xi-api-key': ELEVENLABS_API_KEY },
+      signal: AbortSignal.timeout(CREDIT_TIMEOUT_MS),
+    });
+  } catch (e) {
+    console.error('elevenlabs: could not read the credit balance:', e && e.message);
+    return null;
+  }
+  if (!r.ok) {
+    // 401 here almost always means the key is scoped to Text to Speech only.
+    // Naming the scope saves an operator the hour this would otherwise take.
+    console.error('elevenlabs: credit balance request returned', r.status,
+      r.status === 401
+        ? '- the key may lack the `user_read` scope, which this preflight needs'
+        : '');
+    return null;
+  }
+  let json;
+  try {
+    json = await r.json();
+  } catch {
+    console.error('elevenlabs: credit balance response was not JSON');
+    return null;
+  }
+  const used = json && json.character_count;
+  const limit = json && json.character_limit;
+  if (!Number.isFinite(used) || !Number.isFinite(limit)) {
+    console.error('elevenlabs: credit balance response had no usable counts');
+    return null;
+  }
+  return Math.max(0, limit - used);
+}
+
+// Can this exact program be rendered? Returns null when it can, or a reason.
+//
+// Checked at CHECKOUT rather than at render start, which is the whole point of
+// #25: startRender() runs from the webhook, so every refusal it makes now
+// happens after the customer has paid.
+//
+// Priced against the specific goal and voice set rather than the worst-case
+// program: since #9 a repeat of the same pair costs nothing, and refusing a
+// render that is free would be a lost sale over credits that would not be
+// spent.
+async function capacityProblem(goal, voiceSet) {
+  const cost = uncachedChars(goal, voiceSet);
+  if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) {
+    console.error('could not price goal', goal, '- refusing rather than guessing');
+    return 'could not price the program';
+  }
+  // The local ledger first: no network call, and it is the limit that actually
+  // binds our own spend.
+  if (budgetRemaining() < cost) {
+    return `the monthly allowance is spent (needs ${cost}, ${budgetRemaining()} left)`;
+  }
+  const credit = await creditsRemaining();
+  if (credit !== null && credit < cost) {
+    return `the voice provider has ${credit} characters left, this program needs ${cost}`;
+  }
+  return null;
+}
+
 // ---- starting a render ----
 
 // Every ledger check, in the one order they have to happen in, ending with a
@@ -1353,8 +1478,21 @@ async function handleRequest(req, res) {
     if (!STRIPE_SECRET_KEY || !PUBLIC_BASE_URL) {
       return sendJson(res, 503, { error: 'checkout_disabled' });
     }
-    // Last, so a rejected or unconfigured request never spends a slot — the cap
-    // exists to bound calls to Stripe, and those two never reach it.
+    // Can this actually be rendered? Asked HERE and not at render start, which
+    // is the whole of #25: the render begins from the webhook, so a refusal
+    // there arrives after the money has been taken and costs a refund, a
+    // support contact and a wasted partial spend.
+    const problem = await capacityProblem(body.goal, body.voiceSet);
+    if (problem) {
+      console.warn('refusing checkout:', problem);
+      return sendJson(res, 503, {
+        error: 'temporarily_unavailable',
+        detail: 'the studio cannot take a new program right now',
+      });
+    }
+    // Last, so a rejected, unconfigured or unrenderable request never spends a
+    // slot — the cap exists to bound calls to Stripe, and none of those reach
+    // it.
     if (!checkoutRateOk()) {
       console.warn('checkout rate cap reached -', CHECKOUT_MAX_PER_MINUTE, 'per minute');
       return sendJson(res, 429, { error: 'rate_limited' });

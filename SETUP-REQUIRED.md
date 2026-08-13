@@ -95,8 +95,12 @@ fine; raise it only if real traffic ever approaches it.
 
 ## Already required, unchanged
 
-- `ELEVENLABS_API_KEY` — the one existing hard requirement. Scoped to
-  **Text to Speech → Access** only; see `ENVIRONMENT.md`.
+- `ELEVENLABS_API_KEY` — the one existing hard requirement. **Its scope changed
+  in #25**: it now needs **User → Read** as well as **Text to Speech → Access**,
+  so the server can check the remaining plan balance before letting anyone pay.
+  A key without the new scope keeps working — the preflight logs the missing
+  scope by name and falls back to the local monthly ledger — but the protection
+  it buys is off until you widen it. See `ENVIRONMENT.md`.
 - `ACCESS_CODE` — the prototype gate on `POST /api/programs`. Its old value is
   in git history and must be rotated before the site is public (#32).
 - `VITE_SUPPORT_EMAIL` — build-time, so changing it means rebuilding the
