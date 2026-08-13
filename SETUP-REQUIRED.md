@@ -10,6 +10,23 @@ question: *what does a person still have to go and get?*
 
 Status legend: 🔴 blocks launch · 🟡 needed before it is public · 🟢 optional
 
+**Nothing on this list is a code change.** Phase 2 is complete; every item here
+is a value only a person can obtain, plus one asset that needs a real render.
+
+## The short version
+
+| What | Variable | Without it |
+|---|---|---|
+| Stripe secret key | `STRIPE_SECRET_KEY` | checkout answers 503; nobody can buy |
+| Stripe webhook secret | `STRIPE_WEBHOOK_SECRET` | payments never start a render |
+| Public URL | `PUBLIC_BASE_URL` | checkout and the delivery email are both disabled |
+| Email provider | `EMAIL_API_KEY`, `EMAIL_FROM` | finished programs are never announced |
+| ElevenLabs scope | (widen the existing key) | the credit preflight is off |
+| Program samples | — | the front page offers a voice clip, not a program (#60) |
+
+**Set `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` together.** A secret key
+with no webhook secret takes payments that never render.
+
 ---
 
 ## 🔴 Stripe account and secret key — #22
@@ -21,7 +38,8 @@ Status legend: 🔴 blocks launch · 🟡 needed before it is public · 🟢 opt
 | Behaviour today | `POST /api/checkout` answers `503 checkout_disabled`; the delivery screen says "Checkout is not open yet." |
 | Where it goes | `<repo>/.env` locally; the systemd environment in production (see `ENVIRONMENT.md`) |
 
-#23 has now shipped, so setting this no longer means taking money for nothing —
+Both #22 and #23 have shipped, so setting this no longer means taking money for
+nothing —
 a signature-verified `checkout.session.completed` starts the render. Set
 `STRIPE_WEBHOOK_SECRET` below **in the same change**; a secret key with no
 webhook secret takes payments that never render.
@@ -129,6 +147,32 @@ Two variables for one address, because the site's copy is inlined by Vite at
 defaults ever disagree. Set both, and remember the site one needs a rebuild.
 
 It must be monitored by a person: `/refunds` and the delivery email both say so.
+
+## 🟡 Two-minute program samples — #60
+
+| | |
+|---|---|
+| Needs | a pre-rendered catalog (#58), which needs `ELEVENLABS_API_KEY` and real spend |
+| Current state | the catalog home page plays the existing **narrator voice clips** instead |
+
+#68 shipped the catalog home page with a playable sample, but the *intended*
+sample — two minutes of a real mixed program — does not exist, because #60 is
+blocked by #58 and #58 needs roughly 200k characters of ElevenLabs spend across
+ten renders.
+
+What is there now is honest: real audio of the voice that narrates the program.
+It deliberately **excludes the whisper clips**, because #60 is open partly
+because the whisper is previewed solo — unmixed, no narrator over it, no bed
+underneath, which is the most uncanny configuration synthetic audio can be in.
+
+This is the one thing on this list that is not a value to paste somewhere.
+
+## 🟢 If you shorten retention — #103
+
+The server now **refuses to start** if `RETENTION_DAYS` is below what the site
+promises, rather than deleting a customer's files three weeks before they were
+told. If you shorten it, change the copy in `web/src/lib/legal.ts`, rebuild the
+frontend, and set `RETENTION_PROMISED_DAYS` to match. Longer is always fine.
 
 ---
 
