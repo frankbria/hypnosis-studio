@@ -302,12 +302,19 @@ function GeneratingStep({
         } catch {
           reason = ''
         }
-        setError({
-          message:
-            reason === 'budget_exhausted'
+        // `rendering_requires_payment` is not a fault: the studio has switched
+        // the early-access code off because it now takes payment (#23). Telling
+        // someone to "try again shortly" would have them retrying a door that
+        // is never reopening.
+        const message =
+          reason === 'rendering_requires_payment'
+            ? 'Early access has closed — programs are now bought through checkout.'
+            : reason === 'budget_exhausted'
               ? 'The studio is at capacity for this month and is not taking new programs right now. Nothing has been charged.'
-              : 'The studio is temporarily unavailable. Nothing has been charged — please try again shortly.',
-          retryable: reason !== 'budget_exhausted',
+              : 'The studio is temporarily unavailable. Nothing has been charged — please try again shortly.'
+        setError({
+          message,
+          retryable: reason !== 'budget_exhausted' && reason !== 'rendering_requires_payment',
         })
         return
       }

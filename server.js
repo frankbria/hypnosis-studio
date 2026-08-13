@@ -208,6 +208,16 @@ const PUBLIC_BASE_URL = (() => {
   return raw;
 })();
 
+// The webhook signing secret (`whsec_…`), from the Stripe dashboard endpoint.
+// It is a DIFFERENT value from STRIPE_SECRET_KEY and is what turns an anonymous
+// POST into an authorisation to spend TTS credits. Setting it also closes the
+// ACCESS_CODE render path — see the /api/programs handler.
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
+
+// Stripe's own default. A captured request stays perfectly signed forever, so
+// the timestamp is the only thing that expires it.
+const WEBHOOK_TOLERANCE_S = 300;
+
 const CHECKOUT_TIMEOUT_MS = 10000;
 
 // A ceiling on how many Checkout Sessions this service will ask Stripe for.
@@ -260,6 +270,35 @@ function send(res, code, body, headers = {}) {
 
 function sendJson(res, code, obj) {
   send(res, code, JSON.stringify(obj), { 'Content-Type': 'application/json; charset=utf-8' });
+}
+
+// The bytes exactly as they arrived.
+//
+// The webhook cannot use readBody(): Stripe signs the body it sent, and
+// JSON.stringify(JSON.parse(x)) is not x — key order, whitespace and unicode
+// escaping all differ — so verifying against a re-serialisation fails on
+// perfectly genuine events. Parsing happens only after the signature checks
+// out, which is also the right order for a security check.
+//
+// Resolves null when the body exceeds the cap, rather than verifying a
+// truncated prefix. Same 64 KB ceiling as readBody; a Stripe event is a few KB.
+function readRawBody(req) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    let size = 0;
+    let aborted = false;
+    req.on('data', (c) => {
+      if (aborted) return;
+      size += c.length;
+      if (size > 64 * 1024) { aborted = true; chunks.length = 0; req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(aborted ? null : Buffer.concat(chunks)));
+    // destroy() emits 'close' without 'end'; without this the promise never
+    // settles and the request handler is left awaiting forever.
+    req.on('close', () => resolve(aborted ? null : Buffer.concat(chunks)));
+    req.on('error', () => resolve(null));
+  });
 }
 
 function readBody(req) {
@@ -720,6 +759,161 @@ function startWorker(id, goal, voiceSet) {
   });
 }
 
+// ---- webhook (#23) ----
+
+// Verify a Stripe-Signature header against the raw body.
+//
+// The header is `t=<unix>,v1=<hex>[,v1=<hex>…]` — more than one v1 during a
+// secret rotation. The signed payload is `<t>.<raw>` using the timestamp STRING
+// from the header: parsing it to a Number and interpolating it back would
+// change the bytes for any value that does not round-trip identically.
+//
+// Never throws. timingSafeEqual rejects buffers of different lengths with a
+// TypeError, and a throw reachable from a request is how this service has taken
+// an outage before.
+function verifyStripeSignature(raw, header, secret) {
+  if (typeof header !== 'string' || !header) return false;
+
+  let timestamp = null;
+  const signatures = [];
+  for (const part of header.split(',')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    const key = part.slice(0, eq).trim();
+    const value = part.slice(eq + 1).trim();
+    if (key === 't') timestamp = value;
+    else if (key === 'v1') signatures.push(value);
+  }
+  if (timestamp === null || signatures.length === 0) return false;
+
+  const seconds = Number(timestamp);
+  if (!Number.isFinite(seconds)) return false;
+  if (Math.abs(Date.now() / 1000 - seconds) > WEBHOOK_TOLERANCE_S) return false;
+
+  const expected = crypto.createHmac('sha256', secret)
+    .update(`${timestamp}.`).update(raw).digest();
+
+  return signatures.some((sig) => {
+    // A malformed hex string yields a short buffer rather than an error, so the
+    // length check below is what keeps timingSafeEqual from throwing.
+    const given = Buffer.from(sig, 'hex');
+    if (given.length !== expected.length) return false;
+    return crypto.timingSafeEqual(given, expected);
+  });
+}
+
+// One file per paid session, created with `wx` so the create IS the claim:
+// the filesystem decides the winner, with no read-then-write window for two
+// concurrent deliveries of the same event to both pass through.
+//
+// ponytail: these accumulate — ~100 bytes per order, never reaped. At any
+// plausible volume that is kilobytes a year, and the alternative (expiring
+// them) would let an old event replay into a second paid render. Revisit only
+// if it ever becomes a real number; #24 turns this record into the order.
+function sessionsDir() {
+  return path.join(RENDERS, '.sessions');
+}
+
+// true = claimed by this call, false = already claimed, null = could not tell.
+// null must not be treated as "already done": that would silently drop a paid
+// order on a full disk.
+function claimSession(sessionId, record) {
+  try {
+    fs.mkdirSync(sessionsDir(), { recursive: true });
+    fs.writeFileSync(path.join(sessionsDir(), `${sessionId}.json`),
+      JSON.stringify(record, null, 2), { flag: 'wx' });
+    return true;
+  } catch (e) {
+    if (e.code === 'EEXIST') return false;
+    console.error('could not record session', sessionId, e && e.message);
+    return null;
+  }
+}
+
+function releaseSession(sessionId) {
+  try {
+    fs.unlinkSync(path.join(sessionsDir(), `${sessionId}.json`));
+  } catch (e) {
+    // Left behind, the claim blocks Stripe's retry from ever starting the
+    // render — a paid order that never renders and never refunds.
+    if (e.code !== 'ENOENT') {
+      console.error('could not release session claim', sessionId, e && e.message,
+        '- a retry of this event will be ignored');
+    }
+  }
+}
+
+// ---- starting a render ----
+
+// Every ledger check, in the one order they have to happen in, ending with a
+// live worker. Extracted at #23 because the webhook must take exactly this
+// path — "the same worker path used today" is the acceptance criterion, and two
+// copies of a sequence that charges a budget and bumps a quota is how one of
+// them ends up skipping a step.
+//
+// Returns `{ jobId }`, or `{ error, status, body }` describing the refusal. The
+// caller decides what to say: an HTTP client gets the status, Stripe gets a
+// retry-or-not decision.
+function startRender(goal, voiceSet) {
+  const refuse = (status, body) => ({ error: body.error, status, body });
+
+  if (anyJobRendering()) return refuse(409, { error: 'busy' });
+  // Daily cap first: it is the burst control and its answer is "come back
+  // tomorrow". The monthly budget is a different statement — "unavailable
+  // until the plan resets or is raised" — which is why it is a 503 and not a
+  // second 429. #25 needs that second one for its own preflight.
+  if (readQuota().count >= MAX_JOBS_PER_DAY) return refuse(429, { error: 'daily_cap' });
+
+  const cost = uncachedChars(goal, voiceSet);
+  // Unreachable today (GOAL_CHARS covers every VALID_GOAL), but the failure
+  // is silent and expensive if it ever is: `remaining < undefined` is false,
+  // so the render proceeds, then `chars += undefined` is NaN, which
+  // JSON.stringify writes as null, which readBudget rejects — zeroing the
+  // month's spend. Make the invariant explicit rather than rely on it.
+  if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) {
+    console.error('could not price goal', goal, '- refusing rather than guessing');
+    return refuse(503, { error: 'storage_unavailable' });
+  }
+  if (budgetRemaining() < cost) {
+    console.warn('refusing render: needs', cost, 'characters,', budgetRemaining(), 'left this month');
+    return refuse(503, {
+      error: 'budget_exhausted',
+      detail: 'temporarily unavailable — the monthly rendering allowance is spent',
+    });
+  }
+
+  const jobId = 'job_' + Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
+  fs.mkdirSync(jobDir(jobId), { recursive: true });
+  writeStatus(jobId, {
+    jobId, state: 'rendering', stage: 'scripting', progress: 0,
+    detail: 'Queued',
+  });
+  if (!chargeBudget(jobId, cost)) {
+    // Same reasoning as the quota below: a render the budget cannot see is a
+    // render the budget cannot bound.
+    writeStatus(jobId, {
+      jobId, state: 'failed', stage: null, progress: 0,
+      detail: 'could not record the render against the monthly budget',
+      error: 'budget storage unavailable',
+    });
+    return refuse(503, { error: 'storage_unavailable' });
+  }
+  if (!bumpQuota(jobId)) {
+    refundBudget(jobId);
+    // No spend. A render whose slot was never recorded is one the cap cannot
+    // see, and the volume that could not take 80 bytes of JSON is not going
+    // to hold ~500 MB of audio either.
+    writeStatus(jobId, {
+      jobId, state: 'failed', stage: null, progress: 0,
+      detail: 'could not record the render against the daily quota',
+      error: 'quota storage unavailable',
+    });
+    return refuse(503, { error: 'storage_unavailable' });
+  }
+  startWorker(jobId, goal, voiceSet);
+  return { jobId };
+}
+
 // ---- checkout ----
 
 // The catalog title, from the id. A GOAL_TITLES table here would be a second
@@ -866,65 +1060,115 @@ async function handleRequest(req, res) {
   }
 
   if (url === '/api/programs' && req.method === 'POST') {
+    // Once a verified webhook can authorise a render, it is the only thing that
+    // should. ACCESS_CODE is a shared, unrate-limited string that spends real
+    // credits and whose value has been in a public git history since the first
+    // commit (#32) — leaving it live beside a paid path means the paid path
+    // guards nothing.
+    if (STRIPE_WEBHOOK_SECRET) {
+      return sendJson(res, 503, { error: 'rendering_requires_payment' });
+    }
     if (!ACCESS_CODE) return sendJson(res, 503, { error: 'rendering_disabled' });
     const body = await readBody(req);
     if (body.accessCode !== ACCESS_CODE) return sendJson(res, 403, { error: 'bad_access_code' });
     if (!VALID_GOALS.has(body.goal)) return sendJson(res, 422, { error: 'goal_in_production' });
     if (!VALID_VOICE_SETS.has(body.voiceSet)) return sendJson(res, 422, { error: 'bad_voice_set' });
-    if (anyJobRendering()) return sendJson(res, 409, { error: 'busy' });
-    // Daily cap first: it is the burst control and its answer is "come back
-    // tomorrow". The monthly budget is a different statement — "unavailable
-    // until the plan resets or is raised" — which is why it is a 503 and not a
-    // second 429. #25 needs that second one for its own preflight.
-    if (readQuota().count >= MAX_JOBS_PER_DAY) return sendJson(res, 429, { error: 'daily_cap' });
-    const cost = uncachedChars(body.goal, body.voiceSet);
-    // Unreachable today (GOAL_CHARS covers every VALID_GOAL), but the failure
-    // is silent and expensive if it ever is: `remaining < undefined` is false,
-    // so the render proceeds, then `chars += undefined` is NaN, which
-    // JSON.stringify writes as null, which readBudget rejects — zeroing the
-    // month's spend. Make the invariant explicit rather than rely on it.
-    if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) {
-      console.error('could not price goal', body.goal, '- refusing rather than guessing');
-      return sendJson(res, 503, { error: 'storage_unavailable' });
+    const started = startRender(body.goal, body.voiceSet);
+    if (started.error) return sendJson(res, started.status, started.body);
+    return sendJson(res, 202, { jobId: started.jobId, state: 'rendering' });
+  }
+
+  if (url === '/api/stripe/webhook' && req.method === 'POST') {
+    // Refuse rather than trust the body. An unconfigured webhook that accepted
+    // events would be an open "render this for free" endpoint.
+    if (!STRIPE_WEBHOOK_SECRET) {
+      console.error('a webhook arrived but STRIPE_WEBHOOK_SECRET is not set');
+      return sendJson(res, 503, { error: 'webhook_not_configured' });
     }
-    if (budgetRemaining() < cost) {
-      console.warn('refusing render: needs', cost, 'characters,', budgetRemaining(), 'left this month');
-      return sendJson(res, 503, {
-        error: 'budget_exhausted',
-        detail: 'temporarily unavailable — the monthly rendering allowance is spent',
-      });
+    const raw = await readRawBody(req);
+    if (raw === null) return sendJson(res, 400, { error: 'bad_request' });
+    if (!verifyStripeSignature(raw, req.headers['stripe-signature'], STRIPE_WEBHOOK_SECRET)) {
+      console.warn('rejected a webhook with an invalid signature');
+      return sendJson(res, 400, { error: 'bad_signature' });
     }
 
-    const jobId = 'job_' + Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
-    fs.mkdirSync(jobDir(jobId), { recursive: true });
-    writeStatus(jobId, {
-      jobId, state: 'rendering', stage: 'scripting', progress: 0,
-      detail: 'Queued',
+    let event;
+    try {
+      event = JSON.parse(raw.toString('utf8'));
+    } catch {
+      return sendJson(res, 400, { error: 'bad_request' });
+    }
+    if (!event || typeof event !== 'object') return sendJson(res, 400, { error: 'bad_request' });
+
+    // 200 for everything we do not act on. Stripe sends whatever the endpoint
+    // is subscribed to, and a non-2xx makes it retry for days.
+    if (event.type !== 'checkout.session.completed') return sendJson(res, 200, { received: true });
+
+    const session = (event.data && event.data.object) || {};
+    // checkout.session.completed also fires for asynchronous payment methods
+    // before the money has arrived.
+    if (session.payment_status !== 'paid') {
+      console.log('session', session.id, 'completed but is', session.payment_status, '- not rendering');
+      return sendJson(res, 200, { received: true });
+    }
+
+    const sessionId = session.id;
+    const meta = session.metadata || {};
+    // The id becomes a filename. It arrives inside a verified payload, but a
+    // path separator reaching writeFileSync is not something to leave to trust.
+    if (typeof sessionId !== 'string' || !SAFE_ID.test(sessionId)) {
+      console.error('webhook: unusable session id', JSON.stringify(sessionId));
+      return sendJson(res, 422, { error: 'bad_session' });
+    }
+    // Deliberately not 2xx: this is a paid order the studio cannot fulfil, and
+    // it must show up as a failed delivery in the dashboard rather than vanish.
+    if (!VALID_GOALS.has(meta.goal) || !VALID_VOICE_SETS.has(meta.voiceSet)) {
+      console.error('webhook: PAID SESSION', sessionId, 'names no valid program:',
+        JSON.stringify(meta), '- this order needs a human');
+      return sendJson(res, 422, { error: 'bad_metadata' });
+    }
+
+    // Claim before rendering, so two concurrent deliveries cannot both start
+    // one. The claim is written first and filled in after, because the atomic
+    // create is the lock.
+    const claimed = claimSession(sessionId, {
+      sessionId, goal: meta.goal, voiceSet: meta.voiceSet,
+      claimedAt: new Date().toISOString(),
     });
-    if (!chargeBudget(jobId, cost)) {
-      // Same reasoning as the quota below: a render the budget cannot see is a
-      // render the budget cannot bound.
-      writeStatus(jobId, {
-        jobId, state: 'failed', stage: null, progress: 0,
-        detail: 'could not record the render against the monthly budget',
-        error: 'budget storage unavailable',
-      });
-      return sendJson(res, 503, { error: 'storage_unavailable' });
+    if (claimed === null) {
+      // Could not write the claim. Failing loudly makes Stripe retry, which is
+      // the only path back to rendering an order that has been paid for.
+      return sendJson(res, 500, { error: 'storage_unavailable' });
     }
-    if (!bumpQuota(jobId)) {
-      refundBudget(jobId);
-      // No spend. A render whose slot was never recorded is one the cap cannot
-      // see, and the volume that could not take 80 bytes of JSON is not going
-      // to hold ~500 MB of audio either.
-      writeStatus(jobId, {
-        jobId, state: 'failed', stage: null, progress: 0,
-        detail: 'could not record the render against the daily quota',
-        error: 'quota storage unavailable',
-      });
-      return sendJson(res, 503, { error: 'storage_unavailable' });
+    if (claimed === false) {
+      console.log('webhook: session', sessionId, 'already handled - not rendering again');
+      return sendJson(res, 200, { received: true, duplicate: true });
     }
-    startWorker(jobId, body.goal, body.voiceSet);
-    return sendJson(res, 202, { jobId, state: 'rendering' });
+
+    const started = startRender(meta.goal, meta.voiceSet);
+    if (started.error) {
+      // Give the claim back, or Stripe's retry finds it taken and the paid
+      // order never renders.
+      releaseSession(sessionId);
+      console.error('webhook: PAID SESSION', sessionId, 'could not start a render:',
+        started.error);
+      return sendJson(res, 500, { error: started.error });
+    }
+    // Record the job against the session now that there is one. Overwrites the
+    // claim rather than creating it — the claim above is the lock, this is the
+    // content. #24 grows this into the order record; #27 is what lets the
+    // customer find it again.
+    try {
+      fs.writeFileSync(path.join(sessionsDir(), `${sessionId}.json`), JSON.stringify({
+        sessionId, jobId: started.jobId, goal: meta.goal, voiceSet: meta.voiceSet,
+        claimedAt: new Date().toISOString(),
+      }, null, 2));
+    } catch (e) {
+      // The render is already running; losing the link only costs the lookup.
+      console.error('could not link job', started.jobId, 'to session', sessionId, e && e.message);
+    }
+    console.log('webhook: session', sessionId, 'started render', started.jobId);
+    return sendJson(res, 200, { received: true, jobId: started.jobId });
   }
 
   if (url === '/api/checkout' && req.method === 'POST') {
