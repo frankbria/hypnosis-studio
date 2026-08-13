@@ -16,8 +16,9 @@ import {
   PROGRAM_PRICE,
   VOICE_SETS,
   buildTracks,
+  tierById,
 } from '@/lib/data'
-import type { DoorId, VoiceSet } from '@/lib/data'
+import type { DoorId, TierId, VoiceSet } from '@/lib/data'
 import {
   NOTHING_CHARGED_ASSURANCE,
   RENDER_FAILURE_GUARANTEE,
@@ -35,6 +36,13 @@ const STEP_LABELS = ['Goal', 'Voice', 'Review'] as const
 
 interface WizardProps {
   door: DoorId
+  /**
+   * The tier the visitor chose (#69). The price beside the buy button is read
+   * from THIS, not from a constant — the whole bug was a tier being chosen and
+   * then quietly forgotten, and a hardcoded price would forget it again at the
+   * last possible moment.
+   */
+  tier: TierId
   onExit: () => void
   onHome: () => void
   onNavigate: (path: string) => void
@@ -164,7 +172,8 @@ function StepHeader({
 
 // ─── Wizard ──────────────────────────────────────────────────────────────────
 
-export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps) {
+export default function Wizard({ door, tier, onExit, onHome, onNavigate }: WizardProps) {
+  const chosenTier = tierById(tier)
   const [step, setStep] = useState(0)
   const [goalId, setGoalId] = useState<string | null>(null)
   const [customText, setCustomText] = useState('')
@@ -517,7 +526,7 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
                       </dt>
                       <dd className="text-right">
                         <span className="font-display text-2xl text-[#d4b87f]">
-                          {PROGRAM_PRICE}
+                          {chosenTier?.price ?? PROGRAM_PRICE}
                         </span>
                         <span className="ml-2 text-xs text-white/40">
                           one-time
@@ -699,7 +708,9 @@ export default function Wizard({ door, onExit, onHome, onNavigate }: WizardProps
                     ) : (
                       <Lock className="size-4" />
                     )}
-                    {checkoutBusy ? 'Opening checkout…' : `Checkout · ${PROGRAM_PRICE}`}
+                    {checkoutBusy
+                      ? 'Opening checkout…'
+                      : `Checkout · ${chosenTier?.price ?? PROGRAM_PRICE}`}
                   </Button>
                   <Button
                     variant="outline"

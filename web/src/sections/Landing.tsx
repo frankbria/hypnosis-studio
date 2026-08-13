@@ -21,13 +21,18 @@ import {
   nameList,
   upcomingForDoor,
 } from '@/lib/data'
-import type { DoorId, TrackPhase } from '@/lib/data'
+import type { DoorId, TierId, TrackPhase } from '@/lib/data'
 import GoalCardText from '@/components/GoalCardText'
 import SiteFooter from '@/components/SiteFooter'
 
 interface LandingProps {
   door: DoorId
-  onStart: () => void
+  /**
+   * Start a purchase for a specific tier (#69). The tier used to be discarded
+   * at the click, so someone choosing the $129 personalized tier landed in the
+   * same one-off catalog flow as someone choosing $39.
+   */
+  onStart: (tier: TierId) => void
   onHome: () => void
   /** Client-side navigation, so the footer's policy links do not reload. */
   onNavigate: (path: string) => void
@@ -269,12 +274,17 @@ function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 
               Pricing
             </a>
           </nav>
+          {/*
+            Browses, does not buy (#69). A nav button that drops a visitor
+            straight into a purchase decides for them which tier they wanted —
+            and it decided "the cheapest one" every time.
+          */}
           <Button
+            asChild
             size="sm"
-            onClick={onStart}
             className="bg-primary text-primary-foreground hover:bg-violet-300"
           >
-            Create your program
+            <a href="#programs">See the programs</a>
           </Button>
         </div>
       </header>
@@ -300,7 +310,7 @@ function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 
           <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <Button
               size="lg"
-              onClick={onStart}
+              onClick={() => onStart('program')}
               className="bg-primary text-primary-foreground hover:bg-violet-300"
             >
               Create your program
@@ -473,7 +483,7 @@ function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 
                   </ul>
                   {tier.available ? (
                     <Button
-                      onClick={onStart}
+                      onClick={() => onStart(tier.id)}
                       variant={tier.highlighted ? 'default' : 'outline'}
                       className={
                         tier.highlighted
@@ -530,12 +540,13 @@ function HealingLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 'doo
               Disclaimer
             </a>
           </nav>
+          {/* Browses, does not buy (#69) — see the note on the other door. */}
           <Button
+            asChild
             size="sm"
-            onClick={onStart}
             className="bg-primary text-primary-foreground hover:bg-violet-300"
           >
-            Begin a practice
+            <a href="#practices">See the practices</a>
           </Button>
         </div>
       </header>
@@ -562,7 +573,7 @@ function HealingLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 'doo
           <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <Button
               size="lg"
-              onClick={onStart}
+              onClick={() => onStart('program')}
               className="bg-primary text-primary-foreground hover:bg-violet-300"
             >
               Begin a practice

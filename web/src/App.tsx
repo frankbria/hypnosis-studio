@@ -5,7 +5,7 @@ import Wizard from '@/sections/Wizard'
 import ProgramPage from '@/sections/ProgramPage'
 import { PrivacyPage, RefundPage, TermsPage } from '@/sections/Legal'
 import type { LegalPageId } from '@/sections/Legal'
-import type { DoorId } from '@/lib/data'
+import type { DoorId, TierId } from '@/lib/data'
 
 type View = 'landing' | 'wizard'
 
@@ -96,6 +96,8 @@ export default function App() {
   )
   const [job, setJob] = useState<string | null>(() => jobFromPath(normalizedPath()))
   const [view, setView] = useState<View>('landing')
+  /** Which tier the visitor chose, carried to the flow that fulfils it (#69). */
+  const [tier, setTier] = useState<TierId>('program')
 
   useEffect(() => {
     // Back/forward must work for the policy pages too, so popstate resolves both
@@ -149,6 +151,27 @@ export default function App() {
     setView('landing')
   }, [])
 
+  /**
+   * Begin buying a specific tier.
+   *
+   * Only the catalog tier can be fulfilled today, and the pricing page renders
+   * no CTA for a tier that cannot (`tier.available`), so the other ids are
+   * unreachable rather than unhandled. They are named here anyway: the bug this
+   * fixes was a tier silently becoming a different one, and a fallback that
+   * quietly routed everything to the catalog flow would be the same bug wearing
+   * a switch statement.
+   */
+  function startPurchase(next: TierId) {
+    if (next !== 'program') {
+      // #73 builds the intake this routes to. Until then, refusing loudly beats
+      // selling someone the wrong thing.
+      console.error('no flow exists yet for the', next, 'tier');
+      return
+    }
+    setTier(next)
+    setView('wizard')
+  }
+
   // Checked first: someone arriving at their program has come back for it, and
   // must not be handed the door chooser because they happen to have no door in
   // the URL.
@@ -184,13 +207,14 @@ export default function App() {
       {view === 'landing' ? (
         <Landing
           door={door}
-          onStart={() => setView('wizard')}
+          onStart={startPurchase}
           onHome={goHome}
           onNavigate={goTo}
         />
       ) : (
         <Wizard
           door={door}
+          tier={tier}
           onExit={() => setView('landing')}
           onHome={goHome}
           onNavigate={goTo}
