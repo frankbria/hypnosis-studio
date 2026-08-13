@@ -1224,17 +1224,17 @@ async function refundOrder(jobId, { reason = 'the render failed', session = null
       // just because the audio has aged out.
       sessionId = session;
     } else {
-      const link = readJsonSafe(path.join(jobDir(jobId), 'order.json'));
-      // No order: this render was never paid for (the ACCESS_CODE path, or a
-      // prototype run). Nothing to give back — but say so, rather than leaving
-      // the field absent. The page watching this job cannot tell "no refund is
-      // coming" from "the refund has not landed yet" unless we tell it, and it
-      // would sit waiting for something that is never going to arrive.
-      if (!link || typeof link.sessionId !== 'string') {
+      sessionId = orderSessionForJob(jobId);
+      // No order by either route: this render was never paid for (the
+      // ACCESS_CODE path, or a prototype run). Nothing to give back — but say
+      // so, rather than leaving the field absent. The page watching this job
+      // cannot tell "no refund is coming" from "the refund has not landed yet"
+      // unless we tell it, and it would sit waiting for something that is
+      // never going to arrive.
+      if (!sessionId) {
         writeRefundStatus(jobId, 'none');
         return;
       }
-      sessionId = link.sessionId;
     }
 
     const order = readJsonSafe(claimPath(sessionId));
@@ -1379,14 +1379,17 @@ function deliveryClaimPath(sessionId) {
  * observe the same completion. The `wx` claim decides the winner, the recorded
  * state stops a later sweep repeating it, and neither is trusted alone.
  */
-async function deliverProgram(jobId) {
+async function deliverProgram(jobId, { session = null } = {}) {
   let sessionId = null;
   try {
-    const link = readJsonSafe(path.join(jobDir(jobId), 'order.json'));
-    // No order means nobody bought this — the early-access path. There is no
-    // address to write to, and inventing a reason to email would be worse.
-    if (!link || typeof link.sessionId !== 'string') return;
-    sessionId = link.sessionId;
+    // The sweep knows the session already, having come from the order side.
+    // Otherwise: a missing back-pointer is a failed write, not proof that
+    // nobody bought this — getting that wrong is a paid customer who is never
+    // told their program is ready.
+    sessionId = session || orderSessionForJob(jobId);
+    // No order by either route means nobody bought this — the early-access
+    // path. There is no address to write to.
+    if (!sessionId) return;
 
     const order = readJsonSafe(claimPath(sessionId));
     if (!order) return;
@@ -1445,6 +1448,38 @@ async function deliverProgram(jobId) {
       try { fs.unlinkSync(deliveryClaimPath(sessionId)); } catch { /* nothing to undo */ }
     }
   }
+}
+
+/**
+ * The order a job belongs to, asked two ways.
+ *
+ * The back-pointer inside the job directory is the fast path, but it is written
+ * in a swallowed try/catch — so its absence does NOT mean the render was
+ * unpaid. Treating it that way told a charged customer "nothing was charged,
+ * there is nothing to refund", and separately meant their failed render was
+ * never refunded at all, because refundOrder could not find the order either.
+ *
+ * So a missing pointer falls back to asking the orders directly. Only when
+ * BOTH say nothing is a render genuinely unpaid.
+ *
+ * ponytail: the fallback is a linear scan, reached only when the pointer is
+ * missing — which is the disk-failure case, not the normal one.
+ */
+function orderSessionForJob(jobId) {
+  const link = readJsonSafe(path.join(jobDir(jobId), 'order.json'));
+  if (link && typeof link.sessionId === 'string') return link.sessionId;
+
+  let names;
+  try { names = fs.readdirSync(sessionsDir()); } catch { return null; }
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    const order = readJsonSafe(path.join(sessionsDir(), name));
+    if (order && order.jobId === jobId && typeof order.sessionId === 'string') {
+      console.warn('job', jobId, 'has no order back-pointer; found its order by scanning');
+      return order.sessionId;
+    }
+  }
+  return null;
 }
 
 function markDelivery(sessionId, delivery) {
@@ -1537,21 +1572,23 @@ async function sendEmail(to, { subject, text, html }, key) {
 // handler at all, and "did this customer get their email" is a question the
 // records can answer at any time.
 function sweepUndelivered() {
-  let dirs;
-  try { dirs = fs.readdirSync(RENDERS, { withFileTypes: true }); } catch { return; }
-  for (const d of dirs) {
-    if (!d.isDirectory() || !JOB_DIR_RE.test(d.name)) continue;
-    const st = readJsonSafe(path.join(RENDERS, d.name, 'status.json'));
-    if (!st || st.state !== 'ready') continue;
-    const link = readJsonSafe(path.join(RENDERS, d.name, 'order.json'));
-    if (!link || typeof link.sessionId !== 'string') continue;
-    const order = readJsonSafe(claimPath(link.sessionId));
-    if (!order || !order.email || order.refund) continue;
+  let names;
+  try { names = fs.readdirSync(sessionsDir()); } catch { return; }
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    const order = readJsonSafe(path.join(sessionsDir(), name));
+    // Driven from the ORDERS rather than the job directories, so a job whose
+    // back-pointer write failed is still found — the order knows its jobId
+    // even when the job does not know its order.
+    if (!order || !order.jobId || !order.email || order.refund) continue;
     if (order.delivery) {
       if (order.delivery.state === 'sent' || order.delivery.state === 'skipped') continue;
       if ((order.delivery.attempts || 0) >= DELIVERY_MAX_ATTEMPTS) continue;
     }
-    deliverProgram(d.name).catch((e) => console.error('delivery sweep threw:', e && e.message));
+    const st = readJsonSafe(path.join(jobDir(order.jobId), 'status.json'));
+    if (!st || st.state !== 'ready') continue;
+    deliverProgram(order.jobId, { session: order.sessionId })
+      .catch((e) => console.error('delivery sweep threw:', e && e.message));
   }
 }
 
