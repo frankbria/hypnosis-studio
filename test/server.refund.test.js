@@ -375,6 +375,46 @@ test('the refunded state is visible on the job the customer is watching', async 
   }
 });
 
+test('a render with nothing to refund says so, rather than leaving it blank', async () => {
+  // The page cannot tell "no refund is coming" from "the refund has not landed
+  // yet" unless the server says which. Without this it would wait for something
+  // that is never going to arrive, on every unpaid failure.
+  const stripe = await fakeStripe();
+  const srv = await startServer({
+    engine: 'fail',
+    env: { STRIPE_API_BASE: stripe.base, STRIPE_WEBHOOK_SECRET: '', ACCESS_CODE: 'testcode' },
+  });
+  try {
+    const started = await request(srv.port, 'POST', '/api/programs',
+      JSON.stringify({ goal: 'polymath', voiceSet: 'male', accessCode: 'testcode' }));
+    const { jobId } = JSON.parse(started.body);
+    await sleep(900);
+    const res = await request(srv.port, 'GET', `/api/jobs/${jobId}`);
+    assert.strictEqual(res.json.state, 'failed');
+    assert.strictEqual(res.json.refund, 'none');
+  } finally {
+    stop(srv); stripe.close();
+  }
+});
+
+test('an unrefundable paid order still reaches a terminal state on the page', async () => {
+  // Escalating to a human in the log is right, but the customer is watching a
+  // page. Leaving `refund` absent would keep it waiting indefinitely.
+  const stripe = await fakeStripe();
+  const srv = await startServer({
+    engine: 'fail',
+    env: { STRIPE_API_BASE: stripe.base, STRIPE_SECRET_KEY: '' },
+  });
+  try {
+    await pay(srv);
+    const [job] = jobs(srv.rendersDir);
+    const res = await request(srv.port, 'GET', `/api/jobs/${job}`);
+    assert.strictEqual(res.json.refund, 'failed');
+  } finally {
+    stop(srv); stripe.close();
+  }
+});
+
 test('what the customer can see carries no payment details', async () => {
   // #24 keeps the order off this endpoint. A refund id and an amount are still
   // payment data, and "your money is on its way back" is the whole of what

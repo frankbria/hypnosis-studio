@@ -1156,24 +1156,33 @@ async function refundOrder(jobId, { reason = 'the render failed', session = null
     } else {
       const link = readJsonSafe(path.join(jobDir(jobId), 'order.json'));
       // No order: this render was never paid for (the ACCESS_CODE path, or a
-      // prototype run). Nothing to give back.
-      if (!link || typeof link.sessionId !== 'string') return;
+      // prototype run). Nothing to give back — but say so, rather than leaving
+      // the field absent. The page watching this job cannot tell "no refund is
+      // coming" from "the refund has not landed yet" unless we tell it, and it
+      // would sit waiting for something that is never going to arrive.
+      if (!link || typeof link.sessionId !== 'string') {
+        writeRefundStatus(jobId, 'none');
+        return;
+      }
       sessionId = link.sessionId;
     }
 
     const order = readJsonSafe(claimPath(sessionId));
     if (!order) {
       console.error('refund: job', jobId, 'names session', sessionId, 'but there is no order');
+      writeRefundStatus(jobId, 'failed');
       return;
     }
     if (order.refund && order.refund.state === 'refunded') return;   // already done
     if (!order.paymentIntent) {
       console.error('refund: order', sessionId, 'has no payment reference - NEEDS A HUMAN');
+      writeRefundStatus(jobId, 'failed');
       return;
     }
     if (!STRIPE_SECRET_KEY) {
       console.error('refund: order', sessionId, 'is owed a refund but no Stripe key is set',
         '- NEEDS A HUMAN');
+      writeRefundStatus(jobId, 'failed');
       return;
     }
 
