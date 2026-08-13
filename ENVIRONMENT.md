@@ -206,6 +206,32 @@ flash the wrong price for one paint — so a test in `test/web.claims.test.js`
 pins the two together, along with `PROGRAM_CURRENCY` against the `$` the site
 writes. Changing the price means changing both.
 
+### The webhook secret is the real credential (#23)
+
+`STRIPE_WEBHOOK_SECRET` (`whsec_…`, from the dashboard endpoint) is a
+**different value** from `STRIPE_SECRET_KEY`, and it is the one that authorises
+spending ElevenLabs credits: a signature-verified `checkout.session.completed`
+on `POST /api/stripe/webhook` is what starts a render.
+
+**Setting it closes the `ACCESS_CODE` path.** `POST /api/programs` then answers
+`503 rendering_requires_payment`. That is the point rather than a side effect —
+`ACCESS_CODE` is a shared, unrate-limited string that spends real credits and
+whose value has been in a public git history since the first commit (#32).
+Leaving it live beside a paid path means the paid path guards nothing.
+
+The signature is verified against the **raw request bytes**, so the webhook
+reads the body separately from every other route: `JSON.stringify(JSON.parse(x))`
+is not `x`, and verifying against a re-serialisation fails on genuine events.
+Parsing happens only after the signature checks out.
+
+Replay is handled by a claim file per session under `<RENDERS_DIR>/.sessions/`,
+created with the `wx` flag so the create *is* the lock — two concurrent
+deliveries of the same event cannot both pass. A claim is released again if the
+render fails to start, so Stripe's retry can still fulfil a paid order.
+
+Locally: `stripe listen --forward-to localhost:4100/api/stripe/webhook` prints a
+`whsec_` for the session.
+
 ### The cap on session creation
 
 `/api/programs` is gated by `ACCESS_CODE`, `MAX_JOBS_PER_DAY` and

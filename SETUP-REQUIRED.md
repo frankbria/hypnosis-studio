@@ -21,10 +21,10 @@ Status legend: 🔴 blocks launch · 🟡 needed before it is public · 🟢 opt
 | Behaviour today | `POST /api/checkout` answers `503 checkout_disabled`; the delivery screen says "Checkout is not open yet." |
 | Where it goes | `<repo>/.env` locally; the systemd environment in production (see `ENVIRONMENT.md`) |
 
-**Do not set this until #23 has shipped.** #22 creates the Checkout Session;
-#23 is what verifies the webhook signature and actually starts a render from a
-completed payment. With the key set and #23 missing, the studio can take $39 and
-produce nothing.
+#23 has now shipped, so setting this no longer means taking money for nothing —
+a signature-verified `checkout.session.completed` starts the render. Set
+`STRIPE_WEBHOOK_SECRET` below **in the same change**; a secret key with no
+webhook secret takes payments that never render.
 
 A test key (`sk_test_…`) from any Stripe account is safe to use locally right
 now and is enough to exercise the whole flow.
@@ -34,6 +34,32 @@ To get one:
    account) — activation is what allows live charges, and it is not instant.
 2. Developers → API keys → Secret key.
 3. Confirm the account's default currency matches `PROGRAM_CURRENCY` (`usd`).
+
+## 🔴 Stripe webhook endpoint and signing secret — #23
+
+| | |
+|---|---|
+| Variable | `STRIPE_WEBHOOK_SECRET` (`whsec_…`) |
+| Current value | **unset** |
+| Behaviour today | `POST /api/stripe/webhook` answers `503 webhook_not_configured`; `POST /api/programs` still accepts `ACCESS_CODE` |
+
+**A different value from `STRIPE_SECRET_KEY`.** This is the credential that
+authorises spending ElevenLabs credits.
+
+To get one:
+1. Stripe dashboard → Developers → Webhooks → Add endpoint.
+2. URL: `https://<your domain>/api/stripe/webhook`.
+3. Subscribe to **`checkout.session.completed`** (the only event the server acts
+   on; anything else is acknowledged and ignored).
+4. Copy the endpoint's signing secret.
+
+Locally, `stripe listen --forward-to localhost:4100/api/stripe/webhook` prints a
+`whsec_` for that session — no dashboard endpoint needed.
+
+⚠️ **Setting this closes the early-access path.** `POST /api/programs` starts
+answering `503 rendering_requires_payment`, and the wizard says "Early access
+has closed — programs are now bought through checkout." That is deliberate: see
+`ENVIRONMENT.md`. Do not set it until you want the free path shut.
 
 ## 🔴 Public base URL — #22
 
