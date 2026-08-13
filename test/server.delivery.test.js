@@ -288,13 +288,16 @@ test('a job that finishes with nobody watching is still delivered', async () => 
 // What it says
 // --------------------------------------------------------------------------
 
-test('the email links to the program URL, which works from a cold session', async () => {
+test('the email links to the order URL, which works from a cold session', async () => {
+  // Since #70 the email points at the ORDER page rather than the job page: it
+  // is the same address the post-checkout redirect uses, so a customer has one
+  // link rather than two.
   const mail = await fakeMail();
   const srv = await startServer({ env: { EMAIL_API_BASE: mail.base } });
   try {
     await pay(srv);
     const [job] = jobs(srv.rendersDir);
-    const link = `https://studio.example/program/${job}`;
+    const link = 'https://studio.example/order/cs_test_1';
     const msg = mail.sent[0];
     assert.ok(msg.text.includes(link), `the plain-text body has no link: ${msg.text}`);
     assert.ok(msg.html.includes(link), 'the html body has no link');
@@ -494,11 +497,13 @@ test('a provider that recovers gets the email through', async () => {
 });
 
 test('the send carries an idempotency key the provider can honour', async () => {
+  // Keyed per SEND, not per order. A key fixed to the session would have the
+  // provider silently refuse the deliberate resend #70 offers — forever.
   const mail = await fakeMail();
   const srv = await startServer({ env: { EMAIL_API_BASE: mail.base } });
   try {
     await pay(srv);
-    assert.strictEqual(mail.sent[0].key, 'deliver-cs_test_1');
+    assert.strictEqual(mail.sent[0].key, 'deliver-cs_test_1-0');
   } finally {
     stop(srv); mail.close();
   }

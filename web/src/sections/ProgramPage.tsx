@@ -22,6 +22,7 @@ import type { TrackPhase, VoiceSet } from '@/lib/data'
 import { FAILURE_ASSURANCE, SUPPORT_EMAIL } from '@/lib/legal'
 import type { RefundState } from '@/lib/legal'
 import SiteFooter from '@/components/SiteFooter'
+import { plainDate } from '@/lib/utils'
 
 export interface ReadyTrack {
   n: number
@@ -121,10 +122,17 @@ function Header({
 
 export default function ProgramPage({
   jobId,
+  expiresAt = null,
   onHome,
   onNavigate,
 }: {
   jobId: string
+  /**
+   * When these files are deleted, in plain language on the page (#70). Supplied
+   * by the order route, which is the only caller that knows it — the job itself
+   * does not, and the retention sweep measures from the terminal status write.
+   */
+  expiresAt?: string | null
   onHome: () => void
   onNavigate: (path: string) => void
 }) {
@@ -476,8 +484,9 @@ export default function ProgramPage({
           ))}
         </div>
         <p className="mt-8 text-center text-xs text-white/35">
-          Save your files — this link lives as long as the studio keeps early-access
-          renders on disk.
+          {expiresAt
+            ? `Save your files. This link works until ${plainDate(expiresAt)}, after which the studio deletes finished renders.`
+            : 'Save your files — this link lives as long as the studio keeps finished renders on disk.'}
         </p>
         <div className="mt-8 flex items-center justify-center">
           {/*
