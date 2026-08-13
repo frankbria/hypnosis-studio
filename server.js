@@ -9,6 +9,33 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 
+// Load .env before anything reads process.env.
+//
+// Nothing did this before, so a .env sitting next to server.js was inert: the
+// operator would put ELEVENLABS_API_KEY in it, the server would start fine, and
+// the first render would fail at the TTS step with the key unread on disk.
+//
+// process.loadEnvFile is native (Node >= 20.12) — no dependency for something
+// the runtime does itself. Done HERE rather than via `node --env-file` in
+// package.json because the systemd unit is not in this repo (#43) and may well
+// invoke `node server.js` directly, which would skip an npm script entirely.
+//
+// Resolved against __dirname, not cwd: systemd sets WorkingDirectory, and a
+// relative lookup would silently find nothing if that ever differs.
+//
+// The real environment WINS over the file — loadEnvFile does not overwrite
+// variables that are already set. That is the precedence prod needs: systemd or
+// the shell beats a stale .env left in the deploy directory.
+try {
+  process.loadEnvFile(path.join(__dirname, '.env'));
+} catch (err) {
+  // ENOENT is the normal case in production, where systemd supplies the
+  // environment and no .env exists. Anything else is worth seeing.
+  if (err.code !== 'ENOENT') {
+    console.error('could not read .env:', err.message);
+  }
+}
+
 const PORT = process.env.PORT || 4100;
 const DIST = path.join(__dirname, 'web', 'dist');
 // Overridable so the renders root can be a mounted volume (see the container

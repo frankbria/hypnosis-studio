@@ -90,18 +90,23 @@ export const DELIVERED_GOODS_NOTICE =
   'program is not automatically refundable.'
 
 /**
- * A monitored address, or `null` while there is not one.
+ * The address customers are told a person reads (#18).
  *
- * `null` is the honest current state, not an oversight: #18 is open precisely
- * because the old Contact link pointed at `#top` and went nowhere. Inventing an
- * address here would recreate that bug inside the refund policy, which is the
- * worst page on the site to have a dead contact route.
+ * Overridable at build time so production does not need a code edit:
+ * set `VITE_SUPPORT_EMAIL` in the environment (see .env.example). Vite inlines
+ * it, so this is baked into the bundle — changing it means rebuilding, not
+ * restarting.
  *
- * The discretionary-refund paragraph renders only when this is set, and
- * test/web.claims.test.js fails if any policy page tells a customer to make
- * contact while it is null. Set it when #18 lands and the paragraph appears.
+ * This was `null` until an address existed, because #18 was filed over a
+ * Contact link that pointed at `#top` and went nowhere, and inventing a
+ * plausible-looking address would have recreated that bug inside the refund
+ * policy. It is real now, so the contact copy renders.
+ *
+ * Whatever it is set to must be monitored by a person: /refunds states that a
+ * person reads it.
  */
-export const SUPPORT_EMAIL: string | null = null
+export const SUPPORT_EMAIL: string =
+  import.meta.env.VITE_SUPPORT_EMAIL || 'frank.bria@pm.me'
 
 export const NO_TRACKING_NOTICE =
   'This site loads no analytics, no advertising tags, and no third-party scripts. ' +

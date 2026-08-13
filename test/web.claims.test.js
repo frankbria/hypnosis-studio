@@ -503,22 +503,89 @@ test('the render-failure guarantee is stated once and rendered', () => {
   assert.match(text, /in full/i, 'the guarantee does not say the refund is full');
 });
 
-test('no page tells a customer to contact an address that does not exist', () => {
-  // #18 exists because the old Contact link pointed at `#top`. Recreating that
-  // inside the refund policy would be the worst possible place for it, so the
-  // contact copy is gated on SUPPORT_EMAIL actually being set.
-  const legal = LEGAL_TS();
-  const declared = /export const SUPPORT_EMAIL[^=]*=\s*null/.test(legal);
-  if (!declared) return; // #18 landed; a real address exists and may be shown.
-
-  const pages = codeOnly(LEGAL_TSX());
-  const mailtos = [...pages.matchAll(/mailto:([^`'"}\s]+)/g)].map((m) => m[1]);
-  for (const target of mailtos) {
-    assert.ok(target.includes('${SUPPORT_EMAIL}') || target.includes('SUPPORT_EMAIL'),
-      `a policy page hardcodes the address ${target} while SUPPORT_EMAIL is null`);
+test('no surface hardcodes the support address', () => {
+  // #18 exists because the old Contact link pointed at `#top` and went nowhere.
+  // An address now exists, so the question flips: every mailto: must come from
+  // the ONE constant, or changing it in prod means hunting for copies.
+  const sources = sourceFiles().map((f) => [f, codeOnly(fs.readFileSync(f, 'utf8'))]);
+  const offenders = [];
+  for (const [file, src] of sources) {
+    if (file.endsWith(path.join('lib', 'legal.ts'))) continue; // the definition
+    for (const m of src.matchAll(/mailto:([^`'"}\s]+)/g)) {
+      if (!m[1].includes('SUPPORT_EMAIL')) {
+        offenders.push(`${path.relative(WEB, file)}: mailto:${m[1]}`);
+      }
+    }
   }
-  assert.match(pages, /SUPPORT_EMAIL &&/,
-    'contact copy is not gated on an address existing');
+  assert.deepStrictEqual(offenders, [],
+    `a hardcoded address will not change when SUPPORT_EMAIL does:\n${offenders.join('\n')}`);
+});
+
+test('the support address is overridable without editing source', () => {
+  // "Make it easy to change" — production picks a different address, and that
+  // must not require a code edit and a review cycle.
+  const legal = LEGAL_TS();
+  assert.match(legal, /import\.meta\.env\.VITE_SUPPORT_EMAIL/,
+    'the address cannot be set from the environment');
+  assert.match(legal, /export const SUPPORT_EMAIL: string\b/,
+    'SUPPORT_EMAIL is no longer guaranteed to be a string');
+  assert.ok(!/SUPPORT_EMAIL[^=]*=\s*null/.test(legal),
+    'SUPPORT_EMAIL is null again — the contact copy will silently disappear');
+
+  // And the override must be documented, or nobody will know it exists.
+  const example = fs.readFileSync(
+    path.join(__dirname, '..', '.env.example'), 'utf8');
+  assert.match(example, /VITE_SUPPORT_EMAIL/,
+    '.env.example does not document the support address override');
+});
+
+test('the support address reaches the footer and the failure screen', () => {
+  // #18's three criteria. The footer is shared, so putting it there covers
+  // "both doors and inside the wizard" structurally rather than in three
+  // places — the same reasoning as the policy links.
+  const footer = codeOnly(fs.readFileSync(
+    path.join(WEB, 'components', 'SiteFooter.tsx'), 'utf8'));
+  assert.match(footer, /mailto:\$\{SUPPORT_EMAIL\}/,
+    'the shared footer has no contact link');
+  assert.ok(!/href="#top"/.test(footer),
+    'the dead #top Contact link is back');
+
+  // The render-failure screen specifically: the one moment a customer most
+  // needs a human. It offered Retry, Start over, and no way to reach anyone.
+  const wizard = codeOnly(WIZARD());
+  const at = wizard.indexOf('if (error) {');
+  assert.ok(at > 0, 'could not find the failure screen');
+  const screen = wizard.slice(at, wizard.indexOf('\n  }', at));
+  assert.match(screen, /mailto:\$\{SUPPORT_EMAIL\}/,
+    'the render-failure screen offers no way to reach a person');
+});
+
+test('.env.example documents every variable the code reads', () => {
+  // A key that is read but undocumented is one nobody sets until it breaks in
+  // production. Derived from the source so the file cannot drift.
+  const example = fs.readFileSync(path.join(__dirname, '..', '.env.example'), 'utf8');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const engine = fs.readdirSync(path.join(__dirname, '..', 'engine'))
+    .filter((f) => f.endsWith('.py'))
+    .map((f) => fs.readFileSync(path.join(__dirname, '..', 'engine', f), 'utf8'))
+    .join('\n');
+
+  const used = new Set([
+    ...[...server.matchAll(/process\.env\.([A-Z_0-9]+)/g)].map((m) => m[1]),
+    ...[...engine.matchAll(/os\.environ(?:\.get)?[([]["']([A-Z_0-9]+)/g)].map((m) => m[1]),
+  ]);
+  assert.ok(used.size >= 10, `parsed only ${used.size} env vars — the scan is wrong`);
+
+  // Must appear as a settable line — `VAR=` or `# VAR=` — not merely mentioned
+  // in prose. A key you cannot copy-paste is not documented, and `includes()`
+  // was satisfied by the sentence "Every value below is optional EXCEPT
+  // ELEVENLABS_API_KEY".
+  const settable = new Set(
+    [...example.matchAll(/^#?\s*([A-Z_0-9]+)=/gm)].map((m) => m[1]),
+  );
+  const missing = [...used].filter((v) => !settable.has(v)).sort();
+  assert.deepStrictEqual(missing, [],
+    `read by the code but absent from .env.example:\n${missing.join('\n')}`);
 });
 
 test('the render-failure message is true whether or not payment is live', () => {
