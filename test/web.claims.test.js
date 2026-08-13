@@ -307,6 +307,87 @@ test('the policy pages say what is collected and how long it is kept', () => {
 });
 
 // --------------------------------------------------------------------------
+// No screen may claim a success that did not happen (#29)
+// --------------------------------------------------------------------------
+
+test('there is no staged-success fallback anywhere', () => {
+  // Any non-202 used to route into mockFlow(), which fabricated the headline
+  // "Your program is ready." over four cards playing voice samples — for a 500,
+  // an nginx 502, or a 503. After payment that is a charged customer being
+  // shown a success screen.
+  for (const file of sourceFiles()) {
+    const src = codeOnly(fs.readFileSync(file, 'utf8'));
+    const name = path.relative(WEB, file);
+    assert.ok(!/mockFlow/.test(src), `${name} still has the staged-success fallback`);
+    assert.ok(!/GENERATION_TOTAL_MS/.test(src),
+      `${name} still drives a fabricated progress animation`);
+    assert.ok(!/demo:/.test(src), `${name} still carries a demo flag through the render flow`);
+  }
+});
+
+test('the success headline is reachable only from a real, ready job', () => {
+  // The one place that says it, and the only thing that can put it on screen.
+  const offenders = [];
+  for (const file of sourceFiles()) {
+    const src = codeOnly(fs.readFileSync(file, 'utf8'));
+    if (/Your program is ready/.test(src)) offenders.push(path.relative(WEB, file));
+  }
+  assert.deepStrictEqual(offenders, [path.join('sections', 'ProgramPage.tsx')],
+    `the success headline appears outside the delivery screen: ${offenders.join(', ')}`);
+
+  const page = codeOnly(PROGRAM());
+  const at = page.indexOf('Your program is ready');
+  const guard = page.slice(0, at);
+  assert.match(guard, /s\.state === 'ready'/,
+    'the delivery screen is not gated on the job actually being ready');
+  assert.match(guard, /!s\.tracks \|\| s\.tracks\.length === 0/,
+    'a ready job with no files would still show the success headline');
+});
+
+test('every way a render can fail to start says what happened', () => {
+  // Naming it is the acceptance criterion: "an explicit error state naming what
+  // went wrong, with the support address".
+  const wizard = codeOnly(WIZARD());
+  assert.match(wizard, /const START_ERRORS/, 'there is no table of start failures');
+  const block = wizard.slice(wizard.indexOf('const START_ERRORS'), wizard.indexOf('\n}', wizard.indexOf('const START_ERRORS')));
+  // The server codes this path can actually produce.
+  for (const code of [
+    'rendering_requires_payment', 'rendering_disabled', 'budget_exhausted',
+    'temporarily_unavailable', 'daily_cap', 'busy', 'storage_unavailable',
+  ]) {
+    assert.ok(block.includes(code), `no message for ${code}`);
+  }
+  // And an unrecognised code still says something rather than nothing.
+  assert.match(wizard, /GENERIC_START_ERROR/, 'an unknown failure has no message');
+  assert.match(wizard, /HTTP \$\{res\.status\}/,
+    'an unknown failure does not report the status it got');
+});
+
+test('a failure to start offers a person', () => {
+  const wizard = codeOnly(WIZARD());
+  const at = wizard.indexOf('{startError && (');
+  assert.ok(at > 0, 'the start error is never rendered');
+  const block = wizard.slice(at, at + 900);
+  assert.match(block, /mailto:\$\{SUPPORT_EMAIL\}/,
+    'a customer whose program would not start is offered no way to reach anyone');
+  assert.match(block, /role="alert"/,
+    'the failure is not announced to a screen reader');
+});
+
+test('rendering_disabled is not lumped in with a generic fault', () => {
+  // Its own acceptance criterion, because it is the one that used to produce a
+  // demo screen most often.
+  const wizard = codeOnly(WIZARD());
+  const block = wizard.slice(wizard.indexOf('const START_ERRORS'), wizard.indexOf('\n}', wizard.indexOf('const START_ERRORS')));
+  const disabled = block.match(/rendering_disabled:\s*\n?\s*'([^']*)'/);
+  assert.ok(disabled, 'rendering_disabled has no message of its own');
+  const generic = wizard.match(/const GENERIC_START_ERROR =\s*\n?\s*'([^']*)'/);
+  assert.ok(generic, 'there is no generic message to compare against');
+  assert.notStrictEqual(disabled[1], generic[1],
+    'rendering_disabled says the same thing as an unknown fault');
+});
+
+// --------------------------------------------------------------------------
 // A program's URL has to survive being opened (#27)
 // --------------------------------------------------------------------------
 

@@ -526,4 +526,3 @@ export const GENERATION_STAGES = [
   'Mastering & QA…',
 ] as const
 
-export const GENERATION_TOTAL_MS = 14000
