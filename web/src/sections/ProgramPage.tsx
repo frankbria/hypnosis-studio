@@ -19,12 +19,8 @@ import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { GENERATION_STAGES, VOICE_SETS } from '@/lib/data'
 import type { TrackPhase, VoiceSet } from '@/lib/data'
-import {
-  REFUND_FAILED_ASSURANCE,
-  REFUND_ISSUED_ASSURANCE,
-  RENDER_FAILED_ASSURANCE,
-  SUPPORT_EMAIL,
-} from '@/lib/legal'
+import { FAILURE_ASSURANCE, SUPPORT_EMAIL } from '@/lib/legal'
+import type { RefundState } from '@/lib/legal'
 import SiteFooter from '@/components/SiteFooter'
 
 export interface ReadyTrack {
@@ -47,7 +43,7 @@ interface JobStatus {
   stage?: string
   progress?: number
   error?: string
-  refund?: 'refunded' | 'failed' | 'pending' | 'none'
+  refund?: RefundState
   goal?: string
   voiceSet?: string
   tracks?: ReadyTrack[]
@@ -208,18 +204,17 @@ export default function ProgramPage({
             delay = 500
             continue
           }
-          const assurance =
-            s.refund === 'refunded'
-              ? REFUND_ISSUED_ASSURANCE
-              : s.refund === 'failed'
-                ? REFUND_FAILED_ASSURANCE
-                : RENDER_FAILED_ASSURANCE
+          // A total mapping, so no state can fall through to another state's
+          // sentence (#30). An unrecognised value is `unknown`, which hedges —
+          // the only case where hedging is true.
+          const state: RefundState =
+            s.refund && s.refund in FAILURE_ASSURANCE ? s.refund : 'unknown'
           setScreen({
             kind: 'failed',
             message: `${
               s.error ? `The render didn't finish: ${s.error}` : "The render didn't finish."
-            } ${assurance}`,
-            refunded: s.refund === 'refunded',
+            } ${FAILURE_ASSURANCE[state]}`,
+            refunded: state === 'refunded',
           })
           return
         }

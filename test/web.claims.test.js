@@ -307,6 +307,92 @@ test('the policy pages say what is collected and how long it is kept', () => {
 });
 
 // --------------------------------------------------------------------------
+// The failure copy must match what actually happened to the money (#30)
+// --------------------------------------------------------------------------
+
+/** The refund states the server can put on a failed job. */
+const SERVER_REFUND_STATES = (() => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const found = new Set(
+    [...server.matchAll(/writeRefundStatus\([^,]+,\s*'(\w+)'\)/g)].map((m) => m[1]),
+  );
+  // The state the sweep writes while a refund is in flight reaches the page
+  // through the same field.
+  found.add('pending');
+  assert.ok(found.size >= 3, `parsed only ${found.size} refund states — the scan is wrong`);
+  return [...found].sort();
+})();
+
+test('every refund state the server writes has its own sentence', () => {
+  // The acceptance criterion is that neither message can appear in the other's
+  // situation. The way that breaks is a state with no branch falling through to
+  // whichever one happens to be last, so the mapping is asserted TOTAL against
+  // what the server actually emits.
+  const legal = LEGAL_TS();
+  const at = legal.indexOf('export const FAILURE_ASSURANCE');
+  assert.ok(at > 0, 'there is no mapping from refund state to copy');
+  const block = legal.slice(at, legal.indexOf('\n}', at));
+  for (const state of SERVER_REFUND_STATES) {
+    assert.ok(new RegExp(`\\b${state}:`).test(block),
+      `the server writes refund: '${state}' and no message covers it`);
+  }
+  assert.match(block, /\bunknown:/, 'a server that says nothing has no message');
+});
+
+test('a definite answer is never given the hedged wording', () => {
+  // RENDER_FAILED_ASSURANCE says "if you were charged". That is true only while
+  // the answer is unknown; using it when the server has said `none` or
+  // `refunded` reads as evasion in the screen where it costs most.
+  const legal = LEGAL_TS();
+  const at = legal.indexOf('export const FAILURE_ASSURANCE');
+  const block = legal.slice(at, legal.indexOf('\n}', at));
+  const hedged = [...block.matchAll(/(\w+): RENDER_FAILED_ASSURANCE/g)].map((m) => m[1]);
+  assert.deepStrictEqual(hedged, ['unknown'],
+    `the hedged wording is used for definite states: ${hedged.join(', ')}`);
+
+  const nothing = legal.match(/export const NOTHING_CHARGED_ASSURANCE =\s*\n?\s*'([^']*)'/);
+  assert.ok(nothing, 'there is no definite "nothing was charged" wording');
+  assert.ok(!/if you were charged/i.test(nothing[1]), 'the definite wording still hedges');
+  assert.match(nothing[1], /nothing was charged/i,
+    'the pre-payment wording does not say nothing was charged');
+});
+
+test('the page picks the sentence from the mapping, not from a ternary chain', () => {
+  const page = codeOnly(PROGRAM());
+  assert.match(page, /FAILURE_ASSURANCE\[state\]/,
+    'the failure screen does not use the total mapping');
+  assert.ok(!/REFUND_ISSUED_ASSURANCE|RENDER_FAILED_ASSURANCE/.test(page),
+    'the failure screen still reaches for individual messages, which can fall through');
+  assert.match(page, /in FAILURE_ASSURANCE \? s\.refund : 'unknown'/,
+    'an unrecognised refund state is not normalised');
+});
+
+test('a pre-payment failure says nothing was charged, and a post-payment one does not', () => {
+  const wizard = codeOnly(WIZARD());
+  assert.match(wizard, /NOTHING_CHARGED_ASSURANCE/,
+    'the pre-checkout failures make no statement about the money');
+
+  const checkout = codeOnly(
+    fs.readFileSync(path.join(WEB, 'lib', 'checkout.ts'), 'utf8'));
+  const at = checkout.indexOf('export const CHECKOUT_MESSAGE');
+  const block = checkout.slice(at, checkout.indexOf('\n}', at));
+  const messages = [...block.matchAll(/'([^']{20,})'/g)].map((m) => m[1]);
+  assert.ok(messages.length >= 4, `parsed only ${messages.length} checkout messages`);
+  for (const msg of messages) {
+    assert.ok(!/refund/i.test(msg), `a pre-payment message promises a refund: "${msg}"`);
+  }
+
+  const legal = LEGAL_TS();
+  for (const name of ['REFUND_ISSUED_ASSURANCE', 'REFUND_FAILED_ASSURANCE']) {
+    const start = legal.indexOf(`export const ${name}`);
+    assert.ok(start > 0, `${name} is missing`);
+    const text = legal.slice(start, legal.indexOf('\n\n', start)).replace(/'\s*\+\s*'/g, '');
+    assert.ok(!/nothing was charged/i.test(text),
+      `${name} claims nothing was charged, but it is shown after a payment`);
+  }
+});
+
+// --------------------------------------------------------------------------
 // No screen may claim a success that did not happen (#29)
 // --------------------------------------------------------------------------
 
@@ -477,10 +563,15 @@ test('the failure screen states the refund definitely once it is done', () => {
     'the completed-refund wording still hedges about whether a charge happened');
   assert.match(text, /in full/i, 'the completed-refund wording does not say how much');
 
+  // Since #30 the screen reads the sentence out of a total mapping rather than
+  // naming constants itself, so the assertion follows the mapping.
+  const map = legal.slice(legal.indexOf('export const FAILURE_ASSURANCE'));
+  assert.match(map.slice(0, map.indexOf('\n}')), /refunded: REFUND_ISSUED_ASSURANCE/,
+    'a completed refund is no longer stated definitely');
   const page = codeOnly(PROGRAM());
-  assert.match(page, /s\.refund === 'refunded'/,
+  assert.match(page, /s\.refund/,
     'the failure screen never consults what happened to the money');
-  assert.match(page, /REFUND_ISSUED_ASSURANCE/,
+  assert.match(page, /FAILURE_ASSURANCE/,
     'the failure screen cannot state a completed refund');
 });
 
@@ -918,11 +1009,20 @@ test('the render-failure message is true whether or not payment is live', () => 
   // It said "Nothing was charged — please try again", which is true only while
   // nothing is ever charged, and becomes a false claim about the customer's own
   // money in the screen they read straight after losing it.
-  const surfaces = codeOnly(WIZARD()) + codeOnly(PROGRAM());
-  assert.ok(!/Nothing was charged/i.test(surfaces),
-    'the failure copy still asserts nothing was charged');
-  assert.match(codeOnly(PROGRAM()), /RENDER_FAILED_ASSURANCE/,
-    'the failure copy does not carry the refund assurance');
+  // The old copy was "Nothing was charged — please try again", asserted
+  // unconditionally. Since #30 that claim is allowed, but ONLY where the server
+  // has said `none` — which is a mapping entry, never a hardcoded sentence in a
+  // screen.
+  for (const [name, src] of [['Wizard.tsx', codeOnly(WIZARD())], ['ProgramPage.tsx', codeOnly(PROGRAM())]]) {
+    assert.ok(!/'[^']*nothing was charged[^']*'/i.test(src),
+      `${name} hardcodes a claim about the customer's money instead of using the mapping`);
+  }
+  const legalSrc = LEGAL_TS();
+  assert.ok(legalSrc.indexOf('export const RENDER_FAILED_ASSURANCE') > 0,
+    'the hedged assurance is gone');
+  const map = legalSrc.slice(legalSrc.indexOf('export const FAILURE_ASSURANCE'));
+  assert.match(map.slice(0, map.indexOf('\n}')), /unknown: RENDER_FAILED_ASSURANCE/,
+    'a server that says nothing about the money no longer gets the hedged wording');
 
   const legal = LEGAL_TS();
   const at = legal.indexOf('export const RENDER_FAILED_ASSURANCE');
