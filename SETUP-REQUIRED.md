@@ -88,7 +88,7 @@ has closed — programs are now bought through checkout." That is deliberate: se
 | Behaviour today | checkout stays disabled; a malformed value is also treated as unset, with a log line naming the variable |
 
 Where Stripe returns the customer after paying or cancelling, e.g.
-`https://hypnosisstudio.com`. Required rather than derived from the request's
+`https://hypnosisstudio.app`. Required rather than derived from the request's
 `Host` header, which a client can forge — a forged one would land the customer
 on somebody else's site the instant after paying us.
 

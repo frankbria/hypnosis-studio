@@ -273,14 +273,14 @@ test('a currency Stripe would reject never reaches the moment of purchase', asyn
 });
 
 test('a malformed return address disables checkout rather than 502ing at purchase', async () => {
-  // `hypnosisstudio.com` with no scheme builds a success_url Stripe rejects. The
+  // `hypnosisstudio.app` with no scheme builds a success_url Stripe rejects. The
   // operator would see only checkout_unavailable, with nothing pointing at their
   // env file. checkout_disabled is the code that means "you have not configured
   // this", so that is the one they get.
   const stripe = await fakeStripe();
   const srv = await startServer({
     STRIPE_API_BASE: stripe.base,
-    PUBLIC_BASE_URL: 'hypnosisstudio.com',
+    PUBLIC_BASE_URL: 'hypnosisstudio.app',
   });
   try {
     const res = await request(srv.port, 'POST', '/api/checkout', {

@@ -1113,7 +1113,7 @@ test('the privacy page matches the requests the site actually makes', () => {
 
   const found = [...new Set(
     [...sources.matchAll(/https?:\/\/([a-z0-9.-]+)/gi)].map((m) => m[1].toLowerCase()),
-  )].filter((h) => !h.endsWith('hypnosisstudio.com') && h !== 'localhost');
+  )].filter((h) => !h.endsWith('hypnosisstudio.app') && h !== 'localhost');
 
   const legal = fs.readFileSync(path.join(WEB, 'lib', 'legal.ts'), 'utf8');
   const page = codeOnly(fs.readFileSync(path.join(WEB, 'sections', 'Legal.tsx'), 'utf8'));
