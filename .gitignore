@@ -2,6 +2,16 @@ node_modules/
 .env
 .env.*
 !.env.example
+
+# The server's own secrets file. `.env.*` above does NOT match `api.env` — the
+# pattern needs the name to START with `.env` — so this file was ignored by
+# nothing, in a PUBLIC repository, while holding the live ElevenLabs key and
+# (from #22/#23) the live Stripe keys.
+#
+# The deploy copies engine/**, so a committed api.env would also overwrite the
+# server's own copy on the next push.
+engine/api.env
+*.env
 *.log
 __pycache__/
 
