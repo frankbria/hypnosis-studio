@@ -41,6 +41,68 @@ Override for a one-off: `bash deploy/wait-for-idle.sh <url> <timeout-seconds> <p
 - nginx site `hypnosis-studio` enabled; `server_name hypnosis.frankbria.net`
 - TLS via `certbot --nginx -d hypnosis.frankbria.net` (HTTP→HTTPS redirect)
 
+## Domain move to hypnosisstudio.app (2026-08-13)
+
+The live domain is now **hypnosisstudio.app** (A record → 45.33.41.124). The
+vhost is committed at `deploy/nginx-hypnosisstudio.app.conf` rather than living
+only on the box — the previous one could not be reviewed or reconstructed.
+
+### `.app` is HSTS-preloaded
+
+Every browser ships the whole `.app` TLD in its HSTS preload list, so
+`http://hypnosisstudio.app` **fails in a browser before it reaches nginx**. That
+is not a broken vhost. Two consequences:
+
+- test port 80 with `curl`, which ignores preload;
+- certbot's HTTP-01 challenge still works — Let's Encrypt's validators are not
+  browsers.
+
+### Runbook
+
+Additive: the existing `hypnosis.frankbria.net` vhost is left alone until the
+new one is confirmed working, so there is always a way back.
+
+```bash
+# 1. DNS first — this must already resolve, or certbot cannot validate.
+dig +short hypnosisstudio.app          # expect 45.33.41.124
+
+# 2. Install the vhost (HTTP only at this point).
+sudo cp deploy/nginx-hypnosisstudio.app.conf \
+        /etc/nginx/sites-available/hypnosisstudio.app
+sudo ln -s /etc/nginx/sites-available/hypnosisstudio.app \
+           /etc/nginx/sites-enabled/hypnosisstudio.app
+
+# The 443 block references certs that do not exist yet, so comment that whole
+# server block out for this first test, or nginx -t will fail.
+sudo nginx -t && sudo systemctl reload nginx
+curl -I http://hypnosisstudio.app/.well-known/acme-challenge/ping   # expect 404, not a connection error
+
+# 3. Issue the certificate. Add `-d www.hypnosisstudio.app` ONLY if that DNS
+#    record exists — certbot fails the whole run on a name it cannot validate.
+sudo certbot --nginx -d hypnosisstudio.app
+
+# 4. Uncomment the 443 block (certbot will have written its own; keep whichever
+#    you prefer, but keep the gzip / proxy_buffering / HSTS lines).
+sudo nginx -t && sudo systemctl reload nginx
+
+# 5. Verify.
+curl -sf https://hypnosisstudio.app/api/health | head -c 200
+curl -sI https://hypnosisstudio.app | grep -i strict-transport
+sudo certbot renew --dry-run
+```
+
+### Before the old domain is retired
+
+- **Update the Stripe webhook endpoint** to
+  `https://hypnosisstudio.app/api/stripe/webhook` **before** redirecting the old
+  host. Stripe does not reliably follow a 301 on a POST, and a redirected
+  webhook records as a failed delivery.
+- **`PUBLIC_BASE_URL` must be the new origin.** It is what `success_url` and
+  every delivery-email link are built from; a stale value sends paying customers
+  to a dead host after checkout.
+- Only then, replace `location /` in the old vhost with
+  `return 301 https://hypnosisstudio.app$request_uri;`.
+
 ## GitHub environments
 
 Environment **`production`** holds the deploy secrets (a `staging` environment also exists — unused for now):
@@ -55,7 +117,12 @@ The deploy job declares `environment: production` to pick these up; every push t
 
 ## Domain
 
-Live domain: **hypnosis.frankbria.net** — A record → 45.33.41.124, TLS issued by certbot (nginx plugin).
+Live domain: **hypnosisstudio.app** — A record → 45.33.41.124, TLS issued by
+certbot (nginx plugin). Vhost committed at
+`deploy/nginx-hypnosisstudio.app.conf`.
+
+Previously **hypnosis.frankbria.net**, kept serving until the new host is
+confirmed and then redirected. See the domain-move section above.
 
 ## Ops cheat sheet
 

@@ -233,7 +233,7 @@ const PROGRAM_CURRENCY = (() => {
 // straight after paying us. One env var is cheaper than being careful about
 // that forever.
 //
-// Validated at startup rather than trusted. A value like `hypnosisstudio.com`
+// Validated at startup rather than trusted. A value like `hypnosisstudio.app`
 // (no scheme) builds a success_url Stripe rejects, and the operator would see
 // only `502 checkout_unavailable` at purchase time with nothing pointing at
 // their env file. Treating it as unset instead means they get
