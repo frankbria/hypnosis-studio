@@ -236,6 +236,100 @@ test('the phase union admits exactly the engine names', () => {
 });
 
 // --------------------------------------------------------------------------
+// The pre-rendered catalog manifest (#58)
+// --------------------------------------------------------------------------
+
+// engine/catalog.json is the committed output of engine/prerender_catalog.py and
+// the source of truth for the track lengths the storefront quotes, retiring the
+// invented figures behind #14. The web build *imports* it, so its shape is a
+// build-time contract: drift here is a broken frontend, not a stale fixture.
+//
+// The rules themselves (which programs count, which of two voice sets is
+// quoted, when a program is publishable) live in engine/catalog.py and are
+// tested in engine/tests/test_catalog.py, where they can be exercised as
+// behaviour. These are the cross-language couplings that no single test suite
+// can see — the same gap #14 and #15 fell through.
+const MANIFEST = JSON.parse(fs.readFileSync(
+  path.join(__dirname, '..', 'engine', 'catalog.json'), 'utf8'));
+
+const ENGINE_GOALS = (() => {
+  const src = fs.readFileSync(
+    path.join(__dirname, '..', 'engine', 'render_program.py'), 'utf8');
+  const m = src.match(/^GOALS = \(([^)]*)\)/m);
+  assert.ok(m, 'could not parse the engine GOALS tuple');
+  return [...m[1].matchAll(/"(\w+)"/g)].map((g) => g[1]);
+})();
+
+test('the storefront reads its durations from the manifest, not a second copy', () => {
+  // A TypeScript reimplementation of "which length do we quote" would be free
+  // to drift, and the direction it drifts is the one that over-promises at the
+  // moment of purchase.
+  assert.ok(DATA.includes("from '../../../engine/catalog.json'"),
+    'web/src/lib/data.ts no longer imports the catalog manifest');
+  assert.ok(codeOnly(DATA).includes('durationsByGoal'),
+    'data.ts no longer reads the manifest-derived durations');
+});
+
+test('the floors survive as the fallback for an unrendered goal', () => {
+  // The manifest ships empty and fills in one pre-render run at a time, so
+  // "no master for this goal yet" is a permanent, normal state — not an edge
+  // case. Removing the floors would leave those goals quoting nothing.
+  assert.ok(/minimumSeconds: \d+/.test(DATA),
+    'TRACK_META floors are gone, so an unrendered goal has nothing to quote');
+});
+
+test('the committed manifest has the keys the web build imports', () => {
+  assert.strictEqual(typeof MANIFEST.durationsByGoal, 'object');
+  assert.ok(Array.isArray(MANIFEST.programs));
+});
+
+test('every pre-rendered goal is one the engine can actually render', () => {
+  for (const goal of Object.keys(MANIFEST.durationsByGoal)) {
+    assert.ok(ENGINE_GOALS.includes(goal),
+      `catalog quotes durations for "${goal}", which is not in engine GOALS`);
+  }
+});
+
+test('every pre-rendered goal reaches the storefront', () => {
+  // A master rendered for a goal the site has no apiGoal for is $2 of TTS that
+  // no customer can ever be shown.
+  const apiGoals = [...DATA.matchAll(/apiGoal: '(\w+)'/g)].map((m) => m[1]);
+  for (const goal of Object.keys(MANIFEST.durationsByGoal)) {
+    assert.ok(apiGoals.includes(goal),
+      `catalog has durations for "${goal}", but no goal in data.ts maps to it`);
+  }
+});
+
+test('every quoted duration is one track of a publishable master', () => {
+  // Guards a hand-edited manifest: the quote has to be the shortest publishable
+  // rendering of that track, because the customer receives one of the two voice
+  // sets and a quote above either of them over-promises.
+  for (const [goal, quoted] of Object.entries(MANIFEST.durationsByGoal)) {
+    const runs = MANIFEST.programs
+      .filter((p) => p.goal === goal && p.publishable)
+      .map((p) => p.tracks.map((t) => t.durationSec));
+    assert.ok(runs.length, `${goal} is quoted but has no publishable program`);
+    const expected = quoted.map((_, i) => Math.min(...runs.map((r) => r[i])));
+    assert.deepStrictEqual(quoted, expected,
+      `${goal}'s quoted durations are not the shortest publishable rendering`);
+  }
+});
+
+test('nothing is publishable until it has been listened to', () => {
+  // The automated gate catches silence, a dead mix and a truncated file. It
+  // cannot hear the whisper layer sitting on top of the narration instead of
+  // under it, which is why the human listen is still in the criteria (#58).
+  for (const p of MANIFEST.programs) {
+    if (p.publishable) {
+      assert.ok(p.approval && p.approval.at && p.approval.by,
+        `${p.key} is marked publishable with no recorded listen`);
+      assert.ok(p.qa && p.qa.passed,
+        `${p.key} is marked publishable without passing the QA gate`);
+    }
+  }
+});
+
+// --------------------------------------------------------------------------
 // Policy pages (#16) and the retention window (#21)
 // --------------------------------------------------------------------------
 

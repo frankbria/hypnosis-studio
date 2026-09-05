@@ -19,6 +19,13 @@ export default defineConfig({
   plugins: [inspectAttr(), react()],
   server: {
     port: 3000,
+    fs: {
+      // engine/catalog.json lives outside the Vite root: it is the engine's
+      // output (engine/prerender_catalog.py) and the storefront's source of
+      // truth for track lengths (#58). The production build inlines it, but the
+      // dev server refuses to serve anything above the root without this.
+      allow: ['..'],
+    },
   },
   resolve: {
     alias: {
