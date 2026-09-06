@@ -32,9 +32,14 @@ def test_the_environment_wins(monkeypatch, tmp_path):
 
 def test_env_local_is_the_fallback(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".env.local").write_text('ELEVENLABS_API_KEY="from-file"\n',
-                                         encoding="utf-8")
-    assert render_track.load_key() == "from-file"
+    # "example-" prefix on purpose: this line is a real `ELEVENLABS_API_KEY=`
+    # assignment in a tracked file, which the secret scanner in
+    # test/server.env.test.js flags wherever it appears outside test/. The
+    # prefix is the placeholder form that scanner recognises. Renaming it back
+    # to something tidier breaks `npm test`.
+    (tmp_path / ".env.local").write_text(
+        'ELEVENLABS_API_KEY="example-from-file"\n', encoding="utf-8")
+    assert render_track.load_key() == "example-from-file"
 
 
 def test_a_missing_env_local_says_which_variable_to_set(monkeypatch, tmp_path):
