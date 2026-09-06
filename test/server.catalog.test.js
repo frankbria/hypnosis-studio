@@ -90,7 +90,8 @@ const TRACKS = [
 ];
 
 function makeCatalog(dir, { key = 'polymath__male', goal = 'polymath',
-  voiceSet = 'male', publishable = true, writeFiles = true, escapeTo = null } = {}) {
+  voiceSet = 'male', publishable = true, writeFiles = true, escapeTo = null,
+  damage = null } = {}) {
   const catalogDir = path.join(dir, 'catalog');
   fs.mkdirSync(path.join(catalogDir, key), { recursive: true });
   const tracks = TRACKS.map((t) => ({
@@ -113,6 +114,9 @@ function makeCatalog(dir, { key = 'polymath__male', goal = 'polymath',
       }
     }
   }
+  // Lets a test break the masters the way a real box breaks them — a deleted
+  // file, a truncated copy — after they are written and before the server boots.
+  if (damage) damage(catalogDir);
   const manifestPath = path.join(dir, 'catalog.json');
   fs.writeFileSync(manifestPath, JSON.stringify({
     schemaVersion: 1,
@@ -593,17 +597,91 @@ test('a catalog buyer is emailed their order link', async () => {
   } finally { stop(srv); mail.close(); }
 });
 
-test('a missing master reads as an operator fault, not a bad link', async () => {
-  // A manifest deployed ahead of its audio. The signature was good, so
-  // answering 403 would send an operator hunting for a signing problem.
-  const srv = await startServer({ catalog: { writeFiles: false } });
+test('a master lost after boot reads as an operator fault, not a bad link', async () => {
+  // Boot-time indexing catches a manifest deployed ahead of its audio, so the
+  // only way to reach this now is to lose a master while the process is up.
+  // The signature is still good, so answering 403 would send an operator
+  // hunting for a signing problem that does not exist.
+  const srv = await startServer();
   try {
     await pay(srv);
     const order = await orderTracks(srv);
+    fs.rmSync(path.join(srv.catalogDir, 'polymath__male'), { recursive: true });
     const res = await request(srv.port, 'GET', order.tracks[0].mp3);
     assert.strictEqual(res.status, 404);
     assert.ok(srv.logs.join('').includes('signed link to a missing master'),
       'a missing master was not logged for the operator');
+  } finally { stop(srv); }
+});
+
+// ---------------------------------------------------------------------------
+// A manifest that outruns its audio must not sell
+//
+// `catalog.json` is committed and rides every deploy; the masters are
+// gitignored and exist only on the box that rendered them. A rebuilt box or a
+// fresh environment separates the two, and every mechanism that used to catch a
+// broken sale is skipped on the catalog path — no capacity gate, no render, no
+// job to fail. Without a boot check the customer is the one who finds out.
+// ---------------------------------------------------------------------------
+
+test('a program whose masters are absent renders instead of selling a 404', async () => {
+  const srv = await startServer({ catalog: { writeFiles: false } });
+  try {
+    const res = await pay(srv);
+    assert.strictEqual(res.status, 200, res.body.toString());
+    assert.ok(!res.json.catalog,
+      'a program with no masters on this box was still sold as a catalog sale');
+    assert.ok(res.json.jobId, 'no render was started to stand in for it');
+    await sleep(300);
+    assert.ok(srv.engineRan(), 'the fallback did not actually reach the engine');
+    assert.ok(srv.logs.join('').includes('masters are not on this box'),
+      'the demotion was not logged for the operator');
+    assert.ok(srv.logs.join('').includes('polymath__male'),
+      'the log did not name which program was demoted');
+  } finally { stop(srv); }
+});
+
+test('one missing file of eight demotes the whole program', async () => {
+  // Three quarters of a program is not a deliverable, and selling it would be
+  // the same broken promise as selling none of it.
+  const srv = await startServer({
+    catalog: {
+      damage: (d) => fs.unlinkSync(path.join(d, 'polymath__male', 'polymath_track3.mp3')),
+    },
+  });
+  try {
+    const res = await pay(srv);
+    assert.ok(!res.json.catalog, 'a program missing one master was still sold');
+    assert.ok(res.json.jobId, 'the incomplete program did not fall back to rendering');
+  } finally { stop(srv); }
+});
+
+test('a zero-byte master counts as missing', async () => {
+  // Survives a half-finished copy and would otherwise index as sound.
+  const srv = await startServer({
+    catalog: {
+      damage: (d) => fs.truncateSync(path.join(d, 'polymath__male', 'polymath_track1.wav'), 0),
+    },
+  });
+  try {
+    const res = await pay(srv);
+    assert.ok(!res.json.catalog, 'a truncated master was still sold');
+    assert.ok(res.json.jobId, 'the truncated program did not fall back to rendering');
+  } finally { stop(srv); }
+});
+
+test('demoting every program lifts the signing-secret requirement', async () => {
+  // The refusal is scoped to "there is something publishable". If it read the
+  // manifest rather than the real index, a box that had lost its masters would
+  // refuse to boot over links it can no longer be asked to sign — turning a
+  // recoverable degradation into an outage.
+  const srv = await startServer({
+    catalog: { writeFiles: false },
+    env: { DELIVERY_SIGNING_SECRET: '' },
+  });
+  try {
+    const res = await request(srv.port, 'GET', '/api/health');
+    assert.strictEqual(res.status, 200, 'the server refused to boot with no masters');
   } finally { stop(srv); }
 });
 
