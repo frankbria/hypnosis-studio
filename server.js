@@ -2451,7 +2451,8 @@ async function handleRequest(req, res) {
   // kept apart by construction rather than by care — the path served here comes
   // from SAMPLES, which is built at boot from `<key>/sample.mp3` and holds
   // nothing else, so no request can name a master through this route.
-  if (url === '/api/samples' && (req.method === 'GET' || req.method === 'HEAD')) {
+  if (/^\/api\/samples(?:\?.*)?$/.test(url)
+      && (req.method === 'GET' || req.method === 'HEAD')) {
     return sendJson(res, 200, {
       samples: [...SAMPLES.values()].map(({ file, ...rest }) => rest),
     }, { 'Cache-Control': 'public, max-age=300' });
@@ -2489,7 +2490,14 @@ async function handleRequest(req, res) {
     if (req.method === 'HEAD') return res.end();
     const stream = fs.createReadStream(sample.file);
     stream.on('error', () => res.destroy());
+    // BOTH events. A client that goes away mid-stream — a tab closed on an
+    // 830 kB sample, an <audio> element switching tracks — makes `res` emit
+    // `close`, never `error`, and `pipe()` unpipes the source without
+    // destroying it. Listening only for `error` leaks the file descriptor for
+    // the life of the process; enough of them is EMFILE, which in this server
+    // means every synchronous fs call starts failing at once.
     res.on('error', () => stream.destroy());
+    res.on('close', () => stream.destroy());
     return stream.pipe(res);
   }
 
@@ -2550,6 +2558,7 @@ async function handleRequest(req, res) {
     const stream = fs.createReadStream(filePath);
     stream.on('error', () => res.destroy());
     res.on('error', () => stream.destroy());
+    res.on('close', () => stream.destroy());   // see the sample route above
     return stream.pipe(res);
   }
 
@@ -2597,6 +2606,7 @@ async function handleRequest(req, res) {
     const stream = fs.createReadStream(filePath);
     stream.on('error', () => res.destroy());
     res.on('error', () => stream.destroy()); // client aborted mid-download
+    res.on('close', () => stream.destroy());   // ...which arrives as `close`
     return stream.pipe(res);
   }
 

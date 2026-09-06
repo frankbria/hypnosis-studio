@@ -138,6 +138,20 @@ async function startServer(programs = [ONE], env = {}) {
 
 const stop = (srv) => { try { srv.proc.kill('SIGKILL'); } catch { /* gone */ } };
 
+/** Start a sample download and hang up as soon as the first bytes arrive. */
+function abandonMidStream(port) {
+  return new Promise((resolve) => {
+    const req = http.get(
+      { host: '127.0.0.1', port, path: '/api/catalog/polymath__male/sample.mp3' },
+      (res) => {
+        res.once('data', () => { req.destroy(); resolve(); });
+        res.once('end', resolve);
+      });
+    req.on('error', () => resolve());
+    req.setTimeout(5000, () => { req.destroy(); resolve(); });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // What /api/samples advertises
 // ---------------------------------------------------------------------------
@@ -219,6 +233,20 @@ test('a cache-busting query does not turn a sample into a 404', async () => {
   } finally { stop(srv); }
 });
 
+test('a query string does not turn the listing into a 404', async () => {
+  // The sample route below tolerates one precisely so a cache-buster cannot
+  // break it. The listing is `Cache-Control: public` too, so it is subject to
+  // the same intermediaries — and if it 404s, `useProgramSamples` fails
+  // silently by design and the storefront falls back to the solo voices with
+  // no signal that the feature just turned itself off.
+  const srv = await startServer();
+  try {
+    const res = await request(srv.port, 'GET', '/api/samples?v=2');
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.samples.map((s) => s.key), ['polymath__male']);
+  } finally { stop(srv); }
+});
+
 test('the listing is cacheable, but not for long', async () => {
   const srv = await startServer();
   try {
@@ -294,6 +322,39 @@ test('an unknown program is a 404', async () => {
 // ---------------------------------------------------------------------------
 // The samples route must not become a door onto the masters
 // ---------------------------------------------------------------------------
+
+test('a client that goes away mid-stream does not leak a file descriptor', async () => {
+  // `res` emits `close` on a client disconnect, never `error`, and `pipe()`
+  // unpipes the source without destroying it — so listening only for `error`
+  // holds the fd for the life of the process. Enough abandoned plays is EMFILE,
+  // and in this server that means every synchronous fs call starts failing at
+  // once: this route 404s, `readJsonSafe` returns null so job routes 404, and
+  // the retention sweep's readdirSync goes silently blind.
+  //
+  // Measured against the process's real open descriptors rather than a stub,
+  // because the leak is in Node's stream plumbing, not in our code's shape.
+  const srv = await startServer([{ ...ONE, sample: Buffer.alloc(4 * 1024 * 1024, 7) }]);
+  try {
+    const openFds = () => {
+      try { return fs.readdirSync(`/proc/${srv.proc.pid}/fd`).length; }
+      catch { return null; }
+    };
+    if (openFds() === null) return;   // not Linux; nothing to measure
+
+    // Warm up, so one-off allocations are not counted as a leak.
+    for (let i = 0; i < 3; i++) await abandonMidStream(srv.port);
+    await sleep(150);
+    const before = openFds();
+
+    for (let i = 0; i < 25; i++) await abandonMidStream(srv.port);
+    await sleep(300);
+
+    const after = openFds();
+    assert.ok(after - before < 10,
+      `25 abandoned plays left ${after - before} descriptors open `
+      + `(${before} -> ${after}) — the read stream is not destroyed on close`);
+  } finally { stop(srv); }
+});
 
 test('a master cannot be fetched through the sample route', async () => {
   // The masters sit in the same directory as the sample. This is the whole risk
