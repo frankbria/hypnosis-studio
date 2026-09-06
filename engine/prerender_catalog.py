@@ -34,7 +34,9 @@ it is also the record of *what is not publishable and why*.
 """
 import argparse
 import os
+import shutil
 import sys
+import tempfile
 import traceback
 
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -156,8 +158,20 @@ def render_one(goal: str, voice_set: str, outdir: str, force: bool,
         # — nor disturbs one. In particular `--dry-run --force` must not delete
         # a manifest: that would make a run advertised as "verify, no TTS" throw
         # away the resumability of a program already paid for.
+        #
+        # Into a scratch directory, because `run()` writes as well as reads: it
+        # constructs a Job (status.json) and copies the scripts in before it
+        # returns. Pointed at the real directory it left every finished
+        # program's status.json reading `rendering / scripting / 5%`,
+        # permanently — a dry run reporting a render in progress that is not.
+        # Nothing it verifies lives in the outdir: the scripts and the pad are
+        # both read from ENGINE_DIR, so a scratch target checks the same things.
         print(f"== {key}: checking scripts and pad", flush=True)
-        render_program.run(key, goal, voice_set, program_dir, dry_run=True)
+        scratch = tempfile.mkdtemp(prefix=f"dryrun-{key}-")
+        try:
+            render_program.run(key, goal, voice_set, scratch, dry_run=True)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
         return program_dir
 
     if os.path.exists(manifest_path) and not force:
@@ -273,10 +287,13 @@ def main() -> int:
     # deleted that program's entry and its QA evidence; and if the deleted one
     # happened to hold the catalog-wide full listen, every remaining program was
     # demoted to unpublishable along with it.
+    # `keep` bounds the carry-forward to combinations the engine can still
+    # produce, so retiring a goal or a voice set retires its catalog entry too.
+    live = {catalog_lib.program_key(g, v) for g, v in combinations()}
     programs = catalog_lib.merge_untouched(
-        programs, existing.get("programs", []), "key")
+        programs, existing.get("programs", []), "key", keep=live)
     reports = catalog_lib.merge_untouched(
-        reports, prior_report.get("programs", []), "program")
+        reports, prior_report.get("programs", []), "program", keep=live)
 
     catalog = catalog_lib.build_catalog(programs, approvals,
                                         render_program.now_iso())

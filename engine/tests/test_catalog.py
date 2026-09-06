@@ -331,4 +331,75 @@ def test_the_two_timestamp_spellings_compare_correctly():
 def test_an_unparseable_listen_timestamp_is_refused():
     p = program(approval=dict(FULL, at="last tuesday"))
     assert not p["publishable"]
-    assert any("not ISO 8601" in b for b in p["blockers"])
+    assert any("not an ISO 8601 time" in b for b in p["blockers"])
+
+
+# ---------------------------------------------------------------- naive times
+
+def test_a_timestamp_with_no_timezone_is_refused_not_crashed():
+    # `2026-09-05T10:00:00` parses happily into a NAIVE datetime, and comparing
+    # one of those to the engine's aware createdAt raises TypeError — from
+    # build_program, which the driver calls outside its per-combination guard.
+    # One hand-typed `at` missing its Z took the whole run down after the
+    # rendering and before the manifest write.
+    p = catalog.build_program(
+        goal="polymath", goal_title="T", voice_set="male", tracks=list(TRACKS),
+        qa_problems=[], checked_at="t",
+        approval=dict(FULL, at="2026-09-05T10:00:00"),
+        rendered_at="2026-09-05T09:00:00.500000+00:00")
+    assert not p["publishable"]
+    assert any("with a timezone" in b for b in p["blockers"])
+
+
+def test_a_naive_timestamp_is_not_quietly_assumed_to_be_utc():
+    # Guessing UTC would silently move a sign-off by up to a day, and the
+    # sign-off is what gates selling the audio.
+    assert catalog.parse_time("2026-09-05T10:00:00") is None
+    assert catalog.parse_time("2026-09-05T10:00:00Z") is not None
+
+
+def test_a_naive_full_listen_cannot_satisfy_the_catalog_wide_rule():
+    naive = {"listen": "full", "at": "2026-09-05T10:00:00", "by": "frankbria"}
+    built = catalog.build_catalog(
+        [program(voice_set="male", approval=naive)],
+        {"listens": [dict(naive, program="polymath__male")]},
+        "2026-09-05T11:00:00Z")
+    assert built["fullListenProblems"]
+    assert not built["programs"][0]["publishable"]
+
+
+# ---------------------------------------------------------------- carry-forward
+
+def test_an_entry_predating_renderedAt_is_treated_as_unapproved():
+    # Exactly the catalogs that may hold the damage the staleness check was
+    # added for: a sign-off from before a --force re-render under the old code.
+    # Unverifiable is unapproved; re-measuring costs one skip-only run.
+    stale_schema = {
+        "key": "polymath__male", "goal": "polymath", "publishable": True,
+        "blockers": [], "tracks": [{"durationSec": 800.0}],
+        "approval": dict(FULL),
+    }
+    built = catalog.build_catalog(
+        [stale_schema], {"listens": [dict(FULL, program="polymath__male")]},
+        "2026-09-05T11:00:00Z")
+    assert not built["programs"][0]["publishable"]
+    assert any("predates the renderedAt field" in b
+               for b in built["programs"][0]["blockers"])
+    assert built["durationsByGoal"] == {}
+
+
+def test_a_retired_combination_does_not_survive_forever():
+    # A goal or voice set removed from the registries stops appearing in any
+    # run's todo, so nothing ever writes a fresh entry over it. Unbounded
+    # carry-forward keeps selling a program the engine can no longer render.
+    merged = catalog.merge_untouched(
+        [], [{"key": "polymath__male"}, {"key": "retired__male"}], "key",
+        keep={"polymath__male"})
+    assert [e["key"] for e in merged] == ["polymath__male"]
+
+
+def test_carry_forward_is_unbounded_when_no_key_set_is_given():
+    # The default stays permissive so the helper is usable without the caller
+    # having to know the registries.
+    merged = catalog.merge_untouched([], [{"key": "anything"}], "key")
+    assert [e["key"] for e in merged] == ["anything"]

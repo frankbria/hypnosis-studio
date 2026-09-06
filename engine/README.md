@@ -246,7 +246,14 @@ The rules, enforced in `catalog.py` and tested in `tests/test_catalog.py`:
   catalog as `renderedAt`). A sign-off older than the audio is a sign-off on a
   file that no longer exists, which is exactly what `--force` produces. Both
   spellings of an ISO timestamp are accepted — the engine writes `+00:00`, `Z`
-  is what people type — and they are parsed rather than string-compared.
+  is what people type — and they are parsed rather than string-compared. A
+  **timezone is required**: `2026-09-05T10:00:00` with no `Z` is refused rather
+  than assumed to be UTC, because guessing would move a sign-off by up to a day.
+- Upgrading from a catalog written before `renderedAt` existed demotes every
+  entry once, with a blocker saying so. Re-run the driver to clear it: the
+  programs are already rendered, so it re-measures and spends nothing.
+- Removing a goal or a voice set from the registries retires its catalog entry
+  on the next run, rather than carrying the last verdict forward forever.
 - The newest entry for a program wins, so a re-render is re-approved by
   appending rather than by editing history.
 

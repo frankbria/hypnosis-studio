@@ -101,13 +101,22 @@ def parse_time(value):
     `datetime.now(timezone.utc).isoformat()` (`+00:00`), and the approvals file
     is hand-edited, where `Z` is what people type. Comparing those as strings
     silently mis-orders them — `"Z" > "+"` — so they are parsed, not compared raw.
+
+    An offset-less value is rejected rather than assumed to be UTC. `2026-09-05T10:00:00`
+    parses perfectly happily into a *naive* datetime, and comparing one of those
+    to the engine's aware `createdAt` raises TypeError — from a call site outside
+    the per-combination guard, so a single hand-typed `at` missing its `Z` took
+    down the whole run after the rendering and before the manifest write.
+    Guessing UTC instead would be worse: it silently backdates or postdates a
+    sign-off by up to a day, and the sign-off is what gates selling the audio.
     """
     if not isinstance(value, str):
         return None
     try:
-        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    return parsed if parsed.tzinfo is not None else None
 
 
 def approval_problems(key: str, entry, rendered_at=None) -> list:
@@ -134,7 +143,9 @@ def approval_problems(key: str, entry, rendered_at=None) -> list:
     if not entry.get("at"):
         problems.append(f"{key}: listen has no timestamp")
     elif listened_at is None:
-        problems.append(f"{key}: listen timestamp {entry['at']!r} is not ISO 8601")
+        problems.append(
+            f"{key}: listen timestamp {entry['at']!r} is not an ISO 8601 time "
+            f"with a timezone (e.g. 2026-09-05T10:00:00Z)")
     if not entry.get("by"):
         problems.append(f"{key}: listen does not say who listened")
 
@@ -173,7 +184,7 @@ def full_listen_problems(approvals: dict, program_keys, rendered_at=None) -> lis
     return []
 
 
-def merge_untouched(fresh: list, prior: list, key_field: str) -> list:
+def merge_untouched(fresh: list, prior: list, key_field: str, keep=None) -> list:
     """`fresh` plus whatever in `prior` this run did not touch.
 
     A `--only` run renders a subset. Writing just that subset would delete the
@@ -181,10 +192,18 @@ def merge_untouched(fresh: list, prior: list, key_field: str) -> list:
     which is the evidence behind the manifest's verdicts. Losing the evidence
     while keeping the verdict is the worse half: the catalog would assert
     results that nothing records.
+
+    `keep` is the set of keys that still exist — the combinations the engine can
+    currently produce. Without it, carrying forward is unbounded: a goal or voice
+    set removed from the registries stops appearing in any run's todo list, so
+    nothing ever writes a fresh entry over it, and its last verdict is carried
+    forward forever. Serving reads `publishable`, so that is a program the engine
+    can no longer render still being sold.
     """
     rendered = {entry[key_field] for entry in fresh}
     return fresh + [entry for entry in prior
-                    if entry[key_field] not in rendered]
+                    if entry[key_field] not in rendered
+                    and (keep is None or entry[key_field] in keep)]
 
 
 def build_program(goal: str, goal_title: str, voice_set: str, tracks: list,
@@ -233,6 +252,20 @@ def build_catalog(programs: list, approvals: dict, generated_at: str) -> dict:
     # The catalog-wide rule demotes everything: without one end-to-end listen,
     # no individual sign-off is trusted, because what is unverified is the chain
     # they all share.
+    # An entry written before `renderedAt` existed cannot have its listen checked
+    # against the audio, and those are exactly the catalogs that may hold the
+    # damage the check was added for — a sign-off from before a `--force`
+    # re-render done under the old code. Unverifiable is treated as unapproved:
+    # re-measuring costs one skip-only run and no TTS, so the safe answer is
+    # cheap. Fresh entries always carry the key, so this only bites once.
+    for p in catalog["programs"]:
+        if "renderedAt" not in p:
+            p["publishable"] = False
+            p["blockers"] = p["blockers"] + [
+                (f"{p['key']}: predates the renderedAt field, so its listen "
+                 f"cannot be checked against the audio — re-run the driver for "
+                 f"this combination to re-measure it (no TTS, it is already "
+                 f"rendered)")]
     if catalog["fullListenProblems"]:
         for p in catalog["programs"]:
             p["publishable"] = False

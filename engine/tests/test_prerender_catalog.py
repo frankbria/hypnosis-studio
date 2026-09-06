@@ -380,3 +380,20 @@ def test_a_dry_run_does_not_delete_a_forced_combinations_manifest(tmp_path):
         # What matters is what survived, not whether the check could complete.
         pass
     assert manifest_path.exists()
+
+
+def test_a_dry_run_leaves_a_finished_programs_status_alone(tmp_path):
+    # run() writes as well as reads — it constructs a Job (status.json) before
+    # it returns. Pointed at the real directory, a dry run left every finished
+    # program reading "rendering / scripting / 5%" permanently: a dry run
+    # reporting a render in progress that is not.
+    root = seed_catalog_root(tmp_path)
+    status = root / "polymath__male" / "status.json"
+    status.write_text(json.dumps({"state": "ready", "progress": 1.0}),
+                      encoding="utf-8")
+    try:
+        prerender_catalog.render_one("polymath", "male", str(root),
+                                     force=False, dry_run=True)
+    except Exception:
+        pass  # no pads in a checkout; what matters is what survived
+    assert json.loads(status.read_text())["state"] == "ready"
