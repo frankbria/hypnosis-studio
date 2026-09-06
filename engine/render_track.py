@@ -43,10 +43,25 @@ def load_key() -> str:
     if env_key:
         KEY = env_key
         return KEY
-    for line in open(".env.local"):
-        if line.startswith("ELEVENLABS_API_KEY="):
-            KEY = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
-    assert KEY, "ELEVENLABS_API_KEY not set and no .env.local entry found"
+    # Guarded. The message below was written for exactly this case and was
+    # unreachable: an unguarded open() raised FileNotFoundError first, so an
+    # operator running the engine by hand saw a bare errno naming a file they
+    # had never heard of, instead of being told which variable to set. That is
+    # the whole failure — the diagnosis existed and could not be reached.
+    try:
+        with open(".env.local", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("ELEVENLABS_API_KEY="):
+                    KEY = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+    except OSError:
+        pass  # no .env.local here; the assert below says what to do instead
+    assert KEY, (
+        "ELEVENLABS_API_KEY is not set, and no .env.local defining it was found "
+        f"in {os.getcwd()}.\n"
+        "On the server the key lives in engine/api.env, which systemd loads for "
+        "the service but a manual run does not inherit. Load it first:\n"
+        "    set -a; . ./api.env; set +a")
     return KEY
 
 
