@@ -1,4 +1,5 @@
 import type { LucideIcon } from 'lucide-react'
+import catalogManifest from '../../../engine/catalog.json'
 import {
   Brain,
   Cloud,
@@ -304,8 +305,10 @@ export interface Track {
  * invented and unconnected to the engine. Track IV was sold at 13:10 and
  * delivered at 7:00 (#14).
  *
- * #58's catalog manifest carries real measured durations and should replace
- * these floors once it exists.
+ * #58's catalog manifest now carries real measured durations, and `buildTracks`
+ * prefers them. These stay as the fallback for a goal the catalog has no
+ * publishable master for — including the state the manifest ships in, before
+ * anything has been pre-rendered.
  */
 const TRACK_META: ReadonlyArray<{ phase: TrackPhase; minimumSeconds: number }> = [
   { phase: 'Foundation', minimumSeconds: 780 },
@@ -329,14 +332,46 @@ export const PROGRAM_MINIMUM_SECONDS = TRACK_META.reduce(
 
 const NUMERALS = ['I', 'II', 'III', 'IV'] as const
 
+/**
+ * Real measured track lengths per engine goal, from the pre-rendered catalog (#58).
+ *
+ * `engine/catalog.json` is the committed output of `engine/prerender_catalog.py`
+ * and the single source of truth for these numbers. It ships empty — no masters
+ * pre-rendered yet — which is exactly why it is committed rather than left
+ * absent: "nothing rendered" has to be a value this build can read and fall back
+ * from, not a missing module that fails `vite build`.
+ *
+ * The manifest already resolves *which* length to quote (the shorter of the two
+ * voice sets, publishable programs only — `catalog.durations_by_goal`). That
+ * rule is not restated here on purpose. A second implementation of it would be
+ * free to drift, and the direction it drifts in is the one that over-promises
+ * at the moment of purchase — the misrepresentation #14 was opened about.
+ */
+const CATALOG_DURATIONS: Readonly<Record<string, number[]>> =
+  catalogManifest.durationsByGoal ?? {}
+
+/**
+ * What to quote for `goal`, track by track.
+ *
+ * Falls back per goal rather than per track: a goal with a partial entry in the
+ * manifest is a goal whose manifest is wrong, and mixing four real numbers with
+ * one invented one produces a total that matches nothing that will be delivered.
+ */
+function trackSeconds(goal: Goal): number[] {
+  const measured = goal.apiGoal ? CATALOG_DURATIONS[goal.apiGoal] : undefined
+  if (measured && measured.length === TRACK_META.length) return measured
+  return TRACK_META.map((t) => t.minimumSeconds)
+}
+
 export function buildTracks(goal: Goal): Track[] {
   const programName = goal.id === 'custom' ? 'Custom Program' : goal.name
   const parts = ['Foundation', goal.themes[0], goal.themes[1], 'Integration']
+  const seconds = trackSeconds(goal)
   return NUMERALS.map((numeral, i) => ({
     numeral,
     title: `${programName} ${numeral} — ${parts[i]}`,
     phase: TRACK_META[i].phase,
-    duration: formatDuration(TRACK_META[i].minimumSeconds),
+    duration: formatDuration(seconds[i]),
   }))
 }
 

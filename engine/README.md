@@ -169,6 +169,130 @@ below the ~12.75 chars/s that `eleven_v3` at `speed: 0.85` actually delivers, so
 the projection errs long). Re-derive it from real `manifest.json` durations when
 you have them.
 
+## The pre-rendered catalog
+
+Every render is a pure function of `(goal, voiceSet)` — `server.js` accepts only
+those two fields — so five goals x two voice sets is **ten possible outputs,
+total**. Rendering one on demand per customer costs ~$2 of TTS and 15-20 minutes
+of wall clock, every time, for output that never differs. Rendering all ten once
+costs roughly $20 and makes delivery instant (#58).
+
+```bash
+# on the box, where the pads and the key live
+cd /srv/hypnosis-studio/engine
+venv/bin/python prerender_catalog.py --outdir /srv/hypnosis-studio/renders/catalog
+```
+
+`prerender_catalog.py` does not reimplement the pipeline — it calls
+`render_program.run()` once per combination, so the pad headroom gate, the spend
+guards, the segment cache, the assembler and the QA thresholds above are exactly
+the ones a paid job gets. The catalog path cannot drift from the per-job path
+because there is only one path.
+
+It writes three files:
+
+| File | Committed | What it is |
+|---|---|---|
+| `catalog.json` | yes | the manifest: every program, its four tracks, their **real measured** durations, file references, QA verdict and listen record |
+| `catalog-qa-report.json` | yes | the recorded measurements behind that verdict — RMS, decoded lengths, byte counts, silent fraction, per track |
+| `renders/catalog/<goal>__<voiceset>/*.{wav,mp3}` | no | the masters themselves; `.gitignore` excludes all audio |
+
+**Resumable, and cheap to resume.** A combination whose `manifest.json` already
+exists is skipped. `render_program.run()` writes that manifest only after all
+four tracks pass QA, so a combination that *failed* has no manifest and is
+retried on the next run — and the shared segment cache means the retry re-buys
+only the segments it never reached. A failing combination does not stop the
+others; failures are collected, reported at the end, and the process exits 1.
+
+Useful flags: `--dry-run` verifies every script and pad without spending
+anything, `--only polymath:male` restricts the run, `--force polymath:male`
+re-renders something already done.
+
+### Signing a program off
+
+Passing the automated gate is not enough to publish. As noted above, the gate
+does not verify that the audio is the *right* audio — a pad-only render with the
+voice layer missing normalises to the same −20 dB and passes it clean. Only a
+person hears that.
+
+So `catalog.json` marks a program `publishable` only when **both** hold: the QA
+gate passed, and a listen is recorded in `catalog-approvals.json`. Serving (#59)
+reads `publishable`, so an unlistened master cannot be sold by accident.
+
+```json
+{
+  "schemaVersion": 1,
+  "listens": [
+    { "program": "polymath__male", "listen": "full",
+      "at": "2026-09-05T10:00:00Z", "by": "frankbria",
+      "note": "chain confirmed end to end" },
+    { "program": "polymath__female", "listen": "spot",
+      "at": "2026-09-05T10:20:00Z", "by": "frankbria",
+      "boundaries": ["induction-start", "first-suggestion", "resurface-start"] }
+  ]
+}
+```
+
+The rules, enforced in `catalog.py` and tested in `tests/test_catalog.py`:
+
+- **Exactly one** program must be listened to end to end (`"listen": "full"`).
+  Until one is, nothing is publishable — what is unverified is the chain they all
+  share, and three seeks cannot show that it holds over thirteen minutes.
+- Every other program needs a spot-check naming **all three** phase boundaries.
+  Boundaries are named rather than counted so a record cannot claim three checks
+  by listing the same one three times.
+- A listen needs an `at` and a `by`, and the `at` must be **after** the masters
+  were rendered (the program's own `manifest.json` `createdAt`, carried into the
+  catalog as `renderedAt`). A sign-off older than the audio is a sign-off on a
+  file that no longer exists, which is exactly what `--force` produces. Both
+  spellings of an ISO timestamp are accepted — the engine writes `+00:00`, `Z`
+  is what people type — and they are parsed rather than string-compared. A
+  **timezone is required**: `2026-09-05T10:00:00` with no `Z` is refused rather
+  than assumed to be UTC, because guessing would move a sign-off by up to a day.
+- Upgrading from a catalog written before `renderedAt` existed demotes every
+  entry once, with a blocker saying so. Re-run the driver to clear it: the
+  programs are already rendered, so it re-measures and spends nothing.
+- Removing a goal or a voice set from the registries retires its catalog entry
+  on the next run, rather than carrying the last verdict forward forever.
+- The newest entry for a program wins, so a re-render is re-approved by
+  appending rather than by editing history.
+
+Budget: one full listen (~46 min) plus nine spot-checks. Well under an hour.
+
+### The durations the storefront quotes
+
+`catalog.json` carries a `durationsByGoal` map, and `web/src/lib/data.ts` imports
+it directly. Which length to quote is decided **once**, in
+`catalog.durations_by_goal`: the shorter of the two voice sets, publishable
+programs only. The frontend does not re-derive it — a second implementation
+would be free to drift, and the direction it drifts is the one that over-promises
+at the moment of purchase (#14).
+
+A goal with no publishable master falls back to the `TRACK_META` floors in
+`data.ts`. That is why `catalog.json` is committed **empty** rather than left
+absent: the web build imports it, so "nothing rendered yet" has to be a value the
+build can read, not a missing module.
+
+### Adding a sixth title
+
+The catalog is derived from the engine's own registries, so most of this is
+already wired:
+
+1. Write the four scripts as `scripts/<goal>[_track2|_track3|_track4]_tts_segments.json`.
+2. Add the goal to `GOALS`, `PADS`, `KEYWORDS` and `TITLES` in `render_program.py`,
+   and put its pad in `pads/`. `prerender_catalog.py` reads `GOALS` directly, so
+   the new title joins the catalog with no change here.
+3. `prerender_catalog.py --outdir ... --dry-run` — confirms the scripts parse and
+   the pad has headroom for all four tracks, before any spend.
+4. Add the goal to `GOALS` in `web/src/lib/data.ts` with `available: true` and an
+   `apiGoal` matching the engine key. `test/web.claims.test.js` fails if a
+   pre-rendered goal has no `apiGoal` pointing at it — a master nobody can be
+   shown is $2 of TTS spent on nothing.
+5. `prerender_catalog.py --outdir ... --only <goal>:male --only <goal>:female`.
+6. Listen: spot-check both, or make one of them the full listen. Append to
+   `catalog-approvals.json` and re-run the driver to fold the approval in.
+7. Commit `catalog.json`, `catalog-qa-report.json` and `catalog-approvals.json`.
+
 ## Pads
 
 Pad WAVs are large binary assets and are intentionally not committed (kept in Dropbox / local working dirs). Place the pad in the working directory and pass it as `<pad.wav>`.
