@@ -180,8 +180,21 @@ costs roughly $20 and makes delivery instant (#58).
 ```bash
 # on the box, where the pads and the key live
 cd /srv/hypnosis-studio/engine
+set -a; . ./api.env; set +a          # ELEVENLABS_API_KEY — see below
 venv/bin/python prerender_catalog.py --outdir /srv/hypnosis-studio/renders/catalog
 ```
+
+`api.env` is loaded by the systemd unit for the *service*; a manual run does not
+inherit it, and neither does a `tmux new` that attaches to a tmux server started
+before the variables were exported. Check before spending anything:
+
+```bash
+venv/bin/python -c "import os; assert os.environ.get('ELEVENLABS_API_KEY'), 'not set'"
+```
+
+`load_key()` refuses with a message naming the variable and this file, so a
+missing key costs the first pad check rather than a confusing errno — but the
+check above is cheaper still.
 
 `prerender_catalog.py` does not reimplement the pipeline — it calls
 `render_program.run()` once per combination, so the pad headroom gate, the spend
