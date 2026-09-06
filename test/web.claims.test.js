@@ -475,16 +475,48 @@ test('the doors survive as real routes', () => {
 test('a sample is playable without choosing a door first', () => {
   const catalog = codeOnly(CATALOG());
   assert.match(catalog, /<AudioPreviewButton/, 'nothing is playable on the front page');
-  assert.match(catalog, /useAudioPreview\(SAMPLE_CLIPS\)/,
+  assert.match(catalog, /useAudioPreview\(clips\)/,
     'the front-page samples are not warmed like every other preview');
 
-  // NARRATOR voices only. #60 is open about the whisper layer being previewed
-  // solo — unmixed, which is the most uncanny configuration synthetic audio can
-  // be in. Putting that on the front page would widen the leak it describes.
+  // Since #60 the front page prefers two-minute MIXED excerpts of the real
+  // programs, served by the box that holds the masters.
+  assert.match(catalog, /useProgramSamples\(\)/,
+    'the front page does not offer the mixed program samples');
+
+  // Warming (#81) is for the four ~70 kB voice clips. Ten ~830 kB program
+  // samples is ~8 MB pushed at every visitor to the front page, most of whom
+  // press nothing — and a 64 kbps sample streams from its first frames anyway,
+  // so prefetching the whole file buys almost none of what warming bought the
+  // clips. Never warm a clip this page will not play, and never warm a sample.
+  assert.match(catalog, /programSamples\.length \? \[\] : VOICE_CLIPS/,
+    'the front page prefetches the multi-megabyte program samples');
+
+  // The fallback, for a box with no masters on it, is NARRATOR voices only.
+  // #60 was opened about the whisper layer being previewed solo — unmixed,
+  // which is the most uncanny configuration synthetic audio can be in. Putting
+  // that on the front page would widen the leak it describes.
   assert.match(catalog, /VOICE_SETS\.map\(\(v\) => v\.narrator\)/,
-    'the front page samples something other than the narrator voices');
+    'the front page falls back to something other than the narrator voices');
   assert.ok(!/\.whisper/.test(catalog),
     'the whisper layer is previewed solo on the front page, which #60 is about');
+});
+
+test('the front page never advertises a sample it cannot play', () => {
+  // catalog.json is committed and rides every deploy; the sample audio is
+  // gitignored and does not. The page must therefore take the list from the
+  // server, which checked the disk — not from the manifest, and not by
+  // guessing a url per goal. #139 is the same bug one layer down.
+  const hook = fs.readFileSync(
+    path.join(WEB, 'hooks', 'use-program-samples.ts'), 'utf8');
+  assert.match(hook, /fetch\('\/api\/samples'/,
+    'the sample list is not read from the server');
+  const catalog = codeOnly(CATALOG());
+  assert.match(catalog, /src: s\.url/,
+    'the front-page rows are not built from the served sample url');
+  // The stronger half: the page must not know how to construct one at all.
+  // A url it builds is a url the server never confirmed it can answer.
+  assert.ok(!/\/api\/catalog\//.test(catalog),
+    'the front page builds a catalog url itself instead of using the served one');
 });
 
 test('pricing is reachable from the home page without an identity choice', () => {

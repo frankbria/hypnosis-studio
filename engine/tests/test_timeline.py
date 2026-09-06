@@ -294,3 +294,136 @@ def test_empty_rate_override_falls_back_to_the_default(monkeypatch):
     variable is a normal thing to do and should not fail a render."""
     monkeypatch.setenv("HYPNO_CHARS_PER_SEC", "")
     assert timeline.chars_per_sec() == timeline.DEFAULT_CHARS_PER_SEC
+
+
+# --------------------------------------------------------------------------
+# project_positions / phase_span — locating a phase, for #60's samples
+# --------------------------------------------------------------------------
+#
+# Cutting a two-minute sample means answering "where in this 13-minute master
+# does the whisper layer actually exist?". The whisper voice is used for, and
+# only for, the suggestion phase (render_program.py), so the answer is a phase
+# span — and the only thing that knows the shape of the timeline is this module.
+
+def test_projection_ends_where_the_estimate_says_it_does():
+    """One timeline, not two. The last segment's end IS voice_end.
+
+    If these ever disagree, the sample cutter is locating phases on a timeline
+    the pre-spend gate does not believe in — and the two would drift silently,
+    because nothing else compares them.
+    """
+    segments = [
+        {"id": "S01", "text": "a" * 100, "pause_after_s": 2.0, "phase": "induction"},
+        {"id": "S02", "text": "b" * 200, "pause_after_s": 3.0, "phase": "suggestion"},
+        {"id": "S03", "text": "c" * 50, "pause_after_s": 9.0, "phase": "resurface"},
+    ]
+    positions = timeline.project_positions(segments, chars_per_sec=10.0)
+    assert positions[-1].end == pytest.approx(
+        timeline.estimate_voice_end(segments, chars_per_sec=10.0))
+
+
+def test_projection_opens_on_the_lead_in():
+    segs = [{"id": "a", "text": "x" * 10, "pause_after_s": 1.0, "phase": "induction"}]
+    assert timeline.project_positions(segs, 10.0)[0].start == pytest.approx(
+        timeline.LEAD_IN_S)
+
+
+def test_projection_carries_the_id_and_phase_through():
+    segs = [{"id": "S07", "text": "x", "pause_after_s": 0.0, "phase": "deepening"}]
+    (only,) = timeline.project_positions(segs, 10.0)
+    assert (only.id, only.phase) == ("S07", "deepening")
+
+
+def test_projection_advances_by_the_doubled_suggestion_pause():
+    """Same rule as the estimate, checked where it is visible: the *gap* between
+    two segments, which a summed total cannot show."""
+    segs = [
+        {"id": "a", "text": "x" * 10, "pause_after_s": 10.0, "phase": "suggestion"},
+        {"id": "b", "text": "x" * 10, "pause_after_s": 10.0, "phase": "induction"},
+    ]
+    first, second = timeline.project_positions(segs, 10.0)
+    assert second.start - first.end == pytest.approx(20.0)
+
+
+def test_projection_of_nothing_is_nothing():
+    assert timeline.project_positions([], 10.0) == []
+
+
+def test_projection_rejects_a_nonsense_rate():
+    segs = [{"id": "a", "text": "x", "pause_after_s": 0.0, "phase": "induction"}]
+    with pytest.raises(ValueError):
+        timeline.project_positions(segs, chars_per_sec=0.0)
+
+
+def test_phase_span_covers_first_start_to_last_end():
+    segs = [
+        {"id": "a", "text": "x" * 10, "pause_after_s": 1.0, "phase": "induction"},
+        {"id": "b", "text": "x" * 10, "pause_after_s": 1.0, "phase": "suggestion"},
+        {"id": "c", "text": "x" * 10, "pause_after_s": 1.0, "phase": "suggestion"},
+        {"id": "d", "text": "x" * 10, "pause_after_s": 1.0, "phase": "resurface"},
+    ]
+    positions = timeline.project_positions(segs, 10.0)
+    start, end = timeline.phase_span(positions, "suggestion")
+    assert start == pytest.approx(positions[1].start)
+    assert end == pytest.approx(positions[2].end)
+
+
+def test_phase_span_of_an_absent_phase_is_none():
+    segs = [{"id": "a", "text": "x", "pause_after_s": 0.0, "phase": "induction"}]
+    assert timeline.phase_span(timeline.project_positions(segs, 10.0),
+                               "suggestion") is None
+
+
+def sampled_scripts(suffix):
+    """The committed scripts for one track number, as (name, segments).
+
+    Track I has no suffix; the rest are `_trackN`. Globbing all of them would
+    sweep in tracks 2 and 4, which the sampler never reads — track 4's induction
+    is a third of the length, because it is a 7-minute integration track rather
+    than a 13-minute one.
+    """
+    pattern = os.path.join(ENGINE, "scripts", f"*{suffix}_tts_segments.json")
+    for path in sorted(glob.glob(pattern)):
+        name = os.path.basename(path)
+        if suffix == "" and "_track" in name:
+            continue
+        with open(path, encoding="utf-8") as f:
+            yield name, json.load(f)["segments"]
+
+
+@pytest.mark.parametrize("suffix,phase,needed", [
+    ("", "induction", 60.0),         # Track I  — the bespoke metaphor
+    ("_track3", "suggestion", 45.0),  # Track III — the only place the whisper is
+])
+def test_every_sampled_script_has_room_for_its_window(suffix, phase, needed):
+    """#60 cuts ~60 s of Track I's induction and ~45 s of Track III's suggestion
+    phase. A script whose phase is shorter than its window would make the
+    generator silently produce a sample of something else."""
+    checked = 0
+    for name, segments in sampled_scripts(suffix):
+        span = timeline.phase_span(timeline.project_positions(segments), phase)
+        assert span is not None, f"{name} has no {phase} phase"
+        assert span[1] - span[0] >= needed, (
+            f"{name}: the {phase} phase projects only {span[1] - span[0]:.0f}s, "
+            f"less than the {needed:.0f}s window #60 cuts from it")
+        checked += 1
+    # A glob that silently matches nothing would pass every assertion above.
+    assert checked == 5, f"expected 5 scripts for track {suffix or '1'}, saw {checked}"
+
+
+@pytest.mark.parametrize("phase", ["induction", "suggestion"])
+def test_the_sampled_phases_are_one_contiguous_run_in_every_script(phase):
+    """`phase_span` reports first-start to last-end, which is only the same
+    thing as "this phase is what you hear throughout" if the phase does not come
+    in two pieces with something else in between. A sample cut from a span with
+    a hole in it plays the hole."""
+    for path in sorted(glob.glob(os.path.join(ENGINE, "scripts", "*_tts_segments.json"))):
+        with open(path, encoding="utf-8") as f:
+            segments = json.load(f)["segments"]
+        phases = [s["phase"] for s in segments]
+        if phase not in phases:
+            continue
+        first = phases.index(phase)
+        last = len(phases) - 1 - phases[::-1].index(phase)
+        assert phases[first:last + 1] == [phase] * (last - first + 1), (
+            f"{os.path.basename(path)}: the {phase} phase is interrupted")

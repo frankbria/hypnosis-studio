@@ -129,6 +129,12 @@ confirmed and then redirected. See the domain-move section above.
 - Logs: `ssh prod 'journalctl -u hypnosis-studio -f'`
 - Restart: `ssh prod 'systemctl restart hypnosis-studio'`
 - Always `nginx -t` before `systemctl reload nginx`
+- After a catalog pre-render, cut the storefront samples too:
+  `cd /srv/hypnosis-studio/engine && venv/bin/python cut_samples.py --catalog-dir ../renders/catalog`
+  (#60 — ffmpeg over the existing masters, no TTS spend; needs `ffmpeg`/`ffprobe`
+  on PATH, and a restart to pick them up, since they are indexed at boot).
+  The boot log says `samples: N of M publishable program(s) have a sample`; if N
+  is 0 the storefront falls back to the solo voice clips.
 
 ## Two-door site architecture (2026-07-23)
 

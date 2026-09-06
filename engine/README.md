@@ -297,6 +297,52 @@ A goal with no publishable master falls back to the `TRACK_META` floors in
 absent: the web build imports it, so "nothing rendered yet" has to be a value the
 build can read, not a missing module.
 
+### Cutting the storefront samples
+
+The masters are the product; nobody may hear one before paying. But until #60
+there was no way to hear *anything* before paying either — the site had four
+short **solo** voice clips, and the whisper layer was previewed unmixed, with no
+narrator over it and no bed underneath, which is the most uncanny configuration
+synthetic audio can be in. It was the only way to hear the product's
+differentiator before buying it.
+
+`cut_samples.py` cuts a ~2-minute mixed excerpt of each publishable program.
+No TTS, no spend — it is ffmpeg over masters that already exist.
+
+```bash
+cd /srv/hypnosis-studio/engine
+venv/bin/python cut_samples.py --catalog-dir /srv/hypnosis-studio/renders/catalog
+```
+
+Each sample is ~60 s from **Track I** crossfaded into ~45 s from **Track III**,
+written as `renders/catalog/<goal>__<voiceset>/sample.mp3` (64 kbps mono, ~830 kB).
+
+Both tracks, for a reason. Track I carries the induction, which is bespoke to
+each program's metaphor — polymath and river share no identical segments in any
+phase. Track III is where the **whisper layer** lives, because the whisper voice
+is used for, and only for, the suggestion phase. Track I alone would advertise
+the product without its differentiator; Track III alone would open on the middle
+of a trance.
+
+The windows are located from the scripts, not guessed as a fraction of the file:
+`timeline.project_positions()` projects the phase boundaries and the result is
+scaled onto the master's measured length from `catalog.json`. A rewritten script
+moves the window with it.
+
+Requires `ffmpeg` and `ffprobe` on PATH. Useful flags: `--dry-run` reports the
+windows for every program and cuts nothing, `--only polymath:male` restricts the
+run, `--force polymath:male` re-cuts one that already exists. A sample whose
+measured length is more than 2 s from its plan is deleted rather than published —
+ffmpeg exits 0 on plenty of things that are not the file that was asked for.
+
+Samples are **not** committed (`.gitignore` excludes all audio) and are served
+unsigned and cacheable from `/api/catalog/<key>/sample.mp3`, which is the
+opposite of the masters beside them and deliberate: a sample is an
+advertisement, and the whole point is that a stranger can press play.
+`server.js` scans for them at boot and `/api/samples` lists only the ones really
+on this box, so a deploy that carries `catalog.json` without the audio gives the
+storefront no dead play buttons — it falls back to the solo voice clips.
+
 ### Adding a sixth title
 
 The catalog is derived from the engine's own registries, so most of this is
@@ -315,7 +361,9 @@ already wired:
 5. `prerender_catalog.py --outdir ... --only <goal>:male --only <goal>:female`.
 6. Listen: spot-check both, or make one of them the full listen. Append to
    `catalog-approvals.json` and re-run the driver to fold the approval in.
-7. Commit `catalog.json`, `catalog-qa-report.json` and `catalog-approvals.json`.
+7. `cut_samples.py --catalog-dir ...` — the new title needs a storefront sample
+   too, and it can only be cut once the program is publishable.
+8. Commit `catalog.json`, `catalog-qa-report.json` and `catalog-approvals.json`.
 
 ## Pads
 
