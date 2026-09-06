@@ -138,6 +138,9 @@ def plan_window(segments: list, measured_duration_s: float, phase: str,
     the storefront over a sample twenty seconds short, which is the worse trade
     for a page whose job is to let someone hear the product at all.
     """
+    if align not in ("start", "center"):
+        raise ValueError(f"align must be 'start' or 'center', got {align!r}")
+
     positions = timeline.project_positions(segments)
     span = timeline.phase_span(positions, phase)
     if span is None:

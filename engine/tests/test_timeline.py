@@ -411,15 +411,19 @@ def test_every_sampled_script_has_room_for_its_window(suffix, phase, needed):
     assert checked == 5, f"expected 5 scripts for track {suffix or '1'}, saw {checked}"
 
 
-def test_the_suggestion_phase_is_one_contiguous_run_in_every_script():
+@pytest.mark.parametrize("phase", ["induction", "suggestion"])
+def test_the_sampled_phases_are_one_contiguous_run_in_every_script(phase):
     """`phase_span` reports first-start to last-end, which is only the same
-    thing as "the whisper is audible throughout" if the phase does not come in
-    two pieces with narration in between."""
+    thing as "this phase is what you hear throughout" if the phase does not come
+    in two pieces with something else in between. A sample cut from a span with
+    a hole in it plays the hole."""
     for path in sorted(glob.glob(os.path.join(ENGINE, "scripts", "*_tts_segments.json"))):
         with open(path, encoding="utf-8") as f:
             segments = json.load(f)["segments"]
         phases = [s["phase"] for s in segments]
-        first = phases.index("suggestion")
-        last = len(phases) - 1 - phases[::-1].index("suggestion")
-        assert phases[first:last + 1] == ["suggestion"] * (last - first + 1), (
-            f"{os.path.basename(path)}: the suggestion phase is interrupted")
+        if phase not in phases:
+            continue
+        first = phases.index(phase)
+        last = len(phases) - 1 - phases[::-1].index(phase)
+        assert phases[first:last + 1] == [phase] * (last - first + 1), (
+            f"{os.path.basename(path)}: the {phase} phase is interrupted")

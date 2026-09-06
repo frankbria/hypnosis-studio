@@ -175,6 +175,15 @@ def test_a_window_never_leaves_the_file():
     assert window.start + window.duration <= 40.0 + 1e-6
 
 
+def test_an_unknown_alignment_is_refused_rather_than_defaulted():
+    """Anything but "start" would otherwise fall through to centring, which
+    silently moves the Track I window off the opening of the induction — the
+    bespoke part, and the reason Track I is sampled at all."""
+    segs = synthetic([("induction", 600), ("suggestion", 6000)])
+    with pytest.raises(ValueError, match="align"):
+        cut_samples.plan_window(segs, 900.0, "induction", 60.0, "beginning")
+
+
 def test_a_missing_phase_is_refused_rather_than_guessed():
     segs = synthetic([("induction", 600)])
     with pytest.raises(ValueError, match="suggestion"):
