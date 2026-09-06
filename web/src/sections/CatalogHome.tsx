@@ -15,6 +15,7 @@
  * The doors remain as real routes (`/performance`, `/healing`) for paid traffic
  * and SEO. They are simply no longer mandatory.
  */
+import { useMemo } from 'react'
 import { ArrowRight, Brain, Check, Waves } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -23,8 +24,11 @@ import { AudioPreviewButton } from '@/components/AudioPreviewButton'
 import GoalCardText from '@/components/GoalCardText'
 import SiteFooter from '@/components/SiteFooter'
 import { useAudioPreview } from '@/hooks/use-audio-preview'
+import { useProgramSamples } from '@/hooks/use-program-samples'
+import type { ProgramSample } from '@/hooks/use-program-samples'
 import {
   DISCLAIMER,
+  GOALS,
   HEALING_NONMEDICAL,
   PRICING,
   SAFETY_WARNING,
@@ -35,17 +39,52 @@ import type { DoorId, Goal } from '@/lib/data'
 import { cn } from '@/lib/utils'
 
 /**
- * The samples a cold visitor can hear without choosing anything.
+ * The fallback samples: narrator voices, solo.
  *
- * NARRATOR voices only, deliberately. #60 is opening about the whisper layer
+ * NARRATOR voices only, deliberately. #60 was opened about the whisper layer
  * being previewed solo — unmixed, with no narrator over it and no bed
  * underneath, which is the most uncanny configuration synthetic audio can be
- * in. Putting that on the front page would make the conversion leak worse, not
- * better. These are honest samples of the voice that carries the program, and
- * #60's two-minute mixed program samples are what should replace them.
+ * in. These are at least honest samples of the voice that carries the program.
+ *
+ * They are now the fallback rather than the offer. #60 cuts two-minute mixed
+ * excerpts of the real programs, and where those exist this page plays them
+ * instead — a voice is not a product, and a visitor deciding on $39 is deciding
+ * about the program. The voices stay for the case where they have not been cut
+ * yet: the masters are gitignored and live only on the box, so a fresh
+ * environment has none.
  */
 const SAMPLE_VOICES = VOICE_SETS.map((v) => v.narrator)
-const SAMPLE_CLIPS: readonly string[] = SAMPLE_VOICES.map((v) => v.src)
+const VOICE_CLIPS: readonly string[] = SAMPLE_VOICES.map((v) => v.src)
+
+/**
+ * The rows of the Listen section: mixed program samples, or the voices.
+ *
+ * One shape for both, and one place that renders it. Three copies of a card
+ * block is how one of them ships without the field you just added, which this
+ * repo has been bitten by more than once (#62, #65) — and this block already
+ * had two copies the moment there were two kinds of sample.
+ *
+ * `title` prefers the storefront's own name for a program over the engine's
+ * (`goalTitle` is "The Polymath Mind", the internal one). A visitor should not
+ * see the same program listed under two names on one screen.
+ */
+function listenRows(
+  samples: readonly ProgramSample[],
+): Array<{ src: string; title: string; subtitle: string }> {
+  if (samples.length) {
+    return samples.map((s) => ({
+      src: s.url,
+      title: GOALS.find((g) => g.apiGoal === s.goal)?.name ?? s.goalTitle ?? s.goal,
+      subtitle: `${VOICE_SETS.find((v) => v.id === s.voiceSet)?.label ?? s.voiceSet}`
+        + ' · Tracks I and III',
+    }))
+  }
+  return SAMPLE_VOICES.map((voice) => ({
+    src: voice.src,
+    title: voice.name,
+    subtitle: `${voice.description} · ${voice.role}`,
+  }))
+}
 
 const SECTIONS: ReadonlyArray<{
   door: DoorId
@@ -88,7 +127,24 @@ export default function CatalogHome({
   onNavigate: (path: string) => void
   onHome: () => void
 }) {
-  const audio = useAudioPreview(SAMPLE_CLIPS)
+  const programSamples = useProgramSamples()
+  // Warm the solo voice clips, and ONLY those.
+  //
+  // #81 warms previews because an unwarmed press costs a round trip and reads
+  // as a broken button. That trade is right for four clips of ~70 kB. It is not
+  // right for the program samples: ten of them at ~830 kB is ~8 MB pushed at
+  // every visitor to the front page, most of whom press nothing.
+  //
+  // And it buys much less than it does for the voices. A sample is encoded at
+  // 64 kbps, so any connection above that streams it in real time — the browser
+  // starts playing on the first frames rather than waiting for the file. What
+  // is left is the one round trip, which is what the button's "Loading…" state
+  // (#81) exists to be honest about.
+  const clips = useMemo(
+    () => (programSamples.length ? [] : VOICE_CLIPS),
+    [programSamples],
+  )
+  const audio = useAudioPreview(clips)
 
   return (
     <div id="top" className="animate-fade-in">
@@ -150,30 +206,34 @@ export default function CatalogHome({
         <div className="mx-auto max-w-3xl">
           <div className="rounded-2xl border border-white/10 bg-white/5 p-8">
             <h2 className="font-display text-2xl text-[#e8e6f0]">
-              Hear a voice before you decide.
+              {programSamples.length
+                ? 'Hear a program before you decide.'
+                : 'Hear a voice before you decide.'}
             </h2>
             <p className="mt-3 text-sm leading-relaxed text-white/50">
-              Every program is narrated by one of these. Nothing to choose first
-              — press play.
+              {programSamples.length
+                ? 'About two minutes of the real thing — the opening of Track I,'
+                  + ' then a stretch of Track III where the whisper layer runs'
+                  + ' under the narrator. Nothing to choose first, press play.'
+                : 'Every program is narrated by one of these. Nothing to choose'
+                  + ' first — press play.'}
             </p>
             <div className="mt-6 grid gap-3 sm:grid-cols-2">
-              {SAMPLE_VOICES.map((voice) => (
+              {listenRows(programSamples).map((row) => (
                 <div
-                  key={voice.src}
+                  key={row.src}
                   className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3"
                 >
                   <div>
-                    <p className="text-sm text-white/85">{voice.name}</p>
-                    <p className="text-xs text-white/45">
-                      {voice.description} · {voice.role}
-                    </p>
+                    <p className="text-sm text-white/85">{row.title}</p>
+                    <p className="text-xs text-white/45">{row.subtitle}</p>
                   </div>
                   <AudioPreviewButton
-                    src={voice.src}
+                    src={row.src}
                     playingSrc={audio.playingSrc}
                     pendingSrc={audio.pendingSrc}
                     onToggle={audio.toggle}
-                    label={`${voice.name}, ${voice.role}`}
+                    label={`${row.title}, ${row.subtitle}`}
                   />
                 </div>
               ))}

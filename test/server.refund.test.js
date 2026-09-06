@@ -185,16 +185,88 @@ function stop({ proc, rendersDir }, { keepDir = false } = {}) {
   }
 }
 
-async function pay(srv, sessionId = 'cs_test_1') {
+const readOrder = (dir, sessionId = 'cs_test_1') =>
+  JSON.parse(fs.readFileSync(path.join(dir, '.sessions', `${sessionId}.json`), 'utf8'));
+
+const readJsonOr = (p, fallback = null) => {
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return fallback; }
+};
+
+/**
+ * Whether the server has finished reacting to the webhook (#134).
+ *
+ * Three ways a payment settles, and a test may be waiting for any of them:
+ *   - a refund reached a terminal state (`refunded`, or `failed` after Stripe
+ *     refused) — the failing-engine cases;
+ *   - the render succeeded, so no refund will ever come — the `ok` engine.
+ *
+ * Everything else is the middle of the story: a `pending` refund, and a failed
+ * render whose refund outcome has not been written anywhere yet. For a
+ * permanently unrefundable order (no Stripe key, no payment reference) that
+ * outcome appears on the *job status* and never on the order, because there was
+ * nothing to record against the money — so the status is checked too.
+ *
+ * A `rendering` job is explicitly NOT settled, even with a worker on disk. The
+ * fast engines pass through that state on their way to failing, and treating it
+ * as done let the assertion run before the refund had been asked for.
+ */
+function reacted(srv, sessionId) {
+  const order = readJsonOr(path.join(srv.rendersDir, '.sessions', `${sessionId}.json`));
+  if (!order) return false;
+  if (order.refund) return ['refunded', 'failed'].includes(order.refund.state);
+  if (!order.jobId) return true;              // a catalog order starts no render
+  const status = readJsonOr(path.join(srv.rendersDir, order.jobId, 'status.json'));
+  if (!status) return false;
+  if (status.state === 'ready') return true;
+  if (status.state === 'failed') return status.refund != null;
+  return false;
+}
+
+/**
+ * Pay, then wait for the server to finish reacting.
+ *
+ * A fixed `sleep(900)` stood here, and it was a race by construction: the
+ * refund lands only once the worker, the fake Stripe and the sweep have each
+ * had a turn, which on a loaded box is comfortably more than 900 ms. It held
+ * only while this file happened to be the slowest thing running, and failed as
+ * soon as another test file was added beside it (#134).
+ *
+ * Falling through at the deadline rather than throwing, so a server that really
+ * is broken fails on the test's own assertion — which says what was expected —
+ * instead of on a timeout that does not.
+ */
+async function waitFor(predicate, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await sleep(25);
+}
+
+async function postPaid(srv, sessionId) {
   const raw = paidEvent(sessionId);
-  const res = await request(srv.port, 'POST', '/api/stripe/webhook', raw,
+  return request(srv.port, 'POST', '/api/stripe/webhook', raw,
     { 'Stripe-Signature': sign(raw) });
-  await sleep(900);
+}
+
+async function pay(srv, sessionId = 'cs_test_1') {
+  const res = await postPaid(srv, sessionId);
+  await waitFor(() => reacted(srv, sessionId));
   return res;
 }
 
-const readOrder = (dir, sessionId = 'cs_test_1') =>
-  JSON.parse(fs.readFileSync(path.join(dir, '.sessions', `${sessionId}.json`), 'utf8'));
+/**
+ * Pay and wait only for the render to be under way.
+ *
+ * For the `hang` engine, where the worker never finishes on its own and the
+ * test is the thing that kills it. `pay()` would wait for a refund that cannot
+ * arrive until it does.
+ */
+async function payAndStartRender(srv, sessionId = 'cs_test_1') {
+  const res = await postPaid(srv, sessionId);
+  await waitFor(() => {
+    const [job] = jobs(srv.rendersDir);
+    return !!job && fs.existsSync(path.join(srv.rendersDir, job, 'worker.json'));
+  });
+  return res;
+}
 
 const jobs = (dir) => {
   try { return fs.readdirSync(dir).filter((n) => n.startsWith('job_')); } catch { return []; }
@@ -297,7 +369,7 @@ test('a forced mid-job crash produces exactly one refund', async () => {
     env: { STRIPE_API_BASE: stripe.base, SWEEP_INTERVAL_MS: '250', HARD_TIMEOUT_MS: '1000' },
   });
   try {
-    await pay(srv);
+    await payAndStartRender(srv);
     const [job] = jobs(srv.rendersDir);
     assert.ok(job, 'no render started');
 
@@ -493,7 +565,7 @@ test('a paid job whose back-pointer was lost is still refunded, and not called u
     env: { STRIPE_API_BASE: stripe.base, SWEEP_INTERVAL_MS: '600000' },
   });
   try {
-    await pay(srv);
+    await payAndStartRender(srv);
     const [job] = jobs(srv.rendersDir);
     assert.ok(job, 'no render started');
 

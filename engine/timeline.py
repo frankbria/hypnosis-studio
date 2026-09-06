@@ -13,6 +13,7 @@ and asserted afterwards, which killed the job at the assembly stage with the
 entire spend already gone (issue #5). The rule now is: shorten the music outro
 to fit the pad, and only refuse when there is not even room for the fade.
 """
+import collections
 import os
 
 # Every offset in the assembler is computed at this rate, so a pad or segment at
@@ -119,19 +120,64 @@ def estimate_voice_end(segments, chars_per_sec=None):
     and leave the positions after them alone, so the last segment only moves when
     the resurface phase is a single segment — and then only earlier.
     """
+    positions = project_positions(segments, chars_per_sec)
+    return positions[-1].end if positions else LEAD_IN_S
+
+
+# One projected segment on the timeline. A named tuple rather than a dict so a
+# caller cannot quietly read `pos["stop"]` and get None.
+Position = collections.namedtuple("Position", "id start end phase")
+
+
+def project_positions(segments, chars_per_sec=None):
+    """Where every segment lands, projected — `[Position(id, start, end, phase)]`.
+
+    The same timeline `estimate_voice_end` sums, kept per-segment so a caller can
+    ask *where* something is rather than only how long the whole thing runs. It
+    mirrors the `positions` list assemble_track.py builds, with projected
+    durations in place of real ones: the program opens at LEAD_IN_S, each segment
+    occupies its own duration, and the gap after it is `pause_after_s`, doubled
+    through the suggestion phase.
+
+    The caller for this is #60's sample cutter, which has to find the stretch of
+    a master where the whisper layer exists — and the whisper voice is used for,
+    and only for, the suggestion phase. Deriving that here rather than guessing a
+    fraction of the file is what keeps the answer correct when a script is
+    rewritten.
+
+    The projection is only as good as `chars_per_sec`, which is deliberately
+    conservative (see DEFAULT_CHARS_PER_SEC) and therefore wrong in absolute
+    terms. A caller after a *relative* position — "60% of the way through the
+    voice program" — is largely insulated from that, because the same rate scales
+    every segment. A caller after an absolute offset into a real master is not,
+    and should scale these against the master's measured length.
+    """
     rate = chars_per_sec if chars_per_sec is not None else _rate_from_env()
     if rate <= 0:
         raise ValueError(f"chars_per_sec must be positive, got {rate!r}")
 
-    chars = 0
-    pauses = []
+    positions = []
+    t = LEAD_IN_S
     for seg in segments:
         suggestion = seg.get("phase") == "suggestion"
         tag = WHISPER_TAG if suggestion else SOFT_TAG
-        chars += len(tag) + len(seg["text"])
-        pauses.append(float(seg["pause_after_s"]) * (2 if suggestion else 1))
+        duration = (len(tag) + len(seg["text"])) / rate
+        positions.append(Position(seg.get("id"), t, t + duration, seg.get("phase")))
+        t += duration + float(seg["pause_after_s"]) * (2 if suggestion else 1)
+    return positions
 
-    return LEAD_IN_S + chars / rate + sum(pauses[:-1])
+
+def phase_span(positions, phase):
+    """`(start, end)` of one phase, or None if the script has no such phase.
+
+    First start to last end, so the span includes the pauses *inside* the phase —
+    which is right for locating audio, since those pauses are part of what a
+    listener hears there.
+    """
+    matching = [p for p in positions if p.phase == phase]
+    if not matching:
+        return None
+    return matching[0].start, matching[-1].end
 
 
 def monotonic(values):

@@ -194,6 +194,16 @@ const CATALOG_DIR = path.resolve(
 const CATALOG_MANIFEST = path.resolve(
   process.env.CATALOG_MANIFEST || path.join(__dirname, 'engine', 'catalog.json'));
 
+// The one filename inside a program directory that is NOT a master. Written by
+// engine/cut_samples.py and, unlike everything beside it, meant to be public.
+const SAMPLE_NAME = 'sample.mp3';
+// A trailing query is tolerated and ignored. Nothing here reads one, but a
+// cache-buster appended by a CDN or an <audio> shim must not turn a good sample
+// into a 404 — and unlike the masters route there is no signature it could be
+// confused with.
+const SAMPLE_ROUTE = new RegExp(
+  `^/api/catalog/([^/?]+)/${SAMPLE_NAME.replace(/\./g, '\\.')}(?:\\?.*)?$`);
+
 // How long a minted file link stays valid. Deliberately short and unrelated to
 // the 30-day access window: the window says how long a customer may come back,
 // the link says how long one URL survives being copied out of a browser. Making
@@ -353,6 +363,57 @@ function catalogFiles(program) {
   }
   return files;
 }
+
+/**
+ * The two-minute mixed program samples, indexed by key (#60).
+ *
+ * Until these existed there was no way to hear a program before buying one. The
+ * site had four short *solo* voice clips, and the whisper layer — the product's
+ * actual differentiator — was previewed unmixed, with no narrator over it and no
+ * bed underneath, which is the most uncanny configuration synthetic audio can be
+ * in. `engine/cut_samples.py` cuts a real excerpt of Track I and Track III out of
+ * the masters instead.
+ *
+ * Scanned at boot from CATALOG, so a sample is only ever advertised for a
+ * program that is publishable AND whose masters are on this box. The audio is
+ * gitignored and does not ride the deploy; catalog.json does. #139 exists
+ * because that gap already bit once, and a play button that 404s is a worse
+ * advertisement than no play button.
+ *
+ * Size, not just existence: a half-finished copy leaves a zero-byte file, which
+ * would index as sound and load as silence.
+ */
+const SAMPLES = (() => {
+  const index = new Map();
+  for (const [key, program] of CATALOG) {
+    const file = path.resolve(CATALOG_DIR, key, SAMPLE_NAME);
+    // The masters live in this directory too, so the containment check is not
+    // ceremony — it is what keeps a manifest key like `../..` from naming one.
+    if (!isInside(CATALOG_DIR, file)) continue;
+    let bytes;
+    try {
+      const st = fs.statSync(file);
+      if (!st.isFile() || st.size === 0) continue;
+      bytes = st.size;
+    } catch { continue; }
+    index.set(key, {
+      key,
+      goal: program.goal,
+      voiceSet: program.voiceSet,
+      goalTitle: program.goalTitle || null,
+      bytes,
+      file,
+      url: `/api/catalog/${encodeURIComponent(key)}/${SAMPLE_NAME}`,
+    });
+  }
+  if (CATALOG.size) {
+    console.log('samples:', index.size, 'of', CATALOG.size,
+      'publishable program(s) have a sample —', index.size
+        ? 'the storefront can play those'
+        : 'run engine/cut_samples.py to cut them');
+  }
+  return index;
+})();
 
 /** Whether `target` really sits inside `dir`. */
 function isInside(dir, target) {
@@ -555,8 +616,9 @@ function send(res, code, body, headers = {}) {
   res.end(body);
 }
 
-function sendJson(res, code, obj) {
-  send(res, code, JSON.stringify(obj), { 'Content-Type': 'application/json; charset=utf-8' });
+function sendJson(res, code, obj, headers = {}) {
+  send(res, code, JSON.stringify(obj),
+    { 'Content-Type': 'application/json; charset=utf-8', ...headers });
 }
 
 // The bytes exactly as they arrived.
@@ -2379,6 +2441,56 @@ async function handleRequest(req, res) {
     const session = await createCheckoutSession(body.goal, body.voiceSet);
     if (!session) return sendJson(res, 502, { error: 'checkout_unavailable' });
     return sendJson(res, 200, session);
+  }
+
+  // ---- the program samples (#60) -------------------------------------------
+  //
+  // Deliberately public: unsigned, cacheable, no expiry. A sample is an
+  // advertisement, and the entire point is that someone who has bought nothing
+  // can press play. That is the opposite of the masters below, and the two are
+  // kept apart by construction rather than by care — the path served here comes
+  // from SAMPLES, which is built at boot from `<key>/sample.mp3` and holds
+  // nothing else, so no request can name a master through this route.
+  if (url === '/api/samples' && (req.method === 'GET' || req.method === 'HEAD')) {
+    return sendJson(res, 200, {
+      samples: [...SAMPLES.values()].map(({ file, ...rest }) => rest),
+    }, { 'Cache-Control': 'public, max-age=300' });
+  }
+
+  const sampleMatch = url.match(SAMPLE_ROUTE);
+  if (sampleMatch && (req.method === 'GET' || req.method === 'HEAD')) {
+    let key;
+    try {
+      key = decodeURIComponent(sampleMatch[1]);
+    } catch {
+      return sendJson(res, 404, { error: 'unknown sample' });
+    }
+    const sample = SAMPLES.get(key);
+    if (!sample) return sendJson(res, 404, { error: 'unknown sample' });
+
+    let size;
+    try {
+      size = fs.statSync(sample.file).size;
+    } catch {
+      // Cut, indexed at boot, and deleted since. Nothing a visitor can do about
+      // it, and nothing worth crashing the storefront over.
+      console.error('samples: indexed sample has gone missing:', sample.file);
+      return sendJson(res, 404, { error: 'unknown sample' });
+    }
+    res.writeHead(200, {
+      'Content-Type': MIME['.mp3'],
+      'Content-Length': size,
+      // A whole day, and a shared cache is welcome to it. The file only changes
+      // when an operator re-cuts it, which is also a deploy.
+      'Cache-Control': 'public, max-age=86400',
+      // No Content-Disposition: this plays inline in an <audio> element. The
+      // masters below say `attachment` because those are a purchase.
+    });
+    if (req.method === 'HEAD') return res.end();
+    const stream = fs.createReadStream(sample.file);
+    stream.on('error', () => res.destroy());
+    res.on('error', () => stream.destroy());
+    return stream.pipe(res);
   }
 
   // ---- a pre-rendered catalog master, by signed link (#59) -----------------
