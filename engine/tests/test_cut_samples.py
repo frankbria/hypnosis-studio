@@ -14,6 +14,7 @@ whether ffmpeg ran.
 import glob
 import json
 import os
+import pathlib
 import sys
 
 import pytest
@@ -289,6 +290,15 @@ def test_the_command_never_overwrites_without_being_told_to():
     assert "-nostdin" in argv and "-y" in argv
 
 
+def test_the_output_format_is_named_not_inferred():
+    """The cut goes to a scratch path whose suffix ffmpeg does not recognise, so
+    letting it infer the muxer from the extension fails every real cut — which
+    no test with a mocked subprocess can see."""
+    plan = cut_samples.plan_sample(ENGINE, program())
+    argv = cut_samples.ffmpeg_command({1: "a.mp3", 3: "b.mp3"}, plan, "out.partial")
+    assert argv[argv.index("-f") + 1] == "mp3"
+
+
 def test_the_output_is_the_last_argument():
     plan = cut_samples.plan_sample(ENGINE, program())
     argv = cut_samples.ffmpeg_command({1: "a.mp3", 3: "b.mp3"}, plan, "/out/s.mp3")
@@ -348,6 +358,48 @@ def test_the_sample_sits_beside_the_masters_it_was_cut_from():
     the sample with the audio rather than stranding it."""
     assert cut_samples.sample_path("/srv/catalog", "polymath__male") == os.path.join(
         "/srv/catalog", "polymath__male", cut_samples.SAMPLE_NAME)
+
+
+def test_a_failed_cut_never_replaces_a_good_sample(tmp_path, monkeypatch):
+    """`server.js` indexes whatever non-empty sample.mp3 it finds at boot, so a
+    half-written file IS a published sample. Under `--force` the naive version
+    destroyed a good one to leave a broken one behind."""
+    key = "polymath__male"
+    program_dir = tmp_path / key
+    program_dir.mkdir()
+    for n in (1, 3):
+        (program_dir / f"polymath_track{n}.mp3").write_bytes(b"master")
+    good = program_dir / cut_samples.SAMPLE_NAME
+    good.write_bytes(b"the sample that already worked")
+
+    def ffmpeg_that_dies_mid_write(argv, **kwargs):
+        pathlib.Path(argv[-1]).write_bytes(b"half a file")
+        raise cut_samples.subprocess.CalledProcessError(137, argv, stderr="Killed")
+
+    monkeypatch.setattr(cut_samples.subprocess, "run", ffmpeg_that_dies_mid_write)
+    problems = cut_samples.cut_one(ENGINE, str(tmp_path), program(key=key),
+                                   force=True, dry_run=False)
+
+    assert problems, "a killed ffmpeg was reported as success"
+    assert good.read_bytes() == b"the sample that already worked"
+    assert list(program_dir.glob("*.partial")) == [], "scratch file left behind"
+
+
+def test_a_first_cut_that_fails_publishes_nothing(tmp_path, monkeypatch):
+    key = "polymath__male"
+    program_dir = tmp_path / key
+    program_dir.mkdir()
+    for n in (1, 3):
+        (program_dir / f"polymath_track{n}.mp3").write_bytes(b"master")
+
+    def ffmpeg_that_dies_mid_write(argv, **kwargs):
+        pathlib.Path(argv[-1]).write_bytes(b"half a file")
+        raise cut_samples.subprocess.CalledProcessError(137, argv, stderr="Killed")
+
+    monkeypatch.setattr(cut_samples.subprocess, "run", ffmpeg_that_dies_mid_write)
+    assert cut_samples.cut_one(ENGINE, str(tmp_path), program(key=key),
+                               force=False, dry_run=False)
+    assert not (program_dir / cut_samples.SAMPLE_NAME).exists()
 
 
 @pytest.mark.parametrize("measured,ok", [

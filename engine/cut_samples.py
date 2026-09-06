@@ -210,7 +210,11 @@ def ffmpeg_command(sources: dict, plan: Plan, out_path: str) -> list:
                  "-i", sources[n]]
     argv += ["-filter_complex", graph, "-map", "[out]",
              "-c:a", "libmp3lame", "-b:a", BITRATE, "-ar", str(timeline.SR),
-             "-ac", CHANNELS, out_path]
+             # Named, not inferred from the extension. The cut goes to a scratch
+             # path so a killed ffmpeg cannot publish a half-written sample, and
+             # ffmpeg refuses a filename whose suffix it does not recognise:
+             # "Unable to choose an output format".
+             "-ac", CHANNELS, "-f", "mp3", out_path]
     return argv
 
 
@@ -299,29 +303,42 @@ def cut_one(engine_dir: str, catalog_dir: str, program: dict, force: bool,
         return []
 
     print(f"== {key}: cutting {plan.duration:.0f}s — {windows}", flush=True)
+    # Cut to a scratch name and move it into place only once it has been
+    # measured. `server.js` indexes whatever non-empty `sample.mp3` it finds at
+    # boot, so a half-written file IS a published sample: an ffmpeg killed
+    # mid-write by a full disk or a SIGKILL would otherwise become the
+    # storefront preview. Worse under `--force`, which would have destroyed a
+    # good sample to leave a broken one. Writing beside the target keeps the
+    # replace on one filesystem, so it is atomic.
+    scratch = out_path + ".partial"
     try:
-        subprocess.run(ffmpeg_command(sources, plan, out_path),
-                       check=True, capture_output=True, text=True)
-    except FileNotFoundError:
-        return [f"{key}: ffmpeg is not installed"]
-    except subprocess.CalledProcessError as e:
-        return [f"{key}: ffmpeg failed — {(e.stderr or '').strip()[:400]}"]
-
-    try:
-        measured = probe_duration(out_path)
-    except (OSError, ValueError, subprocess.CalledProcessError) as e:
-        return [f"{key}: could not measure the cut sample — {e}"]
-
-    problems = check_duration(key, measured, plan.duration)
-    if problems:
-        # Removed, not left in place. A sample of the wrong length is worse than
-        # no sample: the server indexes whatever is on disk, so leaving it there
-        # publishes the bad cut.
         try:
-            os.remove(out_path)
-        except OSError:
-            pass
-    return problems
+            subprocess.run(ffmpeg_command(sources, plan, scratch),
+                           check=True, capture_output=True, text=True)
+        except FileNotFoundError:
+            return [f"{key}: ffmpeg is not installed"]
+        except subprocess.CalledProcessError as e:
+            return [f"{key}: ffmpeg failed — {(e.stderr or '').strip()[:400]}"]
+
+        try:
+            measured = probe_duration(scratch)
+        except (OSError, ValueError, subprocess.CalledProcessError) as e:
+            return [f"{key}: could not measure the cut sample — {e}"]
+
+        problems = check_duration(key, measured, plan.duration)
+        if problems:
+            return problems
+
+        os.replace(scratch, out_path)
+        return []
+    finally:
+        # Every failing path above leaves the scratch file behind; the published
+        # sample — old or absent — is untouched by all of them.
+        if os.path.exists(scratch):
+            try:
+                os.remove(scratch)
+            except OSError:
+                pass
 
 
 def main(argv=None) -> int:
