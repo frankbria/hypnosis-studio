@@ -21,6 +21,7 @@ Serving (#59) reads `publishable`, so an unlistened master cannot be sold by
 accident.
 """
 import collections
+import datetime
 import json
 import os
 
@@ -93,7 +94,23 @@ def approvals_by_program(approvals: dict) -> dict:
     return index
 
 
-def approval_problems(key: str, entry) -> list:
+def parse_time(value):
+    """An ISO timestamp, or None if it is not one.
+
+    Timestamps arrive from two places that format differently: the engine writes
+    `datetime.now(timezone.utc).isoformat()` (`+00:00`), and the approvals file
+    is hand-edited, where `Z` is what people type. Comparing those as strings
+    silently mis-orders them — `"Z" > "+"` — so they are parsed, not compared raw.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def approval_problems(key: str, entry, rendered_at=None) -> list:
     """Why this program's approval record does not count. Empty means it does."""
     if not entry:
         return [f"{key}: no listen recorded — the owner has not signed this off"]
@@ -113,14 +130,28 @@ def approval_problems(key: str, entry) -> list:
                 f"{key}: spot-check is missing {', '.join(missing)} — "
                 f"a spot-check has to cover all of {', '.join(PHASE_BOUNDARIES)}")
 
+    listened_at = parse_time(entry.get("at"))
     if not entry.get("at"):
         problems.append(f"{key}: listen has no timestamp")
+    elif listened_at is None:
+        problems.append(f"{key}: listen timestamp {entry['at']!r} is not ISO 8601")
     if not entry.get("by"):
         problems.append(f"{key}: listen does not say who listened")
+
+    # A listen of a file that no longer exists is not a listen. `--force`
+    # re-renders in place, so the masters can change under a sign-off without
+    # anything else moving; the README says to re-approve by appending, and this
+    # is what makes that a rule rather than a convention.
+    rendered = parse_time(rendered_at)
+    if rendered and listened_at and listened_at < rendered:
+        problems.append(
+            f"{key}: the listen at {entry['at']} predates the masters rendered "
+            f"at {rendered_at} — this program was re-rendered since it was "
+            f"signed off, so it needs listening to again")
     return problems
 
 
-def full_listen_problems(approvals: dict, program_keys) -> list:
+def full_listen_problems(approvals: dict, program_keys, rendered_at=None) -> list:
     """The catalog-wide rule: at least one program listened to end to end.
 
     Per-program approval alone would let all ten be signed off with spot-checks,
@@ -128,9 +159,14 @@ def full_listen_problems(approvals: dict, program_keys) -> list:
     narration, whisper layer, bed and master fit together over 13 minutes, which
     three seeks cannot show.
     """
+    rendered_at = rendered_at or {}
     index = approvals_by_program(approvals)
+    # Validated, not merely present. A record missing its `at` or `by` does not
+    # count for the program it names, and a record that does not count for one
+    # program cannot be what satisfies the catalog-wide rule for all ten.
     full = [k for k in program_keys
-            if index.get(k, {}).get("listen") == LISTEN_FULL]
+            if index.get(k, {}).get("listen") == LISTEN_FULL
+            and not approval_problems(k, index[k], rendered_at.get(k))]
     if not full:
         return [("no program has been listened to end to end — the revised "
                  "criterion on #58 requires exactly that for one of them")]
@@ -152,7 +188,8 @@ def merge_untouched(fresh: list, prior: list, key_field: str) -> list:
 
 
 def build_program(goal: str, goal_title: str, voice_set: str, tracks: list,
-                  qa_problems: list, checked_at: str, approval) -> dict:
+                  qa_problems: list, checked_at: str, approval,
+                  rendered_at=None) -> dict:
     """One catalog entry, with its own verdict already resolved.
 
     `publishable` is stored rather than recomputed by every reader. The
@@ -161,12 +198,18 @@ def build_program(goal: str, goal_title: str, voice_set: str, tracks: list,
     and the one that gets it wrong sells an unapproved master.
     """
     key = program_key(goal, voice_set)
-    blockers = [f"{key}: {p}" for p in qa_problems] + approval_problems(key, approval)
+    blockers = ([f"{key}: {p}" for p in qa_problems]
+                + approval_problems(key, approval, rendered_at))
     return {
         "key": key,
         "goal": goal,
         "goalTitle": goal_title,
         "voiceSet": voice_set,
+        # When the masters themselves were made, from the program's own
+        # manifest — not when they were last measured. Re-running the driver
+        # re-measures without re-rendering, so anchoring a sign-off to the
+        # check time would invalidate every listen on every run.
+        "renderedAt": rendered_at,
         "tracks": tracks,
         "totalDurationSec": round(sum(t["durationSec"] for t in tracks), 1),
         "qa": {
@@ -185,7 +228,8 @@ def build_catalog(programs: list, approvals: dict, generated_at: str) -> dict:
     catalog = empty_catalog(generated_at)
     catalog["programs"] = sorted(programs, key=lambda p: p["key"])
     catalog["fullListenProblems"] = full_listen_problems(
-        approvals, [p["key"] for p in catalog["programs"]])
+        approvals, [p["key"] for p in catalog["programs"]],
+        {p["key"]: p.get("renderedAt") for p in catalog["programs"]})
     # The catalog-wide rule demotes everything: without one end-to-end listen,
     # no individual sign-off is trusted, because what is unverified is the chain
     # they all share.

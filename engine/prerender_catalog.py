@@ -150,6 +150,16 @@ def render_one(goal: str, voice_set: str, outdir: str, force: bool,
     program_dir = os.path.join(outdir, key)
     manifest_path = os.path.join(program_dir, "manifest.json")
 
+    if dry_run:
+        # A dry run costs nothing and produces nothing, so it neither skips a
+        # finished combination — its whole job is to verify every script and pad
+        # — nor disturbs one. In particular `--dry-run --force` must not delete
+        # a manifest: that would make a run advertised as "verify, no TTS" throw
+        # away the resumability of a program already paid for.
+        print(f"== {key}: checking scripts and pad", flush=True)
+        render_program.run(key, goal, voice_set, program_dir, dry_run=True)
+        return program_dir
+
     if os.path.exists(manifest_path) and not force:
         print(f"== {key}: already rendered, skipping "
               f"(--force {goal}:{voice_set} to redo)", flush=True)
@@ -162,7 +172,7 @@ def render_one(goal: str, voice_set: str, outdir: str, force: bool,
         os.remove(manifest_path)
 
     print(f"== {key}: rendering", flush=True)
-    render_program.run(key, goal, voice_set, program_dir, dry_run=dry_run)
+    render_program.run(key, goal, voice_set, program_dir, dry_run=False)
     return program_dir
 
 
@@ -191,11 +201,15 @@ def main() -> int:
         print(f"FAILED: {e}", flush=True)
         return 2
 
-    # Read before rendering. A malformed approvals file should cost nothing;
-    # discovering it after three hours of TTS is the expensive way to find out.
+    # Every file this run will read or rewrite is read *before* rendering.
+    # `load_json` refuses a corrupt file by design, and discovering that after
+    # three hours of TTS — between the last render and the manifest write — is
+    # the expensive way to find out.
     approvals = catalog_lib.load_json(args.approvals,
                                       catalog_lib.empty_approvals())
     approval_index = catalog_lib.approvals_by_program(approvals)
+    existing = catalog_lib.load_json(args.catalog, catalog_lib.empty_catalog(""))
+    prior_report = catalog_lib.load_json(args.qa_report, {})
 
     todo = [c for c in combinations() if not only or c in only]
     print(f"catalog: {len(todo)} combination(s) into {outdir}", flush=True)
@@ -203,6 +217,7 @@ def main() -> int:
     programs, reports, failures = [], [], []
     for goal, voice_set in todo:
         key = catalog_lib.program_key(goal, voice_set)
+        manifest = {}
         try:
             program_dir = render_one(goal, voice_set, outdir,
                                      (goal, voice_set) in forced, args.dry_run)
@@ -217,11 +232,16 @@ def main() -> int:
             print(f"FAILED {key}: {e}", flush=True)
             traceback.print_exc()
             failures.append(f"{key}: {e}")
-            continue
-
-        if problems:
-            print(f"   QA rejected {key}: {'; '.join(problems)}", flush=True)
-            failures.append(f"{key}: QA gate rejected the masters")
+            # A fresh entry recording the failure, NOT a `continue`. Skipping
+            # would leave this combination to be back-filled from the previous
+            # catalog below — and `--force` re-renders in place, so that entry
+            # describes masters this run has already overwritten. It would say
+            # publishable, with durations, for audio that no longer exists.
+            tracks, problems, measurements = [], [str(e)], []
+        else:
+            if problems:
+                print(f"   QA rejected {key}: {'; '.join(problems)}", flush=True)
+                failures.append(f"{key}: QA gate rejected the masters")
 
         programs.append(catalog_lib.build_program(
             goal=goal,
@@ -231,6 +251,10 @@ def main() -> int:
             qa_problems=problems,
             checked_at=render_program.now_iso(),
             approval=approval_index.get(key),
+            # When the masters were made, off the program's own manifest. A
+            # sign-off older than this is a sign-off on a file that has since
+            # been re-rendered, and catalog.py refuses it.
+            rendered_at=manifest.get("createdAt"),
         ))
         reports.append({"program": key, "problems": problems,
                         "tracks": measurements})
@@ -241,18 +265,18 @@ def main() -> int:
 
     # Written even when combinations failed: the manifest is the record of what
     # is not publishable and why, which is exactly what an operator needs next.
-    if only:
-        # A partial run must not delete the programs it did not touch — of
-        # either file. The QA report is the evidence behind the catalog's
-        # verdicts, so dropping nine programs' measurements while keeping their
-        # entries would leave the catalog asserting results nothing records.
-        existing = catalog_lib.load_json(args.catalog,
-                                         catalog_lib.empty_catalog(""))
-        programs = catalog_lib.merge_untouched(
-            programs, existing.get("programs", []), "key")
-        prior_report = catalog_lib.load_json(args.qa_report, {})
-        reports = catalog_lib.merge_untouched(
-            reports, prior_report.get("programs", []), "program")
+    #
+    # Merged unconditionally, not just under `--only`. Every combination this
+    # run touched already has a fresh entry above — including the ones that
+    # failed — so the merge can only carry forward combinations the run did not
+    # touch. Gating it on `--only` meant a full run with one bad pad silently
+    # deleted that program's entry and its QA evidence; and if the deleted one
+    # happened to hold the catalog-wide full listen, every remaining program was
+    # demoted to unpublishable along with it.
+    programs = catalog_lib.merge_untouched(
+        programs, existing.get("programs", []), "key")
+    reports = catalog_lib.merge_untouched(
+        reports, prior_report.get("programs", []), "program")
 
     catalog = catalog_lib.build_catalog(programs, approvals,
                                         render_program.now_iso())

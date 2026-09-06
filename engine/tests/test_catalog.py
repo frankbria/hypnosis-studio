@@ -274,3 +274,61 @@ def test_a_partial_run_keeps_the_qa_evidence_for_those_programs():
 def test_a_full_run_with_no_prior_file_merges_to_itself():
     fresh = [{"key": "polymath__male"}]
     assert catalog.merge_untouched(fresh, [], "key") == fresh
+
+
+# ---------------------------------------------------------------- record validity
+
+def test_an_invalid_full_listen_does_not_satisfy_the_catalog_wide_rule():
+    # A record missing its `at` does not count for the program it names, so it
+    # cannot be what lets the other nine through either. Checking only that the
+    # word "full" appears somewhere in the file is not checking anything.
+    broken = {"listen": "full", "by": "frankbria"}  # no timestamp
+    approvals = {"listens": [
+        dict(broken, program="polymath__male"),
+        dict(SPOT, program="polymath__female"),
+    ]}
+    built = catalog.build_catalog(
+        [program(voice_set="male", approval=broken),
+         program(voice_set="female", approval=SPOT)],
+        approvals, "2026-09-05T11:00:00Z")
+
+    assert built["fullListenProblems"]
+    assert not any(p["publishable"] for p in built["programs"])
+
+
+def test_a_listen_predating_the_masters_does_not_count():
+    # --force re-renders in place. The README says re-approve by appending;
+    # this is what makes that a rule rather than a convention.
+    p = catalog.build_program(
+        goal="polymath", goal_title="The Polymath Mind", voice_set="male",
+        tracks=list(TRACKS), qa_problems=[], checked_at="t",
+        approval=dict(FULL, at="2026-09-05T08:00:00Z"),
+        rendered_at="2026-09-05T09:00:00Z")
+    assert not p["publishable"]
+    assert any("predates the masters" in b for b in p["blockers"])
+
+
+def test_a_listen_after_the_masters_counts():
+    p = catalog.build_program(
+        goal="polymath", goal_title="The Polymath Mind", voice_set="male",
+        tracks=list(TRACKS), qa_problems=[], checked_at="t",
+        approval=dict(FULL, at="2026-09-05T10:00:00Z"),
+        rendered_at="2026-09-05T09:00:00Z")
+    assert p["publishable"]
+
+
+def test_the_two_timestamp_spellings_compare_correctly():
+    # The engine writes datetime.isoformat() — microseconds and "+00:00". The
+    # hand-edited approvals file gets whole seconds and "Z". Compared as raw
+    # strings, "Z" (90) sorts above "." (46), so a listen made half a second
+    # BEFORE the render reads as after it, and a stale sign-off is admitted.
+    listened = "2026-09-05T10:00:00Z"
+    rendered = "2026-09-05T10:00:00.500000+00:00"
+    assert listened > rendered            # the raw trap: wrongly "after"
+    assert catalog.parse_time(listened) < catalog.parse_time(rendered)
+
+
+def test_an_unparseable_listen_timestamp_is_refused():
+    p = program(approval=dict(FULL, at="last tuesday"))
+    assert not p["publishable"]
+    assert any("not ISO 8601" in b for b in p["blockers"])

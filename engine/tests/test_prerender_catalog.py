@@ -199,3 +199,184 @@ def test_an_unknown_combination_is_refused_before_anything_renders():
     for bad in ["polymath", "nope:male", "polymath:other", ""]:
         with pytest.raises(ValueError):
             prerender_catalog.parse_selection([bad])
+
+
+# ---------------------------------------------------------------- resume safety
+
+# These drive main() end to end. They are safe to run anywhere, including on the
+# box where the pads and the key live: every combination they touch is passed via
+# --only and already has a manifest.json, so render_one skips it and no TTS call
+# is ever reachable. Never widen one of these to a full run — without --only,
+# main() walks all ten combinations and the eight without a manifest would render
+# for real.
+
+def seed_catalog_root(tmp_path, keys=("polymath__male",)):
+    root = tmp_path / "catalog"
+    for key in keys:
+        goal = key.split("__")[0]
+        manifest = write_program(str(root / key), goal=goal)
+        manifest["createdAt"] = "2026-09-05T09:00:00Z"
+        with open(root / key / "manifest.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+    return root
+
+
+def approvals_file(tmp_path, program="polymath__male", at="2026-09-05T10:00:00Z"):
+    path = tmp_path / "approvals.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"schemaVersion": 1, "listens": [
+            {"program": program, "listen": "full", "at": at, "by": "frankbria"}]}, f)
+    return path
+
+
+def run_main(monkeypatch, tmp_path, root, only, approvals):
+    catalog_path = tmp_path / "catalog.json"
+    report_path = tmp_path / "qa-report.json"
+    argv = ["prerender_catalog.py", "--outdir", str(root),
+            "--catalog", str(catalog_path), "--approvals", str(approvals),
+            "--qa-report", str(report_path)]
+    for combo in only or ():
+        argv += ["--only", combo]
+    monkeypatch.setattr(sys, "argv", argv)
+    code = prerender_catalog.main()
+    with open(catalog_path, encoding="utf-8") as f:
+        built = json.load(f)
+    with open(report_path, encoding="utf-8") as f:
+        report = json.load(f)
+    return code, built, report
+
+
+def test_a_seeded_program_is_measured_and_published(
+        monkeypatch, tmp_path, scaled_tracks):
+    root = seed_catalog_root(tmp_path)
+    code, built, report = run_main(
+        monkeypatch, tmp_path, root, ["polymath:male"], approvals_file(tmp_path))
+
+    assert code == 0
+    assert [p["key"] for p in built["programs"]] == ["polymath__male"]
+    assert built["programs"][0]["publishable"]
+    assert built["durationsByGoal"]["polymath"][0] == pytest.approx(20, abs=0.2)
+    assert report["programs"][0]["program"] == "polymath__male"
+
+
+def test_a_qa_failure_blocks_the_program_rather_than_publishing_it(
+        monkeypatch, tmp_path, scaled_tracks):
+    root = seed_catalog_root(tmp_path)
+    approvals = approvals_file(tmp_path)
+    code, built, _ = run_main(monkeypatch, tmp_path, root, ["polymath:male"], approvals)
+    assert code == 0 and built["programs"][0]["publishable"]
+
+    os.remove(root / "polymath__male" / "polymath_track2.wav")
+    code, built, report = run_main(
+        monkeypatch, tmp_path, root, ["polymath:male"], approvals)
+
+    assert code == 1
+    entry = next(p for p in built["programs"] if p["key"] == "polymath__male")
+    assert not entry["publishable"]
+    assert any("missing from disk" in b for b in entry["blockers"])
+    assert "polymath" not in built["durationsByGoal"]
+    assert report["programs"][0]["problems"]
+
+
+def test_a_combination_that_raises_does_not_resurrect_its_previous_entry(
+        monkeypatch, tmp_path, scaled_tracks):
+    # The dangerous one. An *exception* (not a QA verdict) used to skip the
+    # combination entirely, and the merge then back-filled it from the prior
+    # catalog — republishing durations and a publishable flag for masters this
+    # run had already touched. A corrupt manifest.json is the cheapest way to
+    # raise: render_one still sees the file and skips rendering, so no TTS call
+    # is reachable, and load_json refuses to parse it.
+    root = seed_catalog_root(tmp_path)
+    approvals = approvals_file(tmp_path)
+    code, built, _ = run_main(monkeypatch, tmp_path, root, ["polymath:male"], approvals)
+    assert code == 0 and built["programs"][0]["publishable"]
+
+    (root / "polymath__male" / "manifest.json").write_text("{ truncated",
+                                                           encoding="utf-8")
+    code, built, report = run_main(
+        monkeypatch, tmp_path, root, ["polymath:male"], approvals)
+
+    assert code == 1
+    entry = next(p for p in built["programs"] if p["key"] == "polymath__male")
+    assert not entry["publishable"], "the stale publishable entry came back"
+    assert entry["tracks"] == []
+    assert "polymath" not in built["durationsByGoal"]
+
+
+def test_a_partial_run_keeps_the_program_it_did_not_touch(
+        monkeypatch, tmp_path, scaled_tracks):
+    root = seed_catalog_root(tmp_path, ("polymath__male", "river__male"))
+    approvals = approvals_file(tmp_path)
+    _, built, _ = run_main(
+        monkeypatch, tmp_path, root, ["polymath:male", "river:male"], approvals)
+    assert {p["key"] for p in built["programs"]} == {"polymath__male", "river__male"}
+
+    _, built, report = run_main(
+        monkeypatch, tmp_path, root, ["polymath:male"], approvals)
+
+    assert {p["key"] for p in built["programs"]} == {"polymath__male", "river__male"}
+    assert {r["program"] for r in report["programs"]} == {"polymath__male", "river__male"}
+
+
+def test_a_full_run_does_not_delete_the_entry_of_a_combination_that_failed(
+        monkeypatch, tmp_path, scaled_tracks):
+    # Without --only the merge used to be skipped entirely, so a full run with
+    # one bad combination silently dropped that program's entry and its QA
+    # evidence — and if the dropped one held the catalog-wide full listen, every
+    # remaining program was demoted to unpublishable along with it.
+    #
+    # GOALS and VOICE_SETS are narrowed to exactly what is seeded so that a run
+    # with no --only still touches only combinations that skip rendering. Do not
+    # widen this: an unseeded combination in a full run renders for real.
+    monkeypatch.setattr(render_program, "GOALS", ("polymath", "river"))
+    monkeypatch.setattr(render_program, "VOICE_SETS",
+                        {"male": render_program.VOICE_SETS["male"]})
+    root = seed_catalog_root(tmp_path, ("polymath__male", "river__male"))
+    approvals = approvals_file(tmp_path, program="polymath__male")
+
+    code, built, _ = run_main(monkeypatch, tmp_path, root, None, approvals)
+    assert code == 0
+    assert {p["key"] for p in built["programs"]} == {"polymath__male", "river__male"}
+
+    # Break the one holding the full listen: the worst case for the knock-on.
+    (root / "polymath__male" / "manifest.json").write_text("{ truncated",
+                                                           encoding="utf-8")
+    code, built, report = run_main(monkeypatch, tmp_path, root, None, approvals)
+
+    assert code == 1
+    keys = {p["key"] for p in built["programs"]}
+    assert keys == {"polymath__male", "river__male"}, \
+        "a failed combination was deleted from the manifest instead of recorded"
+    assert {r["program"] for r in report["programs"]} == keys
+    blocked = next(p for p in built["programs"] if p["key"] == "polymath__male")
+    assert not blocked["publishable"]
+
+
+def test_a_listen_older_than_the_masters_does_not_publish_them(
+        monkeypatch, tmp_path, scaled_tracks):
+    # --force re-renders in place, so masters can change under a sign-off
+    # without anything else moving. The seeded manifest says the masters were
+    # made at 09:00; a listen at 08:00 was of a file that no longer exists.
+    root = seed_catalog_root(tmp_path)
+    approvals = approvals_file(tmp_path, at="2026-09-05T08:00:00Z")
+    _, built, _ = run_main(monkeypatch, tmp_path, root, ["polymath:male"], approvals)
+
+    entry = built["programs"][0]
+    assert not entry["publishable"]
+    assert any("predates the masters" in b for b in entry["blockers"])
+
+
+def test_a_dry_run_does_not_delete_a_forced_combinations_manifest(tmp_path):
+    # `--dry-run --force X` is advertised as "verify, no TTS". Deleting the
+    # manifest would throw away the resumability of a program already paid for:
+    # the next real run re-renders it from scratch.
+    root = seed_catalog_root(tmp_path)
+    manifest_path = root / "polymath__male" / "manifest.json"
+    try:
+        prerender_catalog.render_one("polymath", "male", str(root),
+                                     force=True, dry_run=True)
+    except Exception:
+        # No pads in a checkout, so the pad check refuses before any spend.
+        # What matters is what survived, not whether the check could complete.
+        pass
+    assert manifest_path.exists()

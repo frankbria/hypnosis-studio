@@ -241,9 +241,14 @@ The rules, enforced in `catalog.py` and tested in `tests/test_catalog.py`:
 - Every other program needs a spot-check naming **all three** phase boundaries.
   Boundaries are named rather than counted so a record cannot claim three checks
   by listing the same one three times.
-- A listen needs an `at` and a `by`. The newest entry for a program wins, so a
-  re-render is re-approved by appending — the earlier listen was of a file that
-  no longer exists.
+- A listen needs an `at` and a `by`, and the `at` must be **after** the masters
+  were rendered (the program's own `manifest.json` `createdAt`, carried into the
+  catalog as `renderedAt`). A sign-off older than the audio is a sign-off on a
+  file that no longer exists, which is exactly what `--force` produces. Both
+  spellings of an ISO timestamp are accepted — the engine writes `+00:00`, `Z`
+  is what people type — and they are parsed rather than string-compared.
+- The newest entry for a program wins, so a re-render is re-approved by
+  appending rather than by editing history.
 
 Budget: one full listen (~46 min) plus nine spot-checks. Well under an hour.
 
