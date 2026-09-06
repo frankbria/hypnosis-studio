@@ -12,11 +12,35 @@ Two-stage pipeline that turns a hypnosis script (segment JSON) into a finished, 
 
 Reads `<track>_tts_segments.json`, calls ElevenLabs per segment, de-harshes (6.5 kHz one-pole blend) and adds a light algorithmic reverb, writes `<track>_segments/<id>.wav`. Existing segments in the working directory are skipped (idempotent reruns), and since #9 anything already bought in a *previous* job is served from the shared segment cache — see below.
 
-Requires `.env.local` in the working directory:
+### Where the key comes from
+
+`load_key()` resolves `ELEVENLABS_API_KEY` **from the environment first**, and only
+falls back to reading `.env.local` from the process's current working directory.
+
+**In production the fallback is never reached, and would not find anything if it
+were.** systemd loads `engine/api.env` for the service, so the variable is already
+in the environment; and the worker is spawned with `cwd` = the *repository root*
+(`server.js`, `cwd: __dirname`), not `engine/` — so a `.env.local` sitting next to
+these scripts would be looked for in the wrong place anyway — so treat any
+instruction to "put `.env.local` in `engine/`" as wrong (#49).
+
+So:
+
+| Context | Where the key comes from |
+|---|---|
+| The service | `engine/api.env`, loaded by the systemd unit into the environment |
+| A manual run on the box | nothing inherits `api.env` — load it first: `set -a; . ./api.env; set +a` |
+| Local development | either export `ELEVENLABS_API_KEY`, or put a `.env.local` in **the directory you run from** |
+
+Either file is one line:
 
 ```
 ELEVENLABS_API_KEY=sk_...
 ```
+
+If it is missing, `load_key()` says so by name and tells you which file to source
+(#138) rather than raising a bare `FileNotFoundError` for a file you have never
+heard of.
 
 ### When a TTS call fails
 
@@ -55,7 +79,9 @@ still down, and a full disk would buy all 152 segments and save none.
 - Carrier auto-scan (300–400 Hz quietest slot) + ±10 Hz notch, then an isochronic bed on a theta→alpha arc at pad_rms −29 dB
 - 30 s fade-out, master to −20 dB RMS, soft clip; writes WAV + MP3
 - **Track length is bounded by the pad** — see below
-- Diagnostics (`HYPNO_SKIP_QA=0`, off in production): per-minute RMS profile, bed-pulse check, faster-whisper transcript of the sunken suggestion layer with keyword hit count. These **print**; they do not gate anything, and the transcript step is skipped with a notice when `faster_whisper` is not installed. The gate that decides whether a track ships is in `render_program.py` — see below.
+- Diagnostics — **these do not run in production.** `api.env` sets `HYPNO_SKIP_QA=1`, and the worker defaults it on anyway, so the whole section is skipped. With `HYPNO_SKIP_QA=0` you get a per-minute RMS profile, a bed-pulse check, and a faster-whisper transcript of the sunken suggestion layer with a keyword hit count. They **print**; they gate nothing.
+  The transcript step additionally cannot run on the box at all: `faster_whisper` is not installed in the prod venv. It is imported inside the function rather than at module scope for exactly that reason, and prints a notice instead of failing the job (#6) — so turning diagnostics on in production degrades rather than breaking, but does not give you a transcript.
+  **The gate that decides whether a track ships is elsewhere** — `qa.check_master` via `render_program.py`, which does run on every job. See below.
 
 ## The segment cache
 
@@ -180,7 +206,7 @@ costs roughly $20 and makes delivery instant (#58).
 ```bash
 # on the box, where the pads and the key live
 cd /srv/hypnosis-studio/engine
-set -a; . ./api.env; set +a          # ELEVENLABS_API_KEY — see below
+set -a; . ./api.env; set +a          # ELEVENLABS_API_KEY — see "Where the key comes from"
 venv/bin/python prerender_catalog.py --outdir /srv/hypnosis-studio/renders/catalog
 ```
 
