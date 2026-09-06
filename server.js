@@ -177,6 +177,154 @@ const GOAL_CHARS = (() => {
 })();
 const VALID_VOICE_SETS = new Set(['male', 'female']);
 
+// ---- the pre-rendered catalog (#59) ----------------------------------------
+//
+// Every render is a pure function of (goal, voiceSet), so five goals x two
+// voice sets is ten possible outputs, total. #58 pre-renders and checks them
+// once; this is the half that hands them to a customer. A $39 catalog purchase
+// should never spawn a worker — it should grant access to files that already
+// exist, which takes the queue, the busy lock, the daily cap, the polling loop
+// and the twenty-minute wait off the path carrying nearly all launch volume.
+//
+// The masters are NOT served by serveStatic and have no public path. One
+// guessable URL makes the entire product free, so access is granted per order
+// and expires — see signCatalogLink below.
+const CATALOG_DIR = path.resolve(
+  process.env.CATALOG_DIR || path.join(RENDERS, 'catalog'));
+const CATALOG_MANIFEST = path.resolve(
+  process.env.CATALOG_MANIFEST || path.join(__dirname, 'engine', 'catalog.json'));
+
+// How long a minted file link stays valid. Deliberately short and unrelated to
+// the 30-day access window: the window says how long a customer may come back,
+// the link says how long one URL survives being copied out of a browser. Making
+// the link last the window would mean one leaked URL is a month of free
+// product. /api/orders/<session> is the durable capability and mints fresh
+// links on every load, so a short TTL costs a customer nothing.
+const CATALOG_LINK_TTL_MS = (() => {
+  const n = parseInt(process.env.CATALOG_LINK_TTL_MS || String(60 * 60 * 1000), 10);
+  return Number.isInteger(n) && n > 0 ? n : 60 * 60 * 1000;
+})();
+
+const DELIVERY_SIGNING_SECRET = process.env.DELIVERY_SIGNING_SECRET || '';
+
+/**
+ * Publishable catalog programs, indexed by `<goal>__<voiceSet>`.
+ *
+ * Read once at boot. The manifest is a committed file that changes only when
+ * `engine/prerender_catalog.py` is run and the result deployed, and a deploy
+ * restarts the process — so re-reading per request would buy nothing and put a
+ * disk read on the purchase path.
+ *
+ * Only `publishable` entries are indexed. That flag means the automated QA gate
+ * passed AND the owner recorded a listen (engine/catalog.py); a program missing
+ * either is one the studio has not confirmed it can deliver, and this is the
+ * exact moment that distinction is supposed to bite.
+ */
+const CATALOG = (() => {
+  const index = new Map();
+  const manifest = readJsonSafe(CATALOG_MANIFEST);
+  if (!manifest || !Array.isArray(manifest.programs)) {
+    console.log('catalog: no manifest at', CATALOG_MANIFEST,
+      '- every purchase renders on demand');
+    return index;
+  }
+  for (const program of manifest.programs) {
+    if (!program || !program.publishable) continue;
+    if (!Array.isArray(program.tracks) || program.tracks.length === 0) continue;
+    index.set(`${program.goal}__${program.voiceSet}`, program);
+  }
+  console.log('catalog:', index.size, 'of', manifest.programs.length,
+    'program(s) publishable —', index.size ? 'those sell as static files'
+      : 'every purchase renders on demand');
+  return index;
+})();
+
+// Refuse to start rather than serve masters nobody can protect.
+//
+// Scoped to "there is something publishable" on purpose. An unconditional
+// requirement would fail the boot of every deploy whose catalog is still empty,
+// which is all of them until the pre-render has been run — a boot failure for a
+// feature that is not yet in use. The requirement appears exactly when there is
+// something to lose, which is the same stance RETENTION_DAYS takes above.
+if (CATALOG.size > 0 && !DELIVERY_SIGNING_SECRET) {
+  console.error(
+    `${CATALOG.size} catalog program(s) are marked publishable, but `
+    + 'DELIVERY_SIGNING_SECRET is not set. Catalog masters are served only by '
+    + 'signed URL, and without a secret those links cannot be signed or '
+    + 'verified.\nRefusing to start. Set DELIVERY_SIGNING_SECRET to a long '
+    + 'random value (it must survive restarts, or every customer link breaks '
+    + 'on deploy).',
+  );
+  process.exit(1);
+}
+
+/** The publishable catalog program for a purchase, or null to render it. */
+function catalogProgram(goal, voiceSet) {
+  return CATALOG.get(`${goal}__${voiceSet}`) || null;
+}
+
+/**
+ * The signed path for one catalog file, valid until `expiresAt` (epoch ms).
+ *
+ * The signature covers the program key, the filename AND the expiry, so none of
+ * the three can be edited independently. Signing only the expiry would let a
+ * customer who bought one program swap the key and take another; signing only
+ * the path would make the expiry decorative.
+ */
+function signCatalogLink(key, name, expiresAt) {
+  const sig = crypto.createHmac('sha256', DELIVERY_SIGNING_SECRET)
+    .update(`${key}\n${name}\n${expiresAt}`)
+    .digest('hex');
+  return `/api/catalog/${encodeURIComponent(key)}/files/${encodeURIComponent(name)}`
+    + `?exp=${expiresAt}&sig=${sig}`;
+}
+
+/** Whether this signature really covers this key, name and expiry, unexpired. */
+function verifyCatalogLink(key, name, exp, sig) {
+  if (!DELIVERY_SIGNING_SECRET) return false;
+  const expiresAt = Number(exp);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return false;
+  if (typeof sig !== 'string') return false;
+  const expected = crypto.createHmac('sha256', DELIVERY_SIGNING_SECRET)
+    .update(`${key}\n${name}\n${expiresAt}`)
+    .digest('hex');
+  // Compared byte-for-byte in constant time. Buffers of different lengths make
+  // timingSafeEqual throw rather than return false, so the length is checked
+  // first — and a length mismatch is not a secret worth protecting, since the
+  // digest length is fixed and public.
+  const a = Buffer.from(expected, 'utf8');
+  const b = Buffer.from(sig, 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * Every file this program is allowed to hand out, as `basename -> absolute path`.
+ *
+ * The manifest stores paths relative to the catalog root (`<key>/<file>`) so it
+ * survives the masters moving to object storage (#57). Only the basename is
+ * ever accepted from a URL; the directory comes from the manifest, never from
+ * the request.
+ */
+function catalogFiles(program) {
+  const files = new Map();
+  for (const track of program.tracks) {
+    for (const rel of [track.wav, track.mp3]) {
+      if (typeof rel !== 'string' || !rel) continue;
+      files.set(path.basename(rel), path.resolve(CATALOG_DIR, rel));
+    }
+  }
+  return files;
+}
+
+/** Whether `target` really sits inside `dir`. */
+function isInside(dir, target) {
+  // NOT `target.startsWith(dir)`: `/srv/catalog-backup` starts with
+  // `/srv/catalog` while being an entirely different directory. That is open
+  // bug #36 against serveStatic, and repeating it here would expose masters.
+  const rel = path.relative(dir, target);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
 // ---- checkout (#22) --------------------------------------------------------
 //
 // Deliberately no `stripe` package. This repo has zero dependencies and the
@@ -1005,6 +1153,19 @@ function claimIsRecoverable(claim, sessionId) {
   // not something to resolve by giving away both.
   if (claim.refund) return false;
 
+  // A catalog order (#59) is fulfilled the moment it is claimed — its files
+  // existed before the purchase did, so there is no render to be owed and
+  // nothing in flight to recover.
+  //
+  // Without this it falls through to the age check below, because it has no job
+  // and no recorded refusal — so every fulfilled catalog order read as
+  // recoverable once it was sixty seconds old. Any redelivery of the event (a
+  // Stripe dashboard "resend", or at-least-once delivery doing its job) then
+  // overwrote the order with a fresh claim: `claimedAt` reset, which slides the
+  // 30-day window forward, and `delivery` wiped, which emails the buyer again.
+  // Replayed monthly, that is lifetime access for one $39 payment.
+  if (claim.catalog) return false;
+
   const jobIds = new Set(jobsForSession(sessionId));
   if (claim.jobId) jobIds.add(claim.jobId);
   if (jobIds.size > 0) {
@@ -1488,7 +1649,8 @@ async function deliverProgram(jobId, { session = null } = {}) {
     }
     try { fs.unlinkSync(deliveryClaimPath(sessionId)); } catch { /* nothing to undo */ }
   } catch (e) {
-    console.error('delivery: unexpected failure for job', jobId, e && e.message);
+    console.error('delivery: unexpected failure for',
+      jobId ? `job ${jobId}` : `catalog order ${sessionId}`, e && e.message);
     if (sessionId) {
       try { fs.unlinkSync(deliveryClaimPath(sessionId)); } catch { /* nothing to undo */ }
     }
@@ -1623,10 +1785,16 @@ async function resendOrderLinks(email) {
   for (const name of names) {
     if (!name.endsWith('.json')) continue;
     const order = readJsonSafe(path.join(sessionsDir(), name));
-    if (!order || !order.jobId || !order.email) continue;
+    if (!order || !order.email) continue;
+    if (!order.jobId && !order.catalog) continue;
     if (String(order.email).trim().toLowerCase() !== email) continue;
-    const st = readJsonSafe(path.join(jobDir(order.jobId), 'status.json'));
-    if (!st || st.state !== 'ready') continue;   // nothing to send a link to yet
+    // A catalog order (#59) has no job and no status to wait on — the files
+    // existed before the purchase did, so it is deliverable the moment it is
+    // claimed. Gating it on a job status meant it was never deliverable at all.
+    if (order.jobId) {
+      const st = readJsonSafe(path.join(jobDir(order.jobId), 'status.json'));
+      if (!st || st.state !== 'ready') continue;   // nothing to send a link to yet
+    }
     // Reuses the delivery path, so the message, the link and the once-only
     // guarantees are the same ones #28 already gets right. Clearing `delivery`
     // is what makes it send again — and bumping the generation is what stops
@@ -1637,7 +1805,7 @@ async function resendOrderLinks(email) {
       deliveryGeneration: (Number.isFinite(order.deliveryGeneration) ? order.deliveryGeneration : 0) + 1,
     };
     if (!writeClaim(order.sessionId, next)) continue;
-    await deliverProgram(order.jobId, { session: order.sessionId });
+    await deliverProgram(order.jobId ?? null, { session: order.sessionId });
     sent += 1;
   }
   console.log('resend: matched', sent, 'order(s) for that address');
@@ -1658,14 +1826,21 @@ function sweepUndelivered() {
     // Driven from the ORDERS rather than the job directories, so a job whose
     // back-pointer write failed is still found — the order knows its jobId
     // even when the job does not know its order.
-    if (!order || !order.jobId || !order.email || order.refund) continue;
+    if (!order || !order.email || order.refund) continue;
+    if (!order.jobId && !order.catalog) continue;
     if (order.delivery) {
       if (order.delivery.state === 'sent' || order.delivery.state === 'skipped') continue;
       if ((order.delivery.attempts || 0) >= DELIVERY_MAX_ATTEMPTS) continue;
     }
-    const st = readJsonSafe(path.join(jobDir(order.jobId), 'status.json'));
-    if (!st || st.state !== 'ready') continue;
-    deliverProgram(order.jobId, { session: order.sessionId })
+    // A catalog order (#59) is deliverable as soon as it is claimed — its files
+    // existed before the purchase did. This is also its only retry path: the
+    // webhook fires delivery without awaiting it, so a send that failed there
+    // is picked up here.
+    if (order.jobId) {
+      const st = readJsonSafe(path.join(jobDir(order.jobId), 'status.json'));
+      if (!st || st.state !== 'ready') continue;
+    }
+    deliverProgram(order.jobId ?? null, { session: order.sessionId })
       .catch((e) => console.error('delivery sweep threw:', e && e.message));
   }
 }
@@ -2034,6 +2209,53 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { received: true, duplicate: true });
     }
 
+    // ---- fulfil from the catalog, if we can (#59) --------------------------
+    //
+    // The whole point of pre-rendering: these four files already exist and are
+    // identical for every buyer of this (goal, voiceSet), so there is nothing
+    // to render, nothing to queue, nothing to wait for, and nothing that can
+    // fail after the money has been taken. The busy lock, the daily cap and the
+    // monthly TTS budget are all irrelevant here and are deliberately not
+    // consulted — they bound spending, and this path spends nothing.
+    //
+    // Falls through to startRender when the program is not publishable, which
+    // is every program until the #58 pre-render has been run. That keeps the
+    // render path alive exactly as long as it is still needed, and retires it
+    // per program as masters land, rather than in one switch-over.
+    const program = catalogProgram(meta.goal, meta.voiceSet);
+    if (program) {
+      if (!writeClaim(sessionId, { ...order, catalog: program.key })) {
+        // Record the refusal, then fail. The 500 makes Stripe retry — but the
+        // claim `claimSession` already wrote carries no jobId, no catalog and,
+        // without this, no lastError, so a retry arriving inside
+        // RECLAIM_AFTER_MS read as "someone is mid-spawn" and was answered
+        // `duplicate: true`. Stripe then stops, and nothing else ever picks the
+        // order up: the delivery sweep skips it (no jobId, no catalog) and the
+        // refund sweep needs a refund or a lastError. A paid customer with no
+        // files, no refund and no retry.
+        //
+        // `lastError` is exactly what makes claimIsRecoverable say yes, which
+        // is the same recovery the render path gets for a refused start.
+        writeClaim(sessionId, {
+          ...order,
+          lastError: 'catalog_record_failed',
+          lastErrorAt: new Date().toISOString(),
+        });
+        console.error('webhook: PAID SESSION', sessionId,
+          'could not be recorded as a catalog order - Stripe will retry');
+        return sendJson(res, 500, { error: 'storage_unavailable' });
+      }
+      // Not awaited, for the same reason the render path does not await its
+      // worker: Stripe retries anything slow, and a duplicate delivery is
+      // exactly what #28's once-only guarantee exists to prevent. The sweep
+      // picks this up if it throws.
+      deliverProgram(null, { session: sessionId })
+        .catch((e) => console.error('catalog delivery threw:', e && e.message));
+      console.log('webhook: session', sessionId, 'fulfilled from the catalog —',
+        program.key, '(no render)');
+      return sendJson(res, 200, { received: true, catalog: program.key });
+    }
+
     const started = startRender(meta.goal, meta.voiceSet, sessionId);
     if (started.error) {
       // The claim STAYS, recording that this session was paid for and is still
@@ -2089,7 +2311,16 @@ async function handleRequest(req, res) {
     // is the whole of #25: the render begins from the webhook, so a refusal
     // there arrives after the money has been taken and costs a refund, a
     // support contact and a wasted partial spend.
-    const problem = await capacityProblem(body.goal, body.voiceSet);
+    //
+    // Skipped entirely for a program the catalog can serve (#59). Every check
+    // inside capacityProblem — the busy lock, the daily cap, the monthly TTS
+    // budget, the free disk needed for a render — bounds *spending*, and this
+    // sale spends nothing: the files exist and the webhook hands them over
+    // without starting a worker. Asking anyway meant a spent render budget
+    // refused catalog sales that could have been fulfilled instantly, which is
+    // the opposite of what pre-rendering is for.
+    const problem = catalogProgram(body.goal, body.voiceSet)
+      ? null : await capacityProblem(body.goal, body.voiceSet);
     if (problem) {
       console.warn('refusing checkout:', problem);
       return sendJson(res, 503, {
@@ -2110,6 +2341,66 @@ async function handleRequest(req, res) {
     const session = await createCheckoutSession(body.goal, body.voiceSet);
     if (!session) return sendJson(res, 502, { error: 'checkout_unavailable' });
     return sendJson(res, 200, session);
+  }
+
+  // ---- a pre-rendered catalog master, by signed link (#59) -----------------
+  //
+  // Separate from the job route above because the trust model is different: a
+  // job's files are gated on owning the job id, which is minted per purchase.
+  // The catalog masters are the SAME ten files for every customer, so owning a
+  // path can never be the authorisation — the signature and its expiry are.
+  const catalogMatch = url.match(/^\/api\/catalog\/([^/?]+)\/files\/([^/?]+)(?:\?(.*))?$/);
+  if (catalogMatch && (req.method === 'GET' || req.method === 'HEAD')) {
+    const [, rawKey, rawName, query] = catalogMatch;
+    let key;
+    let name;
+    try {
+      key = decodeURIComponent(rawKey);
+      name = decodeURIComponent(rawName);
+    } catch {
+      return sendJson(res, 400, { error: 'bad request' });
+    }
+    const params = new URLSearchParams(query || '');
+    // One answer for every rejection. Distinguishing "no such program" from
+    // "bad signature" from "expired" tells someone probing exactly which part
+    // of a forged link to fix next, and the customer holding a real link never
+    // sees any of them.
+    const refuse = () => sendJson(res, 403, { error: 'link expired or invalid' });
+
+    if (path.basename(name) !== name) return refuse();
+    if (!verifyCatalogLink(key, name, params.get('exp'), params.get('sig'))) return refuse();
+    const program = CATALOG.get(key);
+    if (!program) return refuse();
+    const filePath = catalogFiles(program).get(name);
+    // The allow-list is the authorisation: `name` is only ever a basename, and
+    // it has to be one this program's manifest actually lists. The containment
+    // check below is a second layer against a manifest that itself points
+    // somewhere silly.
+    if (!filePath || !isInside(CATALOG_DIR, filePath)) return refuse();
+
+    let size;
+    try {
+      size = fs.statSync(filePath).size;
+    } catch {
+      // A signed link to a master that is not on this box. The signature was
+      // good, so this is an operator problem — a manifest deployed ahead of its
+      // audio — and it should read as one rather than as a bad link.
+      console.error('catalog: signed link to a missing master:', filePath);
+      return sendJson(res, 404, { error: 'unknown file' });
+    }
+    res.writeHead(200, {
+      'Content-Type': MIME[path.extname(name).toLowerCase()] || 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${name}"`,
+      'Content-Length': size,
+      // The URL carries a signature and an expiry, so a shared cache holding it
+      // would serve one customer's link to the next request for it.
+      'Cache-Control': 'private, no-store',
+    });
+    if (req.method === 'HEAD') return res.end();
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', () => res.destroy());
+    res.on('error', () => stream.destroy());
+    return stream.pipe(res);
   }
 
   const filesMatch = url.match(/^\/api\/jobs\/([A-Za-z0-9_-]+)\/files\/([^/?]+)$/);
@@ -2175,6 +2466,43 @@ async function handleRequest(req, res) {
     // reference and an amount, and this endpoint is public — so it answers
     // only what a page needs to show someone their own files.
     const out = { jobId: order.jobId ?? null, expiresAt: null };
+
+    // A catalog order (#59). No job, no status, no wait — the files exist, and
+    // what this endpoint hands back is permission to fetch them.
+    if (order.catalog) {
+      const program = CATALOG.get(order.catalog);
+      // The window runs from the payment. A job order measures from the
+      // terminal status write because that is what the retention sweep
+      // measures; nothing is swept here, so there is no such event, and "30
+      // days from purchase" is what the site actually promises a buyer.
+      const boughtAt = Date.parse(order.claimedAt);
+      const expiresAt = Number.isFinite(boughtAt)
+        ? boughtAt + RETENTION_DAYS * 86400000 : null;
+      out.catalog = order.catalog;
+      out.expiresAt = expiresAt === null ? null : new Date(expiresAt).toISOString();
+      out.tracks = [];
+      // Past the window, or a program that has since been unpublished (a
+      // re-render awaiting a fresh listen), the order still resolves — it is
+      // the customer's receipt — but it carries no links.
+      if (program && expiresAt !== null && Date.now() < expiresAt) {
+        // Minted per request and short-lived, never stored. The durable
+        // capability is this URL, which the customer already holds; a file link
+        // that lasted the whole window would turn one copied URL into a month
+        // of free product.
+        const linkExpiry = Math.min(Date.now() + CATALOG_LINK_TTL_MS, expiresAt);
+        out.goalTitle = program.goalTitle;
+        out.tracks = program.tracks.map((t) => ({
+          n: t.n,
+          title: t.title,
+          phase: t.phase,
+          durationSec: t.durationSec,
+          mp3: signCatalogLink(order.catalog, path.basename(t.mp3), linkExpiry),
+          wav: signCatalogLink(order.catalog, path.basename(t.wav), linkExpiry),
+        }));
+      }
+      return sendJson(res, 200, out);
+    }
+
     if (order.jobId) {
       const st = readJsonSafe(path.join(jobDir(order.jobId), 'status.json'));
       // The retention sweep measures from the terminal status write, so that is
