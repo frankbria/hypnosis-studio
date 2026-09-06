@@ -197,6 +197,17 @@ It writes three files:
 | `catalog-qa-report.json` | yes | the recorded measurements behind that verdict — RMS, decoded lengths, byte counts, silent fraction, per track |
 | `renders/catalog/<goal>__<voiceset>/*.{wav,mp3}` | no | the masters themselves; `.gitignore` excludes all audio |
 
+The manifest is committed and the masters are not, so the two can separate: a
+rebuilt box, a fresh environment or a second server has `catalog.json` saying
+ten programs are publishable and no audio to back it. `server.js` checks at boot
+that every file a program would hand out is actually present and non-empty, and
+does not index the ones that are not — so a box without masters logs which
+programs it demoted and quietly renders those on demand instead. That costs ~$2
+and twenty minutes per customer, which is the old behaviour and works; selling a
+signed link to a file that is not there does not. If you see `catalog: N of 10
+program(s) publishable` with N below what you expect, that is the check, and the
+masters under `renders/catalog/` are what is missing.
+
 **Resumable, and cheap to resume.** A combination whose `manifest.json` already
 exists is skipped. `render_program.run()` writes that manifest only after all
 four tracks pass QA, so a combination that *failed* has no manifest and is

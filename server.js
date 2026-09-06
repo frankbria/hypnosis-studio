@@ -219,6 +219,20 @@ const DELIVERY_SIGNING_SECRET = process.env.DELIVERY_SIGNING_SECRET || '';
  * passed AND the owner recorded a listen (engine/catalog.py); a program missing
  * either is one the studio has not confirmed it can deliver, and this is the
  * exact moment that distinction is supposed to bite.
+ *
+ * `publishable` is a fact about the *repo*, though, not about this box.
+ * `catalog.json` is committed and rides every deploy; the masters are
+ * gitignored and live only under CATALOG_DIR. A rebuilt box, a fresh
+ * environment, a second server or any cleanup of renders/ separates the two,
+ * and nothing downstream would notice: checkout skips the capacity gate for a
+ * catalog sale, the webhook fulfils without starting a render, and the customer
+ * discovers the gap at the download. So the masters are checked here, once, and
+ * a program whose audio is not on this box is not indexed.
+ *
+ * Not indexing it is deliberately the whole fix. `catalogProgram()` returning
+ * null already means "render this one", so a box without masters quietly falls
+ * back to rendering per customer: slower and ~$2, but it delivers. Refusing to
+ * boot would trade a degradation that works for an outage that does not.
  */
 const CATALOG = (() => {
   const index = new Map();
@@ -228,10 +242,34 @@ const CATALOG = (() => {
       '- every purchase renders on demand');
     return index;
   }
+  const demoted = [];
   for (const program of manifest.programs) {
     if (!program || !program.publishable) continue;
     if (!Array.isArray(program.tracks) || program.tracks.length === 0) continue;
-    index.set(`${program.goal}__${program.voiceSet}`, program);
+    const key = `${program.goal}__${program.voiceSet}`;
+    // Every file the program would be allowed to hand out, so a program missing
+    // one track of four is demoted whole — three quarters of a program is not a
+    // deliverable, and selling it would be the same broken promise.
+    const missing = [...catalogFiles(program).values()].filter((f) => {
+      // Size, not just existence: a truncated or zero-byte master survives a
+      // half-finished copy and would otherwise index as sound.
+      try { const st = fs.statSync(f); return !st.isFile() || st.size === 0; }
+      catch { return true; }
+    });
+    if (missing.length) {
+      demoted.push(`${key} (${missing.length} file(s), e.g. ${missing[0]})`);
+      continue;
+    }
+    index.set(key, program);
+  }
+  if (demoted.length) {
+    console.error(
+      `catalog: ${demoted.length} program(s) are marked publishable but their `
+      + `masters are not on this box:\n  ${demoted.join('\n  ')}\n`
+      + 'Those will render on demand instead of selling as static files. If '
+      + 'that is not intended, the masters under ' + CATALOG_DIR + ' are '
+      + 'missing — they are gitignored, so a deploy does not carry them.',
+    );
   }
   console.log('catalog:', index.size, 'of', manifest.programs.length,
     'program(s) publishable —', index.size ? 'those sell as static files'
