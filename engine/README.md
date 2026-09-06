@@ -309,9 +309,16 @@ differentiator before buying it.
 `cut_samples.py` cuts a ~2-minute mixed excerpt of each publishable program.
 No TTS, no spend — it is ffmpeg over masters that already exist.
 
+**The deploy runs this for you** (`deploy/cut-samples.sh`, between the idle gate
+and the restart), so a pre-render does not leave a step to remember. It is a
+no-op once every publishable program has a sample, and it can never fail the
+deploy — a program without one falls back to the solo voice clips. Run it by
+hand when you want the samples before the next push:
+
 ```bash
 cd /srv/hypnosis-studio/engine
 venv/bin/python cut_samples.py --catalog-dir /srv/hypnosis-studio/renders/catalog
+sudo systemctl restart hypnosis-studio   # they are indexed at boot
 ```
 
 Each sample is ~60 s from **Track I** crossfaded into ~45 s from **Track III**,
@@ -329,11 +336,17 @@ The windows are located from the scripts, not guessed as a fraction of the file:
 scaled onto the master's measured length from `catalog.json`. A rewritten script
 moves the window with it.
 
-Requires `ffmpeg` and `ffprobe` on PATH. Useful flags: `--dry-run` reports the
+Requires `ffmpeg` and `ffprobe` on PATH — the only thing in this repo that needs
+the ffmpeg CLI, since the render pipeline uses PyAV and soundfile, which bundle
+their own libs. A box without it logs `<program>: ffmpeg is not installed` and
+serves the voice clips. Useful flags: `--dry-run` reports the
 windows for every program and cuts nothing, `--only polymath:male` restricts the
 run, `--force polymath:male` re-cuts one that already exists. A sample whose
-measured length is more than 2 s from its plan is deleted rather than published —
-ffmpeg exits 0 on plenty of things that are not the file that was asked for.
+measured length is more than 2 s from its plan is discarded rather than
+published — ffmpeg exits 0 on plenty of things that are not the file that was
+asked for. The cut goes to a scratch path and is moved into place only after it
+measures right, so a failure never disturbs the sample that is already there:
+a `--force` re-cut that dies halfway leaves the good one standing.
 
 Samples are **not** committed (`.gitignore` excludes all audio) and are served
 unsigned and cacheable from `/api/catalog/<key>/sample.mp3`, which is the
@@ -361,8 +374,8 @@ already wired:
 5. `prerender_catalog.py --outdir ... --only <goal>:male --only <goal>:female`.
 6. Listen: spot-check both, or make one of them the full listen. Append to
    `catalog-approvals.json` and re-run the driver to fold the approval in.
-7. `cut_samples.py --catalog-dir ...` — the new title needs a storefront sample
-   too, and it can only be cut once the program is publishable.
+7. The new title's storefront sample is cut by the next deploy, once the program
+   is publishable. `cut_samples.py --catalog-dir ...` does it sooner.
 8. Commit `catalog.json`, `catalog-qa-report.json` and `catalog-approvals.json`.
 
 ## Pads

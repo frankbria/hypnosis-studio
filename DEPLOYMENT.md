@@ -129,12 +129,20 @@ confirmed and then redirected. See the domain-move section above.
 - Logs: `ssh prod 'journalctl -u hypnosis-studio -f'`
 - Restart: `ssh prod 'systemctl restart hypnosis-studio'`
 - Always `nginx -t` before `systemctl reload nginx`
-- After a catalog pre-render, cut the storefront samples too:
-  `cd /srv/hypnosis-studio/engine && venv/bin/python cut_samples.py --catalog-dir ../renders/catalog`
-  (#60 — ffmpeg over the existing masters, no TTS spend; needs `ffmpeg`/`ffprobe`
-  on PATH, and a restart to pick them up, since they are indexed at boot).
-  The boot log says `samples: N of M publishable program(s) have a sample`; if N
-  is 0 the storefront falls back to the solo voice clips.
+- Storefront samples (#60) are cut **automatically by the deploy** —
+  `deploy/cut-samples.sh`, between the idle gate and the restart. ffmpeg over
+  masters that already exist: no TTS spend, and a no-op once every publishable
+  program has one. It can never fail the deploy; a program without a sample
+  falls back to the solo voice clips.
+  - **Prerequisite: `ffmpeg` and `ffprobe` on PATH.** This is the only thing in
+    the repo that needs the ffmpeg CLI — the render pipeline uses PyAV and
+    soundfile, which bundle their own libs. Without it the deploy logs
+    `polymath__male: ffmpeg is not installed` and carries on.
+  - To cut them without waiting for a deploy:
+    `cd /srv/hypnosis-studio/engine && venv/bin/python cut_samples.py --catalog-dir ../renders/catalog`,
+    then restart — they are indexed at boot.
+  - The boot log says `samples: N of M publishable program(s) have a sample`;
+    if N is 0 the storefront is on the voice clips.
 
 ## Two-door site architecture (2026-07-23)
 
