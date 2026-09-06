@@ -44,8 +44,25 @@ jobs:
             # service, destroying a render the customer paid for. Fails the
             # deploy rather than restarting if one is still running (#4).
             bash /srv/hypnosis-studio/deploy/wait-for-idle.sh http://127.0.0.1:4100/api/health
+
+            # Cut any storefront sample this box is missing (#60). ffmpeg over
+            # masters that already exist: no TTS, no key, no spend, and a no-op
+            # once every publishable program has one — so it is safe on every
+            # deploy rather than a step someone has to remember after a
+            # pre-render.
+            #
+            # After the idle gate, so ffmpeg never competes with a live paid
+            # render. Before the restart, because server.js indexes the samples
+            # at boot. The script cannot fail the deploy by design; see the
+            # header there and test/deploy.cut-samples.test.js.
+            bash /srv/hypnosis-studio/deploy/cut-samples.sh \
+              /srv/hypnosis-studio/engine /srv/hypnosis-studio/renders/catalog
+
             sudo /bin/systemctl restart hypnosis-studio
             sleep 2
             sudo /bin/systemctl is-active hypnosis-studio
             curl -sf -o /dev/null -w "smoke: HTTP %{http_code}\n" http://127.0.0.1:4100/
             curl -sf http://127.0.0.1:4100/api/health
+            # Safe to gate on: the route answers 200 {"samples":[]} even when
+            # nothing has been cut, so this fails only if it is actually broken.
+            curl -sf http://127.0.0.1:4100/api/samples
