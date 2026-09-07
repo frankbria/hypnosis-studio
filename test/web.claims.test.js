@@ -1950,11 +1950,15 @@ test('program counts are derived, not written down', () => {
   // places that state one must take it from the array the cards render from.
   const src = codeOnly(LANDING);
 
-  assert.match(src, /const howItWorks = \(programCount: number\)/,
-    'the steps no longer take the catalog size as a parameter');
+  // Anchored on the count parameter, not on the arity: #137 added a second
+  // argument (whether this box delivers instantly). What this test is for is
+  // that the NUMBER is derived, so it still demands `programCount` first and
+  // still demands `goals.length` as the argument that fills it.
+  assert.match(src, /const howItWorks = \(programCount: number[,)]/,
+    'the steps no longer take the catalog size as their first parameter');
   assert.match(src, /\$\{programCount\} programs/,
     'step one states a program count that is not derived');
-  assert.match(src, /howItWorks\(goals\.length\)/,
+  assert.match(src, /howItWorks\(goals\.length[,)]/,
     'the steps are not rendered from the same list the cards use');
   assert.match(src, /\{goals\.length\} programs/,
     'the goal gallery heading states a count that is not derived');
@@ -2135,4 +2139,177 @@ test('the "See the tiers" link resolves on a door with no pricing section', () =
   const healing = src.slice(src.indexOf('function HealingLanding'));
   assert.ok(!/id="pricing"/.test(healing),
     'HealingLanding now has a pricing section — simplify the tier link');
+});
+
+// ---------------------------------------------------------------------------
+// The catalog delivery screen (#137, the half #59 left in the server)
+// ---------------------------------------------------------------------------
+//
+// #59 taught the server to fulfil a catalog purchase without a render: the order
+// comes back with `catalog`, `tracks` and signed links, and no `jobId`. The
+// browser was never taught the same thing. OrderPage branched on `!order.jobId`
+// alone, so the one screen a paying catalog customer sees told them the studio
+// could not start their render and a refund was on its way — with their download
+// links sitting unread in the same response.
+//
+// It is dormant only because nothing is publishable yet. It goes live on the
+// same pre-render run that makes the instant-delivery copy true, which is why it
+// is fixed here and not left for the day someone notices.
+
+const ORDER = () => fs.readFileSync(path.join(WEB, 'sections', 'OrderPage.tsx'), 'utf8');
+
+test('a catalog order is not told that its render failed', () => {
+  const src = codeOnly(ORDER());
+  const at = src.indexOf('!order.jobId');
+  assert.ok(at > 0, 'OrderPage no longer tests for a missing job — re-check this guard');
+  // The whole bug in one character. A catalog order has no jobId either, so the
+  // failure screen has to exclude it explicitly.
+  assert.match(src.slice(at, at + 60), /!order\.jobId && !order\.catalog/,
+    'the "no program yet" screen still catches catalog orders, which are '
+    + 'fulfilled purchases — it tells a paying customer their order failed');
+});
+
+test('a catalog order reaches the delivery screen', () => {
+  const src = codeOnly(ORDER());
+  assert.match(src, /order\.catalog/,
+    'OrderPage never looks at the catalog key the server sends');
+  assert.match(src, /delivered=\{/,
+    'OrderPage does not hand the delivered tracks to the delivery screen');
+});
+
+test('the catalog order does not grow a second delivery screen', () => {
+  // The reason #27 moved the delivery screen out of the wizard in the first
+  // place: two copies is how one of them ends up missing the field you just
+  // added (#65, #66). A catalog order renders the same screen a job order does.
+  const src = codeOnly(ORDER());
+  assert.ok(!/<audio/.test(src),
+    'OrderPage plays audio itself instead of reusing the delivery screen');
+  assert.ok(!/download=/.test(src),
+    'OrderPage mints its own download links instead of reusing the delivery screen');
+});
+
+test('a signed catalog link is used exactly as the server minted it', () => {
+  // The server signs `/api/catalog/<key>/files/<name>?exp=..&sig=..`. Wrapping
+  // that in the job file route, or re-encoding it, produces a link that 404s or
+  // fails its signature check — for someone who has paid.
+  const src = codeOnly(PROGRAM());
+  assert.match(src, /signedFiles/,
+    'the delivery screen has no notion of pre-signed files, so it would wrap a '
+    + 'catalog link in /api/jobs/ and break it');
+});
+
+test('a catalog order past its window is not told a render completed', () => {
+  // Every catalog order reaches this state — it is what 30-day retention means,
+  // not an edge case. The "we can't list the files" screen blames a render that
+  // never happened.
+  const src = codeOnly(PROGRAM());
+  assert.match(src, /kind: 'expired'/,
+    'there is no screen for a catalog order whose access window has closed');
+});
+
+test('the delivery screen still polls for a real render', () => {
+  // The catalog path must not turn the job path into a no-op: a $129
+  // personalized order has no tracks up front and still has to watch a render.
+  const src = codeOnly(PROGRAM());
+  assert.match(src, /\/api\/jobs\//,
+    'the delivery screen no longer fetches job status');
+});
+
+// ---------------------------------------------------------------------------
+// The instant-delivery claim (#137)
+// ---------------------------------------------------------------------------
+//
+// #61 was opened because the site promised a delivery it could not make, and the
+// customer found out after paying. #59 built the path that makes "downloads in
+// seconds" true — but only on a box that has the masters, which is a fact about
+// the box and not about this repo (catalog.json rides every deploy; the audio is
+// gitignored and does not, which is #139).
+//
+// So the claim is allowed on the page only when the server says the box can
+// serve it. These tests are the mechanical version of remembering that.
+
+/** Phrases that promise delivery without a wait. */
+const INSTANT_CLAIM =
+  /downloads? in seconds|the moment you pay|instantly|no waiting|right away/i;
+
+test('no page hard-codes the instant-delivery claim', () => {
+  // The failure this prevents is one careless copy edit: someone pastes
+  // "downloads in seconds" onto the hero because it reads better, and the site
+  // is lying again on every box whose pre-render has not been run.
+  const offenders = [];
+  for (const file of sourceFiles()) {
+    const rel = path.relative(WEB, file);
+    // The claim has exactly two homes: the copy constants (DELIVERY_PROMISE),
+    // and the refund policy, which states both cases unconditionally.
+    if (rel === path.join('lib', 'data.ts') || rel === path.join('lib', 'legal.ts')) continue;
+    const m = codeOnly(fs.readFileSync(file, 'utf8')).match(INSTANT_CLAIM);
+    if (m) offenders.push(`${rel}: "${m[0]}"`);
+  }
+  assert.deepStrictEqual(offenders, [],
+    'an instant-delivery claim is written directly into a page instead of '
+    + 'coming from DELIVERY_PROMISE, so nothing gates it on the box being able '
+    + 'to deliver');
+});
+
+test('the delivery promise carries both worlds and defaults to the wait', () => {
+  const src = DATA;
+  assert.match(src, /export const DELIVERY_PROMISE/,
+    'the delivery copy no longer lives in one place');
+  for (const where of ['hero', 'step', 'tier']) {
+    const at = src.indexOf(`${where}: {`);
+    assert.ok(at > 0, `DELIVERY_PROMISE has no "${where}" copy`);
+    const region = src.slice(at, at + 300);
+    assert.match(region, /wait:/, `DELIVERY_PROMISE.${where} has no wait copy to fall back to`);
+    assert.match(region, /instant:/, `DELIVERY_PROMISE.${where} has no instant copy`);
+  }
+  // The wait copy is the one that must survive: it is what shows before the
+  // server answers, and on every box that cannot deliver instantly.
+  assert.match(src, /twenty minutes/,
+    'the honest wait copy is gone, so a box that renders has nothing true to say');
+});
+
+test('every instant claim on the storefront is gated on the served fact', () => {
+  for (const name of ['Landing.tsx', 'CatalogHome.tsx']) {
+    const src = codeOnly(fs.readFileSync(path.join(WEB, 'sections', name), 'utf8'));
+    const uses = [...src.matchAll(/DELIVERY_PROMISE\.\w+/g)];
+    assert.ok(uses.length > 0, `${name} states a delivery time that is not the shared one`);
+    for (const u of uses) {
+      const region = src.slice(u.index, u.index + 120);
+      assert.match(region, /instantDelivery \? 'instant' : 'wait'/,
+        `${name} picks delivery copy without asking whether this box delivers`);
+    }
+    assert.match(src, /useProgramSamples\(\)/,
+      `${name} never asks the server what this box can do`);
+  }
+});
+
+test('the instant claim is a served fact, never a build-time one', () => {
+  // The whole design decision, pinned. `engine/catalog.json` is committed, so
+  // `programs.some(p => p.publishable)` is right there and reads as the obvious
+  // simplification — and it is wrong exactly when the masters did not ride the
+  // deploy (#139), which puts the false claim back on the hero.
+  const hook = codeOnly(fs.readFileSync(
+    path.join(WEB, 'hooks', 'use-program-samples.ts'), 'utf8'));
+  assert.match(hook, /instantDelivery/, 'the hook no longer reports instant delivery');
+  assert.match(hook, /fetch\('\/api\/samples'/, 'the hook no longer asks the server');
+
+  assert.ok(!/publishable/.test(codeOnly(DATA)),
+    'data.ts decides instant delivery from the committed manifest. That is true '
+    + 'of the repo, not of the serving box — a deploy whose masters never '
+    + 'arrived would claim instant delivery and render every purchase (#139)');
+});
+
+test('the refund policy covers a purchase that never rendered', () => {
+  // RENDER_FAILURE_GUARANTEE is scoped to a render (#17). A catalog purchase
+  // cannot fail that way, so a policy naming only the render reads, to the
+  // customer who bought the other way, as one that does not cover them.
+  assert.match(LEGAL_TS(), /export const CATALOG_DELIVERY_GUARANTEE/,
+    'the refund policy has no case for a purchase delivered without a render');
+  const page = codeOnly(LEGAL_TSX());
+  assert.match(page, /\{CATALOG_DELIVERY_GUARANTEE\}/,
+    'the catalog case is written but never rendered on a policy page');
+  // Both pages that state the render wait must state it as conditional now.
+  assert.ok(!/Rendering takes fifteen to twenty minutes/.test(page),
+    'a policy page still says rendering takes fifteen to twenty minutes as an '
+    + 'unconditional fact, which is wrong for a catalog purchase');
 });

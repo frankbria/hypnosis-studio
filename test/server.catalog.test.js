@@ -325,6 +325,19 @@ test('the order returns all four tracks with real durations', async () => {
   } finally { stop(srv); }
 });
 
+test('the order names the voice set, so the delivery screen can say it', async () => {
+  // The delivery screen is shared with the render path (#27), and that path
+  // gets `voiceSet` from the job status. Without it here, a catalog buyer drops
+  // to the generic sentence and the two delivery screens quietly disagree about
+  // how much they know (#137).
+  const srv = await startServer();
+  try {
+    await pay(srv);
+    const order = await orderTracks(srv);
+    assert.strictEqual(order.voiceSet, 'male');
+  } finally { stop(srv); }
+});
+
 test('a signed link actually downloads the right master', async () => {
   const srv = await startServer();
   try {

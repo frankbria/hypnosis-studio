@@ -6,6 +6,7 @@ import {
   CARD_DETAILS_NOTICE,
   NO_ACCOUNT_NOTICE,
   NO_TRACKING_NOTICE,
+  CATALOG_DELIVERY_GUARANTEE,
   RENDER_FAILURE_GUARANTEE,
   RETENTION_WINDOW,
   SUPPORT_EMAIL,
@@ -99,14 +100,15 @@ export function TermsPage({ onHome }: { onHome: () => void }) {
 
       <Section heading="If a render fails">
         <p>
-          Rendering takes fifteen to twenty minutes and occasionally fails. If it
-          does, you will see it on the page — the site never reports a program as
-          ready unless it is.
+          When a program is rendered for you, it takes fifteen to twenty minutes
+          and occasionally fails. If it does, you will see it on the page — the
+          site never reports a program as ready unless it is.
         </p>
         {/* This section described the failure and stopped there, which left the
             terms silent on the money. The guarantee has one home; the terms
             point at it rather than restating it in words that could drift. */}
         <p className="text-white/75">{RENDER_FAILURE_GUARANTEE}</p>
+        <p>{CATALOG_DELIVERY_GUARANTEE}</p>
       </Section>
 
       <Section heading="This is not medical or psychological care">
@@ -133,11 +135,12 @@ export function RefundPage({ onHome }: { onHome: () => void }) {
       <Section heading="If your render fails">
         <p className="text-white/75">{RENDER_FAILURE_GUARANTEE}</p>
         <p>
-          Rendering takes fifteen to twenty minutes and occasionally fails. When it
-          does, the failure is ours — you chose a program, paid, and waited for
-          nothing. Making you write and ask for the refund would add our problem to
-          your day.
+          When a program is rendered for you, it takes fifteen to twenty minutes
+          and occasionally fails. When it does, the failure is ours — you chose a
+          program, paid, and waited for nothing. Making you write and ask for the
+          refund would add our problem to your day.
         </p>
+        <p>{CATALOG_DELIVERY_GUARANTEE}</p>
         <p>
           We do not automatically try again. The studio already retries the parts
           that fail for temporary reasons, so a render that reaches you as failed

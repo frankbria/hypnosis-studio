@@ -2454,6 +2454,20 @@ async function handleRequest(req, res) {
   if (/^\/api\/samples(?:\?.*)?$/.test(url)
       && (req.method === 'GET' || req.method === 'HEAD')) {
     return sendJson(res, 200, {
+      // Whether a purchase downloads or renders (#137). The storefront is static
+      // HTML built from the repo, so it cannot work this out for itself:
+      // catalog.json is committed and rides every deploy, the masters are
+      // gitignored and do not, and CATALOG above is the only thing that has
+      // looked at *this* box. A build-time check would read a deploy whose
+      // masters never arrived as instant and put that claim on the hero — the
+      // #139 gap, wearing the #61 failure.
+      //
+      // Answered here rather than from a route of its own because this is
+      // already the storefront's "what can this box do" call, made on every
+      // page. Deliberately NOT `samples.length > 0`: a sample is an
+      // advertisement, a master is the product, and a box that has masters but
+      // no samples cut still delivers instantly.
+      instantDelivery: CATALOG.size > 0,
       samples: [...SAMPLES.values()].map(({ file, ...rest }) => rest),
     }, { 'Cache-Control': 'public, max-age=300' });
   }
@@ -2651,6 +2665,10 @@ async function handleRequest(req, res) {
         // of free product.
         const linkExpiry = Math.min(Date.now() + CATALOG_LINK_TTL_MS, expiresAt);
         out.goalTitle = program.goalTitle;
+        // So the delivery screen can name the voices, exactly as it does for a
+        // render (#137). Without it a catalog buyer gets the generic sentence
+        // and the two delivery screens quietly say different things.
+        out.voiceSet = program.voiceSet;
         out.tracks = program.tracks.map((t) => ({
           n: t.n,
           title: t.title,

@@ -15,11 +15,23 @@ import { Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { SUPPORT_EMAIL } from '@/lib/legal'
 import ProgramPage from '@/sections/ProgramPage'
+import type { ReadyTrack } from '@/sections/ProgramPage'
 import SiteFooter from '@/components/SiteFooter'
 
 interface Order {
   jobId: string | null
   expiresAt: string | null
+  /**
+   * The catalog program this order bought (#59), or null for a rendered one.
+   *
+   * A catalog purchase is fulfilled at the moment it is paid for: there is no
+   * render, so no `jobId` is ever written. The two must be told apart here,
+   * because "no job" is a *success* for one of them and a failure for the other.
+   */
+  catalog: string | null
+  /** Already signed and ready to download, for a catalog order. Empty past the window. */
+  tracks: ReadyTrack[]
+  voiceSet: string | null
 }
 
 type State =
@@ -91,7 +103,21 @@ export default function OrderPage({
           const res = await fetch(`/api/orders/${encodeURIComponent(token)}`)
           if (cancelled) return
           if (res.ok) {
-            setState({ kind: 'found', order: (await res.json()) as Order })
+            // Normalised rather than cast straight through. A job order carries
+            // no `catalog`/`tracks` at all, and the catalog branch below reads
+            // them — `?? null` here keeps that decision in one place instead of
+            // spreading optional chaining through the render.
+            const body = (await res.json()) as Partial<Order>
+            setState({
+              kind: 'found',
+              order: {
+                jobId: body.jobId ?? null,
+                expiresAt: body.expiresAt ?? null,
+                catalog: body.catalog ?? null,
+                tracks: body.tracks ?? [],
+                voiceSet: body.voiceSet ?? null,
+              },
+            })
             return
           }
           if (res.status !== 404) {
@@ -189,9 +215,29 @@ export default function OrderPage({
 
   const { order } = state
 
+  // A catalog purchase (#59): no job, and none was ever needed. The files
+  // already exist and the order carries signed links to them, so this is the
+  // delivery screen — the same one a finished render gets.
+  //
+  // This branch has to come first. Before #137 there was only the test below,
+  // and a catalog order fell into it: the one screen a paying customer sees told
+  // them the studio could not start their render and a refund was on its way,
+  // with their downloads sitting unread in the same response.
+  if (order.catalog) {
+    return (
+      <ProgramPage
+        jobId={null}
+        delivered={{ tracks: order.tracks, voiceSet: order.voiceSet }}
+        expiresAt={order.expiresAt}
+        onHome={onHome}
+        onNavigate={onNavigate}
+      />
+    )
+  }
+
   // Paid, but nothing was ever rendered — a studio that refused at the time
   // (#26 refunds these, and says so).
-  if (!order.jobId) {
+  if (!order.jobId && !order.catalog) {
     return (
       <Shell onHome={onHome} onNavigate={onNavigate}>
         <div className="mx-auto max-w-md py-10 text-center">

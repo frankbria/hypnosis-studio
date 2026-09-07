@@ -27,6 +27,7 @@ import { useAudioPreview } from '@/hooks/use-audio-preview'
 import { useProgramSamples } from '@/hooks/use-program-samples'
 import type { ProgramSample } from '@/hooks/use-program-samples'
 import {
+  DELIVERY_PROMISE,
   DISCLAIMER,
   GOALS,
   HEALING_NONMEDICAL,
@@ -127,7 +128,7 @@ export default function CatalogHome({
   onNavigate: (path: string) => void
   onHome: () => void
 }) {
-  const programSamples = useProgramSamples()
+  const { samples: programSamples, instantDelivery } = useProgramSamples()
   // Warm the solo voice clips, and ONLY those.
   //
   // #81 warms previews because an unwarmed press costs a round trip and reads
@@ -195,8 +196,8 @@ export default function CatalogHome({
           <p className="mx-auto mt-6 max-w-xl text-base leading-relaxed text-white/55 md:text-lg">
             Written for a single goal, revised, then locked. Two AI voices render
             from that one script and land in exact time with each other: a
-            narrator to follow, a whisper underneath. Ready in about twenty
-            minutes.
+            narrator to follow, a whisper underneath.{' '}
+            {DELIVERY_PROMISE.hero[instantDelivery ? 'instant' : 'wait']}
           </p>
         </div>
       </section>
@@ -342,7 +343,13 @@ export default function CatalogHome({
                     <span className="text-sm text-white/40">{tier.cadence}</span>
                   </p>
                   <ul className="mt-7 flex-1 space-y-3">
-                    {tier.features.map((feature) => (
+                    {[
+                      ...tier.features,
+                      // Last, where the hard-coded delivery line used to sit.
+                      ...(tier.delivery
+                        ? [tier.delivery[instantDelivery ? 'instant' : 'wait']]
+                        : []),
+                    ].map((feature) => (
                       <li
                         key={feature}
                         className="flex items-start gap-2.5 text-sm text-white/60"

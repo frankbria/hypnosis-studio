@@ -398,6 +398,14 @@ export interface PricingTier {
   highlighted?: boolean
   badge?: string
   /**
+   * The delivery line, which is the one feature that is not a fixed fact (#137).
+   *
+   * Kept apart from `features` because it is the only claim on this card whose
+   * truth depends on what the serving box can do, and a string sitting in an
+   * array is a string somebody edits without knowing that.
+   */
+  delivery?: { wait: string; instant: string }
+  /**
    * Whether this tier can actually be bought today. A tier that is visible but
    * not purchasable must never render a payment CTA — advertising something the
    * studio cannot deliver on the day of sale is the exposure #13 was opened
@@ -425,6 +433,43 @@ export interface PricingTier {
  * queue — the server returns 409 busy), human consultation, or lifetime access
  * (retention is 30 days).
  */
+/**
+ * What the storefront promises about *when* a program arrives (#137).
+ *
+ * Two worlds, one constant, because they are the same claim and must not be
+ * edited apart. A catalog purchase downloads immediately — the masters are
+ * pre-rendered (#58) and served as signed static files (#59). A purchase this
+ * box cannot serve that way still renders per customer and still takes about
+ * twenty minutes.
+ *
+ * WHICH ONE IS TRUE IS NOT DECIDED HERE. It is `instantDelivery` from
+ * `/api/samples`, which is the only thing that has looked at the masters on this
+ * box — see `use-program-samples.ts`. `wait` is what shows until the server says
+ * otherwise, so the failure direction is under-promising.
+ *
+ * #61 was opened because the site claimed a delivery it could not make, and the
+ * customer discovered it *after* paying. The instant claim is a real
+ * differentiator against a render-and-wait competitor, which is exactly why it
+ * must never be the one on screen when it is not true.
+ */
+export const DELIVERY_PROMISE = {
+  /** Closes the hero paragraph, its own sentence. */
+  hero: {
+    wait: 'Ready in about twenty minutes.',
+    instant: 'Yours to download the moment you pay.',
+  },
+  /** Mid-sentence, in the "Download your program" step. */
+  step: {
+    wait: 'ready in about twenty minutes',
+    instant: 'ready to download the moment you pay',
+  },
+  /** The $39 tier's delivery line, which also carries the access window. */
+  tier: {
+    wait: 'Ready in about twenty minutes · 30-day access',
+    instant: 'Downloads in seconds · 30-day access',
+  },
+} as const
+
 export const PRICING: PricingTier[] = [
   {
     id: 'program',
@@ -437,8 +482,8 @@ export const PRICING: PricingTier[] = [
       'Any one catalog title — four tracks',
       'Your choice of voice',
       'WAV + MP3, studio-mastered',
-      'Ready in about twenty minutes · 30-day access',
     ],
+    delivery: DELIVERY_PROMISE.tier,
   },
   {
     id: 'personalized',
