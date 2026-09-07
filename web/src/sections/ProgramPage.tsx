@@ -55,6 +55,17 @@ export interface DeliveredProgram {
   tracks: ReadyTrack[]
   /** Which voice set, so the delivery copy names the voices as it does for a render. */
   voiceSet: string | null
+  /**
+   * Why there are no tracks, when there are none: `'expired'` (the access window
+   * closed, the files are gone) or `'withdrawn'` (the program is temporarily
+   * unpublished, or its masters are not on this box — the files still exist).
+   *
+   * The server decides this, not the page. Working it out here would mean
+   * comparing an expiry against the clock mid-render, which is both impure and a
+   * second implementation of a rule the server already applied to choose whether
+   * to mint the links at all.
+   */
+  unavailable: string | null
 }
 
 interface JobStatus {
@@ -89,12 +100,17 @@ type Screen =
   | { kind: 'failed'; message: string; refunded: boolean }
   | { kind: 'empty' }
   /**
-   * A catalog purchase whose 30-day window has closed, or whose program was
-   * unpublished pending a fresh listen (#137). Distinct from `empty`, which
-   * blames a render — there was never one to blame, and the customer is holding
-   * a valid receipt rather than looking at a broken page.
+   * A catalog purchase with no files to hand over (#137). Distinct from `empty`,
+   * which blames a render — there was never one to blame, and the customer is
+   * holding a valid receipt rather than looking at a broken page.
+   *
+   * `windowClosed` separates the two ways the server sends no links, because
+   * they are not the same news. Past the access window the files are gone for
+   * good; a program unpublished pending a fresh listen still exists and is
+   * coming back. Telling the second customer their files were deleted is a
+   * false statement about their purchase.
    */
-  | { kind: 'expired' }
+  | { kind: 'expired'; windowClosed: boolean }
   | { kind: 'missing' }
   | { kind: 'unreachable' }
 
@@ -179,7 +195,9 @@ export default function ProgramPage({
   const deliveredScreen: Screen | null = !delivered
     ? null
     : delivered.tracks.length === 0
-      ? { kind: 'expired' }
+      // Which of the two it is, as the server reported it. Anything unrecognised
+      // lands on the vaguer message, which is the safe direction.
+      ? { kind: 'expired', windowClosed: delivered.unavailable === 'expired' }
       : {
           kind: 'ready',
           tracks: delivered.tracks,
@@ -372,8 +390,12 @@ export default function ProgramPage({
         <div className="mx-auto max-w-md py-10 text-center">
           <Header
             eyebrow="Your order"
-            title="This order's download window has closed."
-            copy={`Your purchase is still on record — this page is your receipt. The studio keeps files for ${RETENTION_WINDOW} after purchase and then deletes them, so there is nothing left here to download.`}
+            title={screen.windowClosed
+              ? "This order's download window has closed."
+              : 'Your files are not available right now.'}
+            copy={screen.windowClosed
+              ? `Your purchase is still on record — this page is your receipt. The studio keeps files for ${RETENTION_WINDOW} after purchase and then deletes them, so there is nothing left here to download.`
+              : `This program is temporarily unavailable while the studio re-checks it. Nothing is wrong with your purchase — your access runs until ${expiresAt ? plainDate(expiresAt) : `${RETENTION_WINDOW} after you bought it`}, and the files come back before then. If they do not, tell us and we will sort it out.`}
           />
           <p className="mt-8 text-xs leading-relaxed text-white/60">
             <a

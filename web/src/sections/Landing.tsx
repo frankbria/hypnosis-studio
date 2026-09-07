@@ -478,7 +478,13 @@ function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 
                     <span className="text-sm text-white/40">{tier.cadence}</span>
                   </p>
                   <ul className="mt-7 space-y-3">
-                    {tier.features.map((feature) => (
+                    {[
+                      ...tier.features,
+                      // Last, where the hard-coded delivery line used to sit.
+                      ...(tier.delivery
+                        ? [tier.delivery[instantDelivery ? 'instant' : 'wait']]
+                        : []),
+                    ].map((feature) => (
                       <li
                         key={feature}
                         className="flex items-start gap-2.5 text-sm text-white/60"

@@ -338,6 +338,32 @@ test('the order names the voice set, so the delivery screen can say it', async (
   } finally { stop(srv); }
 });
 
+test('the order carries the track ids the delivery screen keys on', async () => {
+  // ReadyTrack.id is required and is the React key. The catalog mapping dropped
+  // it, so every card rendered with key={undefined}.
+  const srv = await startServer();
+  try {
+    await pay(srv);
+    const order = await orderTracks(srv);
+    assert.deepStrictEqual(order.tracks.map((t) => t.id), TRACKS.map((t) => t.id));
+  } finally { stop(srv); }
+});
+
+test('the order says when its links stop working, not just when access ends', async () => {
+  // The two are different by orders of magnitude — an hour against 30 days — and
+  // the page shows the customer the second while holding the first.
+  const srv = await startServer();
+  try {
+    await pay(srv);
+    const order = await orderTracks(srv);
+    const links = Date.parse(order.linksExpireAt);
+    const access = Date.parse(order.expiresAt);
+    assert.ok(Number.isFinite(links), 'the order does not say when its links expire');
+    assert.ok(links <= access, 'a link outlives the access window it belongs to');
+    assert.ok(links > Date.now(), 'the links are already expired when handed over');
+  } finally { stop(srv); }
+});
+
 test('a signed link actually downloads the right master', async () => {
   const srv = await startServer();
   try {
@@ -573,6 +599,28 @@ test('past the window the order still resolves but carries no links', async () =
     assert.strictEqual(res.catalog, 'polymath__male');
     assert.deepStrictEqual(res.tracks, [], 'an expired order still handed out links');
     assert.ok(Date.parse(res.expiresAt) < Date.now());
+    // The page tells the customer why. Past the window the files really are
+    // gone, so "we deleted them" is the true thing to say.
+    assert.strictEqual(res.unavailable, 'expired');
+  } finally { stop(srv); }
+});
+
+test('a program withdrawn after purchase is not reported as deleted', async () => {
+  // Bought inside the window, then the program stopped being servable — masters
+  // pulled from the box, or unpublished pending a fresh listen. The files are
+  // withheld, not deleted, and telling this customer their window closed is a
+  // false statement about a purchase that is still live.
+  const srv = await startServer();
+  try {
+    await pay(srv);
+    const order = srv.readOrder();
+    order.catalog = 'polymath__female';  // never indexed on this box
+    fs.writeFileSync(path.join(srv.sessionsDir(), 'cs_test_1.json'), JSON.stringify(order));
+
+    const res = await orderTracks(srv);
+    assert.deepStrictEqual(res.tracks, []);
+    assert.ok(Date.parse(res.expiresAt) > Date.now(), 'the access window has not closed');
+    assert.strictEqual(res.unavailable, 'withdrawn');
   } finally { stop(srv); }
 });
 

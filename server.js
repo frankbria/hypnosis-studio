@@ -306,6 +306,28 @@ if (CATALOG.size > 0 && !DELIVERY_SIGNING_SECRET) {
   process.exit(1);
 }
 
+/**
+ * Whether EVERY purchase this storefront offers is served from the catalog (#137).
+ *
+ * Not `CATALOG.size > 0`. The instant-delivery claim sits above the whole goal
+ * grid, so it is a promise about any purchase a visitor could make — and a
+ * partial catalog is a fully supported state here: the index above demotes what
+ * it cannot serve and those goals render on demand. A box holding one program of
+ * ten that advertised instant delivery would take the money, render for twenty
+ * minutes, and break the promise after payment, which is the failure #61 was
+ * opened about and the one this claim exists to avoid.
+ *
+ * Computed once: CATALOG is built at boot and never changes after it.
+ */
+const EVERY_PURCHASE_IS_INSTANT = (() => {
+  for (const goal of VALID_GOALS) {
+    for (const voiceSet of VALID_VOICE_SETS) {
+      if (!CATALOG.has(`${goal}__${voiceSet}`)) return false;
+    }
+  }
+  return true;
+})();
+
 /** The publishable catalog program for a purchase, or null to render it. */
 function catalogProgram(goal, voiceSet) {
   return CATALOG.get(`${goal}__${voiceSet}`) || null;
@@ -2466,10 +2488,17 @@ async function handleRequest(req, res) {
       // already the storefront's "what can this box do" call, made on every
       // page. Deliberately NOT `samples.length > 0`: a sample is an
       // advertisement, a master is the product, and a box that has masters but
-      // no samples cut still delivers instantly.
-      instantDelivery: CATALOG.size > 0,
+      // no samples cut still delivers instantly. And not `CATALOG.size > 0`
+      // either — see EVERY_PURCHASE_IS_INSTANT.
+      instantDelivery: EVERY_PURCHASE_IS_INSTANT,
       samples: [...SAMPLES.values()].map(({ file, ...rest }) => rest),
-    }, { 'Cache-Control': 'public, max-age=300' });
+      // Shorter than it was (300s) now that a delivery claim rides along. This
+      // response is `public`, so a shared proxy can hand one visitor's cached
+      // `instantDelivery: true` to another after the masters have been pulled —
+      // a false claim with nobody's browser to blame. The sample audio itself is
+      // cached separately and for far longer; this is only the listing, so the
+      // shorter window costs nothing worth keeping.
+    }, { 'Cache-Control': 'public, max-age=60' });
   }
 
   const sampleMatch = url.match(SAMPLE_ROUTE);
@@ -2658,19 +2687,34 @@ async function handleRequest(req, res) {
       // Past the window, or a program that has since been unpublished (a
       // re-render awaiting a fresh listen), the order still resolves — it is
       // the customer's receipt — but it carries no links.
-      if (program && expiresAt !== null && Date.now() < expiresAt) {
+      // Why there are no links, when there are none. The page shows the
+      // customer a reason, and "we deleted your files" is a false thing to tell
+      // someone whose window is still open and whose program is merely being
+      // re-checked. Only this side can tell the two apart.
+      const withinWindow = expiresAt !== null && Date.now() < expiresAt;
+      out.unavailable = withinWindow ? (program ? null : 'withdrawn') : 'expired';
+      if (program && withinWindow) {
         // Minted per request and short-lived, never stored. The durable
         // capability is this URL, which the customer already holds; a file link
         // that lasted the whole window would turn one copied URL into a month
         // of free product.
         const linkExpiry = Math.min(Date.now() + CATALOG_LINK_TTL_MS, expiresAt);
+        // When these particular links stop working, so the page can ask for
+        // fresh ones before they do rather than guessing at the TTL. The
+        // customer's access (`expiresAt`) is 30 days; a signed link is minutes
+        // to an hour, and the page promises the former.
+        out.linksExpireAt = new Date(linkExpiry).toISOString();
         out.goalTitle = program.goalTitle;
         // So the delivery screen can name the voices, exactly as it does for a
         // render (#137). Without it a catalog buyer gets the generic sentence
         // and the two delivery screens quietly say different things.
         out.voiceSet = program.voiceSet;
+        // `id` is the React key on the delivery screen and is declared required
+        // on ReadyTrack. Dropping it rendered all four catalog cards with an
+        // undefined key.
         out.tracks = program.tracks.map((t) => ({
           n: t.n,
+          id: t.id,
           title: t.title,
           phase: t.phase,
           durationSec: t.durationSec,

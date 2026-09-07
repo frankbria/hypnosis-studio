@@ -2251,6 +2251,37 @@ test('no page hard-codes the instant-delivery claim', () => {
     + 'to deliver');
 });
 
+test('every pricing card still states when the program arrives', () => {
+  // #137 moved the $39 tier's delivery line out of `features` and into
+  // `tier.delivery` so it could branch. Two components render PRICING, and only
+  // one of them was updated — which silently deleted the delivery time AND the
+  // "30-day access" disclosure from the performance door's pricing card, where
+  // the buy button is. A tier that renders `features` must render `delivery`.
+  for (const name of ['Landing.tsx', 'CatalogHome.tsx']) {
+    const src = codeOnly(fs.readFileSync(path.join(WEB, 'sections', name), 'utf8'));
+    if (!/PRICING\.map/.test(src)) continue;
+    assert.match(src, /tier\.delivery/,
+      `${name} renders pricing cards without the delivery line, so the $39 tier `
+      + 'states no delivery time and no access window');
+  }
+});
+
+test('the access window is disclosed wherever a tier is priced', () => {
+  // The retention window used to ride along inside the delivery string. It must
+  // survive the split in both branches, or the card quotes a price with no
+  // mention of how long the files last.
+  const src = DATA;
+  const at = src.indexOf('tier: {');
+  assert.ok(at > 0, 'DELIVERY_PROMISE has no tier copy');
+  const region = src.slice(at, at + 300);
+  for (const branch of ['wait', 'instant']) {
+    const m = region.match(new RegExp(`${branch}: '([^']*)'`));
+    assert.ok(m, `DELIVERY_PROMISE.tier has no ${branch} copy`);
+    assert.match(m[1], /30-day access/,
+      `the ${branch} tier line dropped the access window disclosure`);
+  }
+});
+
 test('the delivery promise carries both worlds and defaults to the wait', () => {
   const src = DATA;
   assert.match(src, /export const DELIVERY_PROMISE/,

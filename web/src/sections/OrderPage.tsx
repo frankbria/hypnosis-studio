@@ -32,6 +32,13 @@ interface Order {
   /** Already signed and ready to download, for a catalog order. Empty past the window. */
   tracks: ReadyTrack[]
   voiceSet: string | null
+  /**
+   * When the signed links in `tracks` stop working — minutes to an hour, and not
+   * to be confused with `expiresAt`, which is the customer's 30-day access.
+   */
+  linksExpireAt: string | null
+  /** Why there are no tracks, when there are none — 'expired' or 'withdrawn'. */
+  unavailable: string | null
 }
 
 type State =
@@ -56,6 +63,29 @@ type State =
  */
 const CONFIRM_WINDOW_MS = 30000
 const CONFIRM_POLL_MS = 1500
+
+/**
+ * The order as the page needs it, whatever the server sent.
+ *
+ * A job order carries no `catalog`/`tracks` at all, and the catalog branch below
+ * reads them — defaulting here keeps that decision in one place instead of
+ * spreading optional chaining through the render. Shared with the refresh below
+ * so the two paths cannot drift.
+ */
+function normalizeOrder(body: Partial<Order>): Order {
+  return {
+    jobId: body.jobId ?? null,
+    expiresAt: body.expiresAt ?? null,
+    catalog: body.catalog ?? null,
+    tracks: body.tracks ?? [],
+    voiceSet: body.voiceSet ?? null,
+    linksExpireAt: body.linksExpireAt ?? null,
+    unavailable: body.unavailable ?? null,
+  }
+}
+
+/** Re-mint this long before the links actually expire. */
+const LINK_REFRESH_MARGIN_MS = 60000
 
 function Shell({
   children,
@@ -103,20 +133,9 @@ export default function OrderPage({
           const res = await fetch(`/api/orders/${encodeURIComponent(token)}`)
           if (cancelled) return
           if (res.ok) {
-            // Normalised rather than cast straight through. A job order carries
-            // no `catalog`/`tracks` at all, and the catalog branch below reads
-            // them — `?? null` here keeps that decision in one place instead of
-            // spreading optional chaining through the render.
-            const body = (await res.json()) as Partial<Order>
             setState({
               kind: 'found',
-              order: {
-                jobId: body.jobId ?? null,
-                expiresAt: body.expiresAt ?? null,
-                catalog: body.catalog ?? null,
-                tracks: body.tracks ?? [],
-                voiceSet: body.voiceSet ?? null,
-              },
+              order: normalizeOrder((await res.json()) as Partial<Order>),
             })
             return
           }
@@ -142,6 +161,61 @@ export default function OrderPage({
       cancelled = true
     }
   }, [token])
+
+  // A catalog order's download links are signed and expire in about an hour
+  // (CATALOG_LINK_TTL_MS), but this page tells the customer their access runs
+  // for 30 days — so a tab left open outlives its own links and every download
+  // button starts refusing, blaming a link the customer did nothing to.
+  //
+  // The order route mints fresh links on every fetch, and the durable capability
+  // is this page's own URL, so asking again when the page comes back to the
+  // foreground is the whole fix. Only for catalog orders: a job order's file
+  // routes carry no signature and never go stale.
+  const catalogKey = state.kind === 'found' ? state.order.catalog : null
+  const linksExpireAt = state.kind === 'found' ? state.order.linksExpireAt : null
+  useEffect(() => {
+    if (!catalogKey) return
+
+    let cancelled = false
+    const refresh = () => {
+      void (async () => {
+        try {
+          const res = await fetch(`/api/orders/${encodeURIComponent(token)}`)
+          if (cancelled || !res.ok) return
+          setState({
+            kind: 'found',
+            order: normalizeOrder((await res.json()) as Partial<Order>),
+          })
+        } catch {
+          // Keep the links we already have — stale ones may still work, and a
+          // failed refresh is not worth replacing a working page with an error.
+        }
+      })()
+    }
+
+    // Scheduled off the server's own expiry rather than a TTL guessed here, so
+    // shortening CATALOG_LINK_TTL_MS on the box cannot leave this page holding
+    // dead links. Each refresh brings a new expiry, which re-runs this effect
+    // and schedules the next one.
+    const due = linksExpireAt ? Date.parse(linksExpireAt) : NaN
+    const wait = Number.isFinite(due)
+      ? Math.max(0, due - Date.now() - LINK_REFRESH_MARGIN_MS)
+      : null
+    const timer = wait === null ? null : setTimeout(refresh, wait)
+
+    // A backgrounded tab throttles timers, so the one case the timer alone
+    // misses is exactly the common one: left open, come back tomorrow.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refresh()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+
+    return () => {
+      cancelled = true
+      if (timer !== null) clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [catalogKey, linksExpireAt, token])
 
   if (state.kind === 'loading' || state.kind === 'confirming') {
     return (
@@ -227,7 +301,11 @@ export default function OrderPage({
     return (
       <ProgramPage
         jobId={null}
-        delivered={{ tracks: order.tracks, voiceSet: order.voiceSet }}
+        delivered={{
+          tracks: order.tracks,
+          voiceSet: order.voiceSet,
+          unavailable: order.unavailable,
+        }}
         expiresAt={order.expiresAt}
         onHome={onHome}
         onNavigate={onNavigate}
