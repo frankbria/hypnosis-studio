@@ -103,9 +103,19 @@ const ONE = {
   key: 'polymath__male', goal: 'polymath', voiceSet: 'male', sample: SAMPLE_BYTES,
 };
 
-async function startServer(programs = [ONE], env = {}) {
+/** Every (goal, voice set) the server will sell — VALID_GOALS x VALID_VOICE_SETS. */
+const SELLABLE_GOALS = ['polymath', 'golden_thread', 'inner_studio', 'open_gate', 'river'];
+const ALL = SELLABLE_GOALS.flatMap((goal) => ['male', 'female'].map((voiceSet) => ({
+  key: `${goal}__${voiceSet}`, goal, voiceSet, sample: SAMPLE_BYTES,
+})));
+
+async function startServer(programs = [ONE], env = {}, beforeStart = null) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'samp-'));
   const { catalogDir, manifestPath } = makeCatalog(dir, programs);
+  // A hook rather than more `programs` options: the cases worth testing are
+  // about the state of the *disk* at boot (a master that did not ride the
+  // deploy), which makeCatalog cannot express because it always writes them.
+  if (beforeStart) beforeStart({ dir, catalogDir, manifestPath });
   const port = await freePort();
   const proc = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
     cwd: ROOT,
@@ -155,6 +165,104 @@ function abandonMidStream(port) {
 // ---------------------------------------------------------------------------
 // What /api/samples advertises
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Whether this box delivers instantly (#137)
+// ---------------------------------------------------------------------------
+//
+// The storefront is static HTML built from the repo, so it cannot know this on
+// its own. `engine/catalog.json` rides every deploy and says what is publishable
+// *in the repo*; whether a purchase is actually instant depends on the masters
+// being on *this box*, which is the gap #139 was opened about. So the claim on
+// the hero has to be answered by the server, and this is the field that answers
+// it.
+//
+// The direction of every one of these tests is the same: it is only ever true
+// when a purchase really would download rather than render. Being wrong the
+// other way is a promise broken after payment, which is what #61 was opened
+// about and what #137 exists to stop recurring.
+
+test('a box that can serve every purchase says delivery is instant', async () => {
+  const srv = await startServer(ALL);
+  try {
+    const res = await request(srv.port, 'GET', '/api/samples');
+    assert.equal(res.json.instantDelivery, true);
+  } finally { stop(srv); }
+});
+
+test('one catalogued program does not make the whole storefront instant', async () => {
+  // The claim sits above the entire goal grid, so it is a promise about ANY
+  // purchase a visitor could make. A partial catalog is a supported state — the
+  // server demotes what it cannot serve and renders those on demand — so a box
+  // holding one program of ten must not advertise instant delivery. Buying any
+  // of the other nine would be a twenty-minute wait after being promised
+  // seconds, which is #61 with extra steps.
+  const srv = await startServer([ONE]);
+  try {
+    const res = await request(srv.port, 'GET', '/api/samples');
+    assert.equal(res.json.instantDelivery, false);
+    // ...while still advertising the sample it does have.
+    assert.deepEqual(res.json.samples.map((x) => x.key), ['polymath__male']);
+  } finally { stop(srv); }
+});
+
+test('one missing voice set of one goal is enough to stop the claim', async () => {
+  // The narrowest possible hole. "Your choice of voice" is on the $39 card, so a
+  // goal catalogued in one voice only is still a purchase that renders.
+  const srv = await startServer(ALL.filter((p) => p.key !== 'river__female'));
+  try {
+    assert.equal((await request(srv.port, 'GET', '/api/samples')).json.instantDelivery,
+      false);
+  } finally { stop(srv); }
+});
+
+test('an empty catalog does not claim instant delivery', async () => {
+  // The state the manifest ships in, and the state every deploy is in until the
+  // pre-render has been run. Every purchase renders on demand.
+  const srv = await startServer([]);
+  try {
+    const res = await request(srv.port, 'GET', '/api/samples');
+    assert.equal(res.json.instantDelivery, false);
+  } finally { stop(srv); }
+});
+
+test('a program that is not publishable does not make delivery instant', async () => {
+  const srv = await startServer(ALL.map((p) => (
+    p.key === 'river__male' ? { ...p, publishable: false } : p)));
+  try {
+    assert.equal((await request(srv.port, 'GET', '/api/samples')).json.instantDelivery,
+      false);
+  } finally { stop(srv); }
+});
+
+test('publishable in the repo is not instant when the masters are not on the box', async () => {
+  // The whole reason this is a served fact and not a build-time one. catalog.json
+  // is committed and rides the deploy; the audio is gitignored and does not. A
+  // build-time check would read this box as instant and put "downloads in
+  // seconds" on the hero of a box that renders every purchase.
+  const srv = await startServer(ALL, {}, ({ catalogDir }) => {
+    for (const f of fs.readdirSync(path.join(catalogDir, 'polymath__male'))) {
+      if (f !== 'sample.mp3') fs.rmSync(path.join(catalogDir, 'polymath__male', f));
+    }
+  });
+  try {
+    assert.equal((await request(srv.port, 'GET', '/api/samples')).json.instantDelivery,
+      false);
+  } finally { stop(srv); }
+});
+
+test('delivery is instant even when nobody has cut a sample yet', async () => {
+  // Guards the lazy version of this field, `samples.length > 0`. Samples are an
+  // advertisement and masters are the product; a box that can deliver but has
+  // not been sampled still delivers, and the two facts must not be conflated.
+  const srv = await startServer(ALL.map((p) => ({ ...p, sample: undefined })));
+  try {
+    const res = await request(srv.port, 'GET', '/api/samples');
+    assert.deepEqual(res.json.samples, []);
+    assert.equal(res.json.instantDelivery, true);
+  } finally { stop(srv); }
+});
+
 
 test('a program with a sample on this box is advertised', async () => {
   const srv = await startServer();
@@ -253,6 +361,12 @@ test('the listing is cacheable, but not for long', async () => {
     const res = await request(srv.port, 'GET', '/api/samples');
     assert.match(res.headers['cache-control'], /public/);
     assert.doesNotMatch(res.headers['cache-control'], /no-store/);
+    // The listing now carries a delivery claim (#137), and the response is
+    // `public` — so this max-age is also how long a shared proxy may keep
+    // serving "instant" after this box stopped being able to deliver.
+    const maxAge = Number(/max-age=(\d+)/.exec(res.headers['cache-control'])[1]);
+    assert.ok(maxAge > 0 && maxAge <= 60,
+      `a stale instant-delivery claim could be served for ${maxAge}s`);
   } finally { stop(srv); }
 });
 

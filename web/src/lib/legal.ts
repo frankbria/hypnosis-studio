@@ -97,6 +97,31 @@ export const RENDER_FAILURE_GUARANTEE =
   'by the same system that noticed the failure.'
 
 /**
+ * The other half of the guarantee, once a purchase can be delivered without a
+ * render (#137).
+ *
+ * `RENDER_FAILURE_GUARANTEE` above is scoped to a render, and #59 built a path
+ * with no render in it: a catalog program is pre-rendered, QA'd and listened to
+ * before it is ever sold, and a purchase hands over files that already exist.
+ * There is no failure of that kind left to refund.
+ *
+ * Written as a second case rather than left to silently not apply. A refund
+ * policy that names one way of buying, on a site with two, reads to the customer
+ * who took the other one as a policy that does not cover them — which is the
+ * opposite of what is true, and the reading that costs the most trust.
+ *
+ * Deliberately not conditional on what the serving box can do. The marketing
+ * claim branches (see DELIVERY_PROMISE) because it is a promise about a specific
+ * purchase; a policy page states both cases always, because a policy that
+ * changes shape depending on when it is loaded is not a policy.
+ */
+export const CATALOG_DELIVERY_GUARANTEE =
+  'Some programs are already made and download the moment you pay. There is no ' +
+  'render to fail, so nothing above applies to them — but if a download link ' +
+  'does not work for you, that is ours to fix. Contact us and we will get you ' +
+  'your files.'
+
+/**
  * What the customer is told at the moment their render fails.
  *
  * The previous copy said "Nothing was charged — please try again." That was true

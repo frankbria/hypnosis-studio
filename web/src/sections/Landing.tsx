@@ -12,6 +12,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
+  DELIVERY_PROMISE,
   DISCLAIMER,
   HOW_MADE,
   PERSONALIZED_POINTER,
@@ -24,6 +25,7 @@ import {
 import type { DoorId, TierId, TrackPhase } from '@/lib/data'
 import GoalCardText from '@/components/GoalCardText'
 import SiteFooter from '@/components/SiteFooter'
+import { useProgramSamples } from '@/hooks/use-program-samples'
 
 interface LandingProps {
   door: DoorId
@@ -52,7 +54,7 @@ interface LandingProps {
  * The old step three was titled "Receive your program", which frames the
  * purchase as waiting for something to be produced. It is a download.
  */
-const howItWorks = (programCount: number) =>
+const howItWorks = (programCount: number, instantDelivery: boolean) =>
   [
     {
       icon: Target,
@@ -67,7 +69,7 @@ const howItWorks = (programCount: number) =>
     {
       icon: PackageCheck,
       title: 'Download your program',
-      body: 'Four tracks mastered over an isochronic entrainment bed, ready in about twenty minutes. WAV + MP3, yours to keep.',
+      body: `Four tracks mastered over an isochronic entrainment bed, ${DELIVERY_PROMISE.step[instantDelivery ? 'instant' : 'wait']}. WAV + MP3, yours to keep.`,
     },
   ] as const
 
@@ -256,6 +258,10 @@ function DisclaimerSection() {
 // ─── Performance door (the original catalog) ─────────────────────────────────
 
 function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 'door'>) {
+  // Whether this box delivers a purchase or renders it (#137). Asked of the
+  // server because only the server has seen the masters — see
+  // `use-program-samples.ts`.
+  const { instantDelivery } = useProgramSamples()
   const goals = goalsForDoor('performance')
   return (
     <div id="top" className="animate-fade-in">
@@ -305,7 +311,8 @@ function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 
             Written for a single goal, revised, then locked — the same four
             tracks every listener gets. Two AI voices render from that one
             script and land in exact time with each other: a narrator to follow,
-            a whisper underneath. Ready in about twenty minutes.
+            a whisper underneath.{' '}
+            {DELIVERY_PROMISE.hero[instantDelivery ? 'instant' : 'wait']}
           </p>
           <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <Button
@@ -337,7 +344,7 @@ function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 
             Getting started.
           </h2>
           <div className="mt-12 grid gap-4 md:grid-cols-3">
-            {howItWorks(goals.length).map((step, i) => (
+            {howItWorks(goals.length, instantDelivery).map((step, i) => (
               <Card
                 key={step.title}
                 className="rounded-2xl border-white/10 bg-white/5 shadow-none"
@@ -471,7 +478,13 @@ function PerformanceLanding({ onStart, onHome, onNavigate }: Omit<LandingProps, 
                     <span className="text-sm text-white/40">{tier.cadence}</span>
                   </p>
                   <ul className="mt-7 space-y-3">
-                    {tier.features.map((feature) => (
+                    {[
+                      ...tier.features,
+                      // Last, where the hard-coded delivery line used to sit.
+                      ...(tier.delivery
+                        ? [tier.delivery[instantDelivery ? 'instant' : 'wait']]
+                        : []),
+                    ].map((feature) => (
                       <li
                         key={feature}
                         className="flex items-start gap-2.5 text-sm text-white/60"

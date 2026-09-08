@@ -19,7 +19,7 @@ import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { GENERATION_STAGES, VOICE_SETS } from '@/lib/data'
 import type { TrackPhase, VoiceSet } from '@/lib/data'
-import { FAILURE_ASSURANCE, SUPPORT_EMAIL } from '@/lib/legal'
+import { FAILURE_ASSURANCE, RETENTION_WINDOW, SUPPORT_EMAIL } from '@/lib/legal'
 import type { RefundState } from '@/lib/legal'
 import SiteFooter from '@/components/SiteFooter'
 import { plainDate } from '@/lib/utils'
@@ -37,6 +37,35 @@ export interface ReadyTrack {
   durationSec: number
   mp3: string
   wav: string
+}
+
+/**
+ * A purchase that was already fulfilled when the page loaded (#59, #137).
+ *
+ * A catalog order has no render and no job to watch: the masters exist, and the
+ * order endpoint hands back the tracks with their links already signed. So this
+ * page shows the delivery screen straight away rather than polling for a status
+ * that will never be written.
+ *
+ * It is the same screen a finished render gets, deliberately. #27 moved the
+ * delivery screen here precisely so there would be one of it — two copies is how
+ * one of them ends up missing the field you just added (#65, #66).
+ */
+export interface DeliveredProgram {
+  tracks: ReadyTrack[]
+  /** Which voice set, so the delivery copy names the voices as it does for a render. */
+  voiceSet: string | null
+  /**
+   * Why there are no tracks, when there are none: `'expired'` (the access window
+   * closed, the files are gone) or `'withdrawn'` (the program is temporarily
+   * unpublished, or its masters are not on this box — the files still exist).
+   *
+   * The server decides this, not the page. Working it out here would mean
+   * comparing an expiry against the clock mid-render, which is both impure and a
+   * second implementation of a rule the server already applied to choose whether
+   * to mint the links at all.
+   */
+  unavailable: string | null
 }
 
 interface JobStatus {
@@ -70,6 +99,18 @@ type Screen =
   | { kind: 'ready'; tracks: ReadyTrack[]; voices: VoiceSet | null }
   | { kind: 'failed'; message: string; refunded: boolean }
   | { kind: 'empty' }
+  /**
+   * A catalog purchase with no files to hand over (#137). Distinct from `empty`,
+   * which blames a render — there was never one to blame, and the customer is
+   * holding a valid receipt rather than looking at a broken page.
+   *
+   * `windowClosed` separates the two ways the server sends no links, because
+   * they are not the same news. Past the access window the files are gone for
+   * good; a program unpublished pending a fresh listen still exists and is
+   * coming back. Telling the second customer their files were deleted is a
+   * false statement about their purchase.
+   */
+  | { kind: 'expired'; windowClosed: boolean }
   | { kind: 'missing' }
   | { kind: 'unreachable' }
 
@@ -122,11 +163,18 @@ function Header({
 
 export default function ProgramPage({
   jobId,
+  delivered = null,
   expiresAt = null,
   onHome,
   onNavigate,
 }: {
-  jobId: string
+  /** Null for a catalog order, which has no render to watch. */
+  jobId: string | null
+  /**
+   * Set when the purchase was already fulfilled — a catalog order (#59). The
+   * page skips polling entirely and its file links are used as minted.
+   */
+  delivered?: DeliveredProgram | null
   /**
    * When these files are deleted, in plain language on the page (#70). Supplied
    * by the order route, which is the only caller that knows it — the job itself
@@ -136,7 +184,28 @@ export default function ProgramPage({
   onHome: () => void
   onNavigate: (path: string) => void
 }) {
-  const [screen, setScreen] = useState<Screen>({ kind: 'loading' })
+  // A delivered purchase is not state to be fetched — it arrived with the props,
+  // so it is derived during render rather than pushed into state by an effect.
+  // Setting it in an effect would also re-fire on every render, because the
+  // caller builds `delivered` fresh each time.
+  //
+  // `tracks` is empty past the access window or while the program is
+  // unpublished; the server sends the order anyway, because it is the
+  // customer's receipt.
+  const deliveredScreen: Screen | null = !delivered
+    ? null
+    : delivered.tracks.length === 0
+      // Which of the two it is, as the server reported it. Anything unrecognised
+      // lands on the vaguer message, which is the safe direction.
+      ? { kind: 'expired', windowClosed: delivered.unavailable === 'expired' }
+      : {
+          kind: 'ready',
+          tracks: delivered.tracks,
+          voices: VOICE_SETS.find((v) => v.id === delivered.voiceSet) ?? null,
+        }
+
+  const [polledScreen, setScreen] = useState<Screen>({ kind: 'loading' })
+  const screen = deliveredScreen ?? polledScreen
   // Highest stage reached, so a status that briefly reports an earlier stage
   // cannot make the list appear to go backwards.
   const highWater = useRef(1)
@@ -145,7 +214,12 @@ export default function ProgramPage({
     let cancelled = false
     highWater.current = 1
 
-    async function run() {
+    // Nothing to watch: the files already exist, and the screen for them is
+    // derived above. Polling `/api/jobs/null` would be a 404 loop on a page
+    // someone reached by paying.
+    if (!jobId) return
+
+    async function run(id: string) {
       // The refund is issued asynchronously from the same transition that marks
       // a job failed, so `refund` lands a beat after `state: 'failed'`. Settling
       // immediately showed the hedged wording to customers whose money was
@@ -161,7 +235,7 @@ export default function ProgramPage({
 
         let res: Response
         try {
-          res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`)
+          res = await fetch(`/api/jobs/${encodeURIComponent(id)}`)
         } catch {
           // The studio is unreachable. Two in a row before saying so, since a
           // single dropped request during a twenty-minute wait is normal.
@@ -237,7 +311,7 @@ export default function ProgramPage({
       }
     }
 
-    run()
+    run(jobId)
     return () => {
       cancelled = true
     }
@@ -295,6 +369,33 @@ export default function ProgramPage({
             eyebrow="Your program"
             title="Your program finished, but we can't list the files."
             copy="The render completed and the audio should exist. Something is wrong with this page's view of it, not with your program — please get in touch and we will send it to you directly."
+          />
+          <p className="mt-8 text-xs leading-relaxed text-white/60">
+            <a
+              href={`mailto:${SUPPORT_EMAIL}`}
+              className="text-violet-300 underline underline-offset-2"
+            >
+              {SUPPORT_EMAIL}
+            </a>{' '}
+            — a person reads it. Quote this page's address.
+          </p>
+        </div>
+      </Frame>
+    )
+  }
+
+  if (screen.kind === 'expired') {
+    return (
+      <Frame onHome={onHome} onNavigate={onNavigate}>
+        <div className="mx-auto max-w-md py-10 text-center">
+          <Header
+            eyebrow="Your order"
+            title={screen.windowClosed
+              ? "This order's download window has closed."
+              : 'Your files are not available right now.'}
+            copy={screen.windowClosed
+              ? `Your purchase is still on record — this page is your receipt. The studio keeps files for ${RETENTION_WINDOW} after purchase and then deletes them, so there is nothing left here to download.`
+              : `This program is temporarily unavailable while the studio re-checks it. Nothing is wrong with your purchase — your access runs until ${expiresAt ? plainDate(expiresAt) : `${RETENTION_WINDOW} after you bought it`}, and the files come back before then. If they do not, tell us and we will sort it out.`}
           />
           <p className="mt-8 text-xs leading-relaxed text-white/60">
             <a
@@ -413,8 +514,30 @@ export default function ProgramPage({
 
   // Ready.
   const { tracks, voices } = screen
+
+  // A catalog order's links are signed and expiring, and arrive complete (#59).
+  // A job order's `mp3`/`wav` are bare filenames served out of the job
+  // directory. Told apart by which prop the caller supplied rather than by the
+  // shape of the string: a signature check that fails because the url was
+  // re-encoded is a download that 404s for someone who has paid, and guessing
+  // from shape is how that happens quietly.
+  const signedFiles = delivered !== null
   const fileUrl = (name: string) =>
-    `/api/jobs/${encodeURIComponent(jobId)}/files/${encodeURIComponent(name)}`
+    signedFiles
+      ? name
+      : `/api/jobs/${encodeURIComponent(jobId ?? '')}/files/${encodeURIComponent(name)}`
+  // `download` names the saved file, so it must be the filename and never the
+  // whole signed url — otherwise the browser saves `polymath_track1.mp3?exp=...`.
+  //
+  // decodeURIComponent throws on a stray `%`, and this runs during the render of
+  // the one screen a paying customer needs. A wrong-looking filename is a far
+  // smaller problem than a blank delivery page, so it falls back rather than
+  // throwing.
+  const fileName = (name: string) => {
+    if (!signedFiles) return name
+    const base = name.split('?')[0].split('/').pop() || name
+    try { return decodeURIComponent(base) } catch { return base }
+  }
 
   return (
     <Frame onHome={onHome} onNavigate={onNavigate}>
@@ -463,7 +586,7 @@ export default function ProgramPage({
                   variant="outline"
                   className="border-white/15 bg-transparent text-white/75 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white"
                 >
-                  <a href={fileUrl(track.mp3)} download={track.mp3}>
+                  <a href={fileUrl(track.mp3)} download={fileName(track.mp3)}>
                     <Download className="size-4" />
                     Download MP3
                   </a>
@@ -474,7 +597,7 @@ export default function ProgramPage({
                   variant="outline"
                   className="border-white/15 bg-transparent text-white/75 hover:border-violet-300/40 hover:bg-violet-300/10 hover:text-white"
                 >
-                  <a href={fileUrl(track.wav)} download={track.wav}>
+                  <a href={fileUrl(track.wav)} download={fileName(track.wav)}>
                     <Download className="size-4" />
                     Download WAV
                   </a>
