@@ -138,6 +138,38 @@ test('a listen recorded on the box and not in the commit fails the deploy', asyn
   assert.match(res.out, /polymath__male/);
 });
 
+test('the same listen spelled two legal ways is not a blocked deploy', async () => {
+  // engine/catalog.py:100-103 documents exactly this: timestamps arrive as `Z`
+  // when hand-typed and `+00:00` from the engine's isoformat(). Same instant,
+  // same listen. Comparing the raw strings blocks a deploy that loses nothing —
+  // fail-closed, so not a data loss, but a 2am block for no reason.
+  const box = write('box17.json', approvals([['polymath__male', '2026-09-07T10:00:00Z']]));
+  const repo = write('repo17.json', approvals([['polymath__male', '2026-09-07T10:00:00+00:00']]));
+  const res = await run(box, repo, 'approvals');
+  assert.strictEqual(res.code, 0, res.out);
+});
+
+test('a full listen downgraded to a spot check is not silently accepted', async () => {
+  // Same program, same instant, different claim. catalog.py treats a full listen
+  // and a spot check as different things — #58's criterion needs one full listen
+  // across the catalog — so losing the full one can take every program with it.
+  const box = write('box18.json',
+    { schemaVersion: 1, listens: [{ program: 'polymath__male', listen: 'full', at: '2026-09-07T10:00:00Z' }] });
+  const repo = write('repo18.json',
+    { schemaVersion: 1, listens: [{ program: 'polymath__male', listen: 'spot', at: '2026-09-07T10:00:00Z' }] });
+  assert.strictEqual((await run(box, repo, 'approvals')).code, 1,
+    'a full listen was replaced by a spot check without complaint');
+});
+
+test('a listen with no timestamp does not report itself as "None"', async () => {
+  const box = write('box19.json',
+    { schemaVersion: 1, listens: [{ program: 'polymath__male', listen: 'full', at: null }] });
+  const repo = write('repo19.json', EMPTY_APPROVALS);
+  const res = await run(box, repo, 'approvals');
+  assert.strictEqual(res.code, 1);
+  assert.ok(!/None/.test(res.out), 'a null timestamp leaked Python\'s None into operator output');
+});
+
 test('approvals already in the commit deploy cleanly', async () => {
   const listens = [['polymath__male', '2026-09-07T10:00:00Z']];
   const box = write('box9.json', approvals(listens));
@@ -157,8 +189,43 @@ test('a corrupt box manifest does not block the deploy', async () => {
   const repo = write('repo10.json', EMPTY_MANIFEST);
   const res = await run(box, repo, 'catalog');
   assert.strictEqual(res.code, 0, res.out);
-  assert.match(res.out, /could not be read|unreadable|parse/i,
+  assert.match(res.out, /not valid JSON|could not be read|unreadable|parse/i,
     'a corrupt file on the box passed without saying so');
+});
+
+test('a box file that exists but cannot be opened fails the deploy', async () => {
+  // The pass for a corrupt file was reasoned about UNPARSEABLE json — server.js
+  // treats that as no manifest, so nothing is serving from it. A permissions
+  // error is a different thing wearing the same exception: the file may be
+  // perfectly good and full of programs, and we simply cannot see it. Guessing
+  // "empty" there loses exactly what this guard exists to protect.
+  const box = write('box14.json', manifest([['polymath__male', true]]));
+  const repo = write('repo14.json', EMPTY_MANIFEST);
+  fs.chmodSync(box, 0o000);
+  try {
+    const res = await run(box, repo, 'catalog');
+    assert.strictEqual(res.code, 1, 'an unreadable box file was assumed to be empty');
+  } finally {
+    fs.chmodSync(box, 0o644);
+  }
+});
+
+test('a schema this guard does not recognise fails the deploy', async () => {
+  // The quiet catastrophe. `schemaVersion` goes to 2 and `programs` is renamed;
+  // both sides then read as unrecognised, the box looks empty, and the deploy
+  // proceeds to replay the original incident — green, with one stdout line.
+  const box = write('box15.json',
+    { schemaVersion: 2, items: [{ key: 'polymath__male', publishable: true }] });
+  const repo = write('repo15.json', { schemaVersion: 2, items: [] });
+  const res = await run(box, repo, 'catalog');
+  assert.strictEqual(res.code, 1, 'an unrecognised schema was waved through');
+  assert.match(res.out, /schema/i, 'the operator is not told the schema is the problem');
+});
+
+test('a box file of the right schema but the wrong shape fails the deploy', async () => {
+  const box = write('box16.json', { schemaVersion: 1, programs: { not: 'a list' } });
+  const repo = write('repo16.json', EMPTY_MANIFEST);
+  assert.strictEqual((await run(box, repo, 'catalog')).code, 1);
 });
 
 test('a corrupt file in the commit fails when the box has state to lose', async () => {
@@ -208,12 +275,55 @@ test('the guard runs before the copy that would overwrite the files', () => {
   // would leave a green, useless check in place.
   const yml = fs.readFileSync(
     path.join(__dirname, '..', '.github', 'workflows', 'deploy.yml'), 'utf8');
-  const guard = yml.indexOf('check-catalog-state.sh');
+  // Anchored on the INVOCATIONS, not on the script name: its first appearance in
+  // the file is the staging step's `source:` list. Matching that would let the
+  // "Refuse" step be moved after the copy with this test still green — the very
+  // hole it exists to close.
   const copy = yml.indexOf('Copy app + engine to server');
-  assert.ok(guard >= 0, 'deploy.yml no longer runs the catalog-state guard');
   assert.ok(copy >= 0, 'deploy.yml no longer has the copy step');
-  assert.ok(guard < copy,
-    'the guard runs after the copy, so it checks a file already overwritten');
+  const calls = [...yml.matchAll(/bash "\$STAGED\/deploy\/check-catalog-state\.sh"/g)];
+  assert.ok(calls.length > 0, 'deploy.yml no longer runs the catalog-state guard');
+  for (const c of calls) {
+    assert.ok(c.index < copy,
+      'a guard invocation runs after the copy, so it checks a file already overwritten');
+  }
+});
+
+test('the guard step aborts on the first failure', () => {
+  // Without `set -e` the first guard's exit 1 is swallowed, the cleanup runs,
+  // the step exits 0, and the deploy proceeds — a green check that guards
+  // nothing. Load-bearing enough to pin.
+  const yml = fs.readFileSync(
+    path.join(__dirname, '..', '.github', 'workflows', 'deploy.yml'), 'utf8');
+  const step = yml.slice(yml.indexOf('Refuse to clobber'), yml.indexOf('Copy app + engine to server'));
+  assert.match(step, /set -e/,
+    'the guard step does not abort on failure, so a refusal would be ignored');
+});
+
+test('the guard is not staged anywhere a co-tenant can write', () => {
+  // DEPLOYMENT.md: "Shared server." A predictable path under world-writable
+  // /tmp lets a co-tenant pre-create the directory and then swap the guard
+  // script between the scp and the ssh step, symlink it at /srv so the staging
+  // copy becomes the clobber, or chmod it so cleanup fails and every later
+  // deploy dies. Under the app root only the deploy user can write.
+  const yml = fs.readFileSync(
+    path.join(__dirname, '..', '.github', 'workflows', 'deploy.yml'), 'utf8');
+  assert.ok(!/target:\s*"\/tmp/.test(yml),
+    'a deploy artefact is staged under world-writable /tmp on a shared host');
+  assert.ok(!/STAGED=\/tmp/.test(yml),
+    'the guard is executed from world-writable /tmp on a shared host');
+  assert.match(yml, /STAGED=\/srv\/hypnosis-studio\//,
+    'the staging path is no longer under the deploy user\'s own tree');
+});
+
+test('the staged copy is cleaned up even when the guard refuses', () => {
+  // Without the trap, `set -e` skips the cleanup on refusal, and the next run
+  // compares against a previous commit's staged files if `source:` ever changes.
+  const yml = fs.readFileSync(
+    path.join(__dirname, '..', '.github', 'workflows', 'deploy.yml'), 'utf8');
+  const step = yml.slice(yml.indexOf('Refuse to clobber'), yml.indexOf('Copy app + engine to server'));
+  assert.match(step, /trap .*rm -rf .*EXIT/,
+    'the staged files are only removed on success');
 });
 
 test('the guard covers the approvals file, not just the manifest', () => {

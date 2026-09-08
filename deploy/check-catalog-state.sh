@@ -3,7 +3,7 @@
 #
 # Usage: check-catalog-state.sh BOX_FILE REPO_FILE {catalog|approvals}
 #   exit 0 — nothing on the box would be lost; deploy may proceed
-#   exit 1 — the copy would destroy state; deploy must stop
+#   exit 1 — the copy would destroy state, or cannot be shown not to; deploy stops
 #
 # `deploy.yml` copies `engine/**` onto the box, and two tracked files in there
 # are written on the box rather than in the repo:
@@ -72,86 +72,151 @@ fi
 # safe exactly when the box's set is a subset of the commit's: equal is a no-op,
 # and a commit carrying more is someone deploying newly committed pre-render
 # output, which is the loop working.
-#
-# For the catalog the identity includes `publishable`, not just the key. Both
-# sides listing a program while only the box's copy is publishable is the
-# subtle, worse case — it means the listen lives on the box alone, and comparing
-# keys or counts would wave it through.
-"$PYTHON" - "$BOX_FILE" "$REPO_FILE" "$KIND" <<'PY'
+"$PYTHON" - "$BOX_FILE" "$REPO_FILE" "$KIND" <<'PYEOF'
+import datetime
 import json
 import sys
 
 box_path, repo_path, kind = sys.argv[1], sys.argv[2], sys.argv[3]
 
+SCHEMA_VERSION = 1  # keep in step with engine/catalog.py
+
+
+def normalize_time(value):
+    """A timestamp as a comparable instant, or the raw text if it will not parse.
+
+    engine/catalog.py:100-103 documents that these arrive spelled two legal ways:
+    `Z` when a human typed it, `+00:00` from the engine's isoformat(). They are
+    the same instant, and comparing the raw strings blocks a deploy that loses
+    nothing.
+    """
+    if not isinstance(value, str) or not value:
+        return "an unrecorded time"
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(datetime.timezone.utc)
+    return parsed.isoformat()
+
 
 def entries(path):
-    """The identifying set for one file, or None if it cannot be read."""
+    """`(status, value)` for one file.
+
+    Four outcomes rather than one None, because they call for opposite answers
+    and collapsing them is how a guard silently stops guarding:
+
+      ok           — the set of things this file holds
+      unparseable  — not JSON at all. server.js already treats a manifest it
+                     cannot parse as no manifest, so nothing on the box is
+                     serving from it and there is no state left to protect.
+      unreadable   — it may be full of programs; we simply cannot see it. A
+                     permissions error is not evidence of emptiness.
+      unrecognised — parsed, but not a shape this guard understands, including a
+                     schemaVersion it was not written against. The file may hold
+                     everything, and we cannot prove otherwise.
+    """
     try:
         with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return None
+            raw = f.read()
+    except OSError as e:
+        return ("unreadable", f"{type(e).__name__}: {e}")
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return ("unparseable", None)
     if not isinstance(data, dict):
-        return None
+        return ("unrecognised", "the file is not a JSON object")
+
+    version = data.get("schemaVersion")
+    if version is not None and version != SCHEMA_VERSION:
+        return ("unrecognised",
+                f"schemaVersion is {version!r}, and this guard only understands "
+                f"{SCHEMA_VERSION}")
+
     if kind == "catalog":
         programs = data.get("programs")
         if not isinstance(programs, list):
-            return None
+            return ("unrecognised", "`programs` is not a list")
         out = set()
         for p in programs:
             if not isinstance(p, dict):
-                return None
+                return ("unrecognised",
+                        "`programs` holds something that is not an object")
             key = p.get("key")
             if key:
-                out.add(f"{key} (publishable)" if p.get("publishable") else str(key))
-        return out
+                # `is True`, not truthiness: a string "false" would otherwise
+                # read as publishable on one side only and mis-identify.
+                out.add(f"{key} (publishable)" if p.get("publishable") is True
+                        else str(key))
+        return ("ok", out)
+
     listens = data.get("listens")
     if not isinstance(listens, list):
-        return None
+        return ("unrecognised", "`listens` is not a list")
     out = set()
     for entry in listens:
         if not isinstance(entry, dict):
-            return None
+            return ("unrecognised", "`listens` holds something that is not an object")
         program = entry.get("program")
         if program:
-            out.add(f"{program} @ {entry.get('at', 'unknown time')}")
-    return out
+            # The kind of listen is part of the identity. catalog.py treats a
+            # full listen and a spot check as different claims, and #58's
+            # criterion needs one full listen across the catalog — so a full one
+            # quietly replaced by a spot one can take every publishable program
+            # with it.
+            listen = entry.get("listen") or "an unrecorded kind"
+            out.add(f"{program} — {listen} listen @ "
+                    f"{normalize_time(entry.get('at'))}")
+    return ("ok", out)
 
 
-box = entries(box_path)
+def refuse(message):
+    print(f"catalog-state: {message}", file=sys.stderr)
+    sys.exit(1)
 
-# An unparseable file on the box is not state worth protecting: server.js already
-# treats a manifest it cannot read as no manifest at all, so nothing is serving
-# from it. Blocking every future deploy over a file that is already inert is the
-# worse trade — but it is said out loud, because it is also how a half-written
-# file looks.
-if box is None:
-    print(f"catalog-state: the {kind} file on the box could not be read "
-          f"({box_path}) — treating it as empty. Nothing is serving from an "
-          f"unparseable file, so the deploy may proceed, but a pre-render that "
-          f"was interrupted mid-write would look exactly like this.")
+
+box_status, box = entries(box_path)
+
+if box_status == "unreadable":
+    refuse(f"the {kind} file on the box could not be opened ({box_path}): {box}\n"
+           f"It may hold everything this deploy is about to overwrite. Refusing "
+           f"rather than assuming it is empty.")
+
+if box_status == "unrecognised":
+    refuse(f"the {kind} file on the box is not a shape this guard understands "
+           f"({box_path}): {box}\n"
+           f"Refusing, because a file this guard cannot read is a file it cannot "
+           f"prove is safe to overwrite. If the schema changed, update "
+           f"deploy/check-catalog-state.sh alongside engine/catalog.py.")
+
+# The one pass, and narrow on purpose.
+if box_status == "unparseable":
+    print(f"catalog-state: the {kind} file on the box is not valid JSON "
+          f"({box_path}) — nothing is serving from it, so there is nothing to "
+          f"lose. Proceeding. Note that a pre-render interrupted mid-write would "
+          f"look exactly like this.")
     sys.exit(0)
 
 if not box:
     print(f"catalog-state: the {kind} file on the box is empty — nothing to lose")
     sys.exit(0)
 
-repo = entries(repo_path)
+repo_status, repo = entries(repo_path)
 
-# The box demonstrably holds something and this commit cannot be shown to
-# preserve it. Refusing is the only answer that cannot lose data.
-if repo is None:
-    print(f"catalog-state: the box holds {len(box)} {kind} entr"
-          f"{'y' if len(box) == 1 else 'ies'}, and the {kind} file in this "
-          f"commit could not be read ({repo_path}).\n"
-          f"Refusing to deploy: this copy cannot be shown to preserve what the "
-          f"box has.", file=sys.stderr)
-    sys.exit(1)
+count = f"{len(box)} {kind} entr{'y' if len(box) == 1 else 'ies'}"
+if repo_status != "ok":
+    detail = f": {repo}" if repo else ""
+    refuse(f"the box holds {count}, and the {kind} file in this commit is "
+           f"{repo_status} ({repo_path}){detail}.\n"
+           f"Refusing to deploy: this copy cannot be shown to preserve what the "
+           f"box has.")
 
 lost = sorted(box - repo)
 if not lost:
     print(f"catalog-state: this commit carries everything the box has "
-          f"({len(box)} {kind} entr{'y' if len(box) == 1 else 'ies'}) — safe to deploy")
+          f"({count}) — safe to deploy")
     sys.exit(0)
 
 listed = "\n  ".join(lost)
@@ -159,9 +224,9 @@ one = len(lost) == 1
 noun = "program" if kind == "catalog" else "recorded listen"
 filename = "catalog.json" if kind == "catalog" else "catalog-approvals.json"
 
-# What it actually costs, per file. The manifest is rebuildable from masters
-# that are still on disk; a listen is not rebuildable by anything, and saying so
-# is the difference between an operator retrying and an operator bypassing.
+# What it actually costs, per file. The manifest is rebuildable from masters that
+# are still on disk; a listen is not rebuildable by anything, and saying so is the
+# difference between an operator retrying and an operator bypassing the check.
 if kind == "catalog":
     stakes = ("Re-running the pre-render would rebuild this — it skips "
               "combinations whose masters exist — but the storefront quotes "
@@ -169,11 +234,11 @@ if kind == "catalog":
               "either way.")
 else:
     stakes = ("Nothing can regenerate this. `engine/catalog.py` requires a "
-              "recorded human listen before a program is publishable, so "
-              "losing it means listening to those programs again.")
+              "recorded human listen before a program is publishable, so losing "
+              "it means listening to those programs again.")
 
-print(
-    f"catalog-state: this deploy would destroy {len(lost)} {noun}"
+refuse(
+    f"this deploy would destroy {len(lost)} {noun}"
     f"{'' if one else 's'} that exist{'s' if one else ''} only on the box:\n"
     f"  {listed}\n"
     f"\n"
@@ -186,7 +251,5 @@ print(
     f"  3. deploy again\n"
     f"\n"
     f"{stakes}\n"
-    f"See the pre-render loop in DEPLOYMENT.md.",
-    file=sys.stderr)
-sys.exit(1)
-PY
+    f"See the pre-render loop in DEPLOYMENT.md.")
+PYEOF
