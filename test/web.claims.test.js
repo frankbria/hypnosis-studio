@@ -2198,6 +2198,18 @@ test('a signed catalog link is used exactly as the server minted it', () => {
     + 'catalog link in /api/jobs/ and break it');
 });
 
+test('the link refresh cannot become a hot loop', () => {
+  // The re-mint is scheduled off a server value and its result feeds back into
+  // the effect's dependencies, so an unfloored delay is a self-sustaining loop:
+  // a short CATALOG_LINK_TTL_MS makes the wait zero, and the page fetches the
+  // order once per tick for as long as the tab is open.
+  const src = codeOnly(ORDER());
+  assert.match(src, /MIN_LINK_REFRESH_MS/,
+    'the link refresh has no minimum interval');
+  assert.match(src, /Math\.max\(\s*MIN_LINK_REFRESH_MS/,
+    'the refresh delay is not floored, so a short link TTL spins the effect');
+});
+
 test('a catalog order past its window is not told a render completed', () => {
   // Every catalog order reaches this state — it is what 30-day retention means,
   // not an edge case. The "we can't list the files" screen blames a render that

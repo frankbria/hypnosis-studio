@@ -87,6 +87,21 @@ function normalizeOrder(body: Partial<Order>): Order {
 /** Re-mint this long before the links actually expire. */
 const LINK_REFRESH_MARGIN_MS = 60000
 
+/**
+ * Never re-mint faster than this, whatever the box's TTL is.
+ *
+ * Without a floor, a `CATALOG_LINK_TTL_MS` at or below the margin above makes
+ * the delay zero: the timer fires at once, the refresh brings a new expiry, that
+ * changes this effect's dependencies, and it schedules another zero-delay
+ * timer — one fetch and one re-render per tick for as long as the tab is open.
+ *
+ * With a TTL that short the links cannot be kept continuously fresh by anyone,
+ * so the choice is between a briefly stale link and a hot loop against the
+ * server. The stale link is recoverable: the refocus refresh below and a reload
+ * both fix it.
+ */
+const MIN_LINK_REFRESH_MS = 30000
+
 function Shell({
   children,
   onHome,
@@ -199,7 +214,7 @@ export default function OrderPage({
     // and schedules the next one.
     const due = linksExpireAt ? Date.parse(linksExpireAt) : NaN
     const wait = Number.isFinite(due)
-      ? Math.max(0, due - Date.now() - LINK_REFRESH_MARGIN_MS)
+      ? Math.max(MIN_LINK_REFRESH_MS, due - Date.now() - LINK_REFRESH_MARGIN_MS)
       : null
     const timer = wait === null ? null : setTimeout(refresh, wait)
 
