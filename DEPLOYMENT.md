@@ -27,6 +27,56 @@ when a live render coincides with an unreadable health endpoint.
 
 Override for a one-off: `bash deploy/wait-for-idle.sh <url> <timeout-seconds> <poll-seconds>`.
 
+### The clobber gate (`deploy/check-catalog-state.sh`)
+
+Two tracked files under `engine/` are **written on the box, not in the repo**:
+
+| file | written by | why it is also in git |
+|---|---|---|
+| `engine/catalog.json` | `engine/prerender_catalog.py`, run on the box | the web build imports it for the track lengths the storefront quotes (#14, #15) |
+| `engine/catalog-approvals.json` | you, recording that you listened | `engine/catalog.py` reads it to decide `publishable` |
+
+The deploy copies `engine/**` onto the box, so a push whose copies of those two
+files are still empty **resets prod to zero publishable programs** — every
+purchase falls back to a 15–20 minute render over masters already sitting on the
+disk, and `deploy/cut-samples.sh` (which reads the manifest this deploy just
+copied in) stops cutting samples. That happened once, silently, and the deploy
+reported success (#146).
+
+So before the copy, the deploy stages those two files to `/tmp` and refuses to
+proceed if the box holds anything the incoming commit does not. It fails **before**
+the copy rather than restoring after it — by the time a restore runs, the file is
+already gone.
+
+**The pre-render loop, in order.** Do not skip step 4; it is what keeps the repo
+and the box agreeing, and it is the step the gate exists to force:
+
+```bash
+# 1. Render the masters on the box (where the pads and the ElevenLabs key live).
+#    Resumable: a combination whose manifest.json exists is skipped, so a re-run
+#    after an interruption costs minutes, not $20 of TTS.
+ssh prod 'cd /srv/hypnosis-studio/engine &&   venv/bin/python prerender_catalog.py --outdir /srv/hypnosis-studio/renders/catalog'
+
+# 2. Listen. One program end to end, the rest spot-checked at the three phase
+#    boundaries (induction-start, first-suggestion, resurface-start).
+
+# 3. Record the listens by editing engine/catalog-approvals.json IN THE REPO —
+#    catalog.py calls it "a committed approvals file" for this reason. Nothing
+#    is publishable without it.
+
+# 4. Bring the generated manifest back and commit both files.
+scp prod:/srv/hypnosis-studio/engine/catalog.json engine/catalog.json
+git commit -- engine/catalog.json engine/catalog-approvals.json
+
+# 5. Deploy. The gate now passes, because the commit carries what the box has.
+```
+
+The masters themselves never ride the deploy — `renders/` is gitignored and is not
+in the copy's `source:` list, which is why a clobbered manifest costs a re-run
+rather than another $20 of TTS. The reverse gap (a manifest that ships to a box
+whose masters did not) is #139, handled by `server.js` demoting any program whose
+files are not on disk.
+
 - **App:** Node 24 (`/usr/local/bin/node` → `/opt/node-v24.11.1`), systemd unit `hypnosis-studio.service`, env `PORT=4100`, binds loopback only
 - **Edge:** nginx vhost `/etc/nginx/sites-available/hypnosis-studio` → `proxy_pass http://127.0.0.1:4100`
 - **Firewall (UFW):** only 22/80/443 public; the app port stays loopback-only. Shared server — do not touch other vhosts/services.
