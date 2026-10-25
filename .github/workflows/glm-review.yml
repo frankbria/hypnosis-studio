@@ -21,8 +21,10 @@ jobs:
       issues: write
       id-token: write
     secrets:
-      ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+      MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
     with:
+      base_url: https://api.kimi.com/coding/
+      model: k3[1m]
       extra_instructions: |
         Hypnosis Studio: a zero-dependency Node HTTP server (server.js) fronting a
         Python audio render pipeline (engine/), plus a Vite/React SPA (web/).
